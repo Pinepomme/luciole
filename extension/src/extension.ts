@@ -9,7 +9,7 @@ import type { Graph } from "./graph";
 import { webviewHtml } from "./html";
 import { LiveSession } from "./live";
 import type { FromWebview, PausedFrame, PausedThread, StepMode, ToWebview } from "./messages";
-import { RunConfiguration, resolveRun, splitArgs } from "./runs";
+import { RunConfiguration, fileRunKind, pytestRun, resolveRun, splitArgs } from "./runs";
 import { VariablesView } from "./variables";
 
 let panel: GraphPanel | undefined;
@@ -159,9 +159,56 @@ function fileTarget(): string | undefined {
   return document.uri.fsPath;
 }
 
-/** Run a Python file as a script, without arguments. */
-function runFile(context: vscode.ExtensionContext, script: string | undefined): Promise<void> {
-  return script ? startRun(context, { name: path.basename(script), program: script }) : Promise.resolve();
+/**
+ * Run a Python file the way it is meant to run (see fileRunKind): a test file with pytest, a
+ * script as itself, a library module through the tests that import it, else as a script.
+ */
+async function runFile(context: vscode.ExtensionContext, file: string | undefined): Promise<void> {
+  if (!file) {
+    return;
+  }
+  const name = path.basename(file);
+  const open = vscode.workspace.textDocuments.find((document) => document.uri.fsPath === file);
+  const kind = fileRunKind(file, open?.getText() ?? (await fs.promises.readFile(file, "utf8").catch(() => "")));
+  const folder = workspaceFolderOf(file);
+  if (kind === "test") {
+    return startRun(context, pytestRun(`pytest ${name}`, [file], folder));
+  }
+  if (kind === "module") {
+    const tests = await findTests(context, file, folder);
+    if (tests.length) {
+      return startRun(context, pytestRun(`tests for ${name}`, tests, folder));
+    }
+    void vscode.window.showInformationMessage(`Luciole: no test file imports ${name}, so it runs as a script.`);
+  }
+  return startRun(context, { name, program: file });
+}
+
+function workspaceFolderOf(file: string): string {
+  return vscode.workspace.getWorkspaceFolder(vscode.Uri.file(file))?.uri.fsPath ?? path.dirname(file);
+}
+
+/** Test files under `folder` that import `file`'s module (`luciole tests`). */
+function findTests(context: vscode.ExtensionContext, file: string, folder: string): Promise<string[]> {
+  const dir = analyzerDir(context);
+  if (!dir) {
+    return Promise.resolve([]);
+  }
+  const args = ["-m", "luciole", "tests", file, "--root", folder, "--json"];
+  return new Promise((resolve) => {
+    execFile(pythonPath(file), args, { cwd: dir, env: { ...process.env, PYTHONPATH: dir } }, (error, stdout, stderr) => {
+      if (error) {
+        output.appendLine(`could not look for tests: ${stderr || error.message}`);
+        resolve([]);
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout) as string[]);
+      } catch {
+        resolve([]);
+      }
+    });
+  });
 }
 
 /** Run the last run again, else the panel's file, else ask what to run. */
@@ -187,7 +234,20 @@ async function pickRun(context: vscode.ExtensionContext): Promise<void> {
   }
   if (file) {
     picks.push(
-      { label: "$(file) Current file", description: vscode.workspace.asRelativePath(file), choose: async () => ({ name: path.basename(file), program: file }) },
+      { label: "$(file) Current file as a script", description: vscode.workspace.asRelativePath(file), choose: async () => ({ name: path.basename(file), program: file }) },
+      {
+        label: "$(beaker) Tests for the current file",
+        description: "pytest on the test files that import it",
+        choose: async () => {
+          const folder = workspaceFolderOf(file);
+          const tests = await findTests(context, file, folder);
+          if (!tests.length) {
+            void vscode.window.showInformationMessage(`Luciole: no test file imports ${path.basename(file)}.`);
+            return undefined;
+          }
+          return pytestRun(`tests for ${path.basename(file)}`, tests, folder);
+        },
+      },
       {
         label: "$(file) Current file with arguments…",
         description: vscode.workspace.asRelativePath(file),
