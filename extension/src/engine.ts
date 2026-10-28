@@ -13,8 +13,17 @@ import * as path from "path";
 /** The live protocol this extension speaks (PROTOCOL in src/luciole/protocol.py). */
 export const PROTOCOL = 1;
 
+function home(env: NodeJS.ProcessEnv): string {
+  return env.LUCIOLE_HOME || path.join(os.homedir(), ".luciole");
+}
+
 export function engineFile(env: NodeJS.ProcessEnv = process.env): string {
-  return path.join(env.LUCIOLE_HOME || path.join(os.homedir(), ".luciole"), `engine-v${PROTOCOL}.json`);
+  return path.join(home(env), `engine-v${PROTOCOL}.json`);
+}
+
+/** Where a started engine's output goes, to tell why it did not start. */
+export function engineLog(env: NodeJS.ProcessEnv = process.env): string {
+  return path.join(home(env), "engine.log");
 }
 
 /** Port in the engine's file, undefined when there is no (readable) file. */
@@ -52,13 +61,16 @@ export async function ensureEngine(python: string, analyzerDir: string, log: (li
   if (running !== undefined && (await answers(running))) {
     return running;
   }
-  log(`$ ${python} -m luciole engine`);
+  log(`$ ${python} -m luciole engine  (from ${analyzerDir}, output in ${engineLog()})`);
+  fs.mkdirSync(path.dirname(engineLog()), { recursive: true });
+  const output = fs.openSync(engineLog(), "w");
   const child = spawn(python, ["-m", "luciole", "engine"], {
     cwd: analyzerDir,
     env: { ...process.env, PYTHONPATH: analyzerDir },
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", output, output],
   });
+  fs.closeSync(output); // the engine has its own copy
   child.on("error", (error) => log(`could not start the engine: ${error.message}`));
   child.unref();
   for (let waited = 0; waited < 10_000; waited += 100) {
@@ -68,5 +80,11 @@ export async function ensureEngine(python: string, analyzerDir: string, log: (li
       return port;
     }
   }
-  throw new Error(`the Luciole engine did not start (${python} -m luciole engine)`);
+  let said = "";
+  try {
+    said = fs.readFileSync(engineLog(), "utf8").trim().split("\n").slice(-3).join(" / ");
+  } catch {
+    // no output at all
+  }
+  throw new Error(`the Luciole engine did not start (${python} -m luciole engine)${said ? `: ${said}` : ""}`);
 }
