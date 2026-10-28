@@ -4,6 +4,7 @@
     luciole run [options] script.py [args...]     run a program and stream live events
     luciole run [options] -m module [args...]
     luciole env [--port PORT] [--root DIR] [--off]  shell commands that turn auto-start on or off
+    luciole tests FILE [--root DIR] [--json]      test files that import FILE's module
 """
 
 from __future__ import annotations
@@ -45,6 +46,10 @@ def main(argv: list[str] | None = None) -> int:
     env_cmd.add_argument("--root", type=Path, help="project directory: only code inside it is reported (default: each process's working directory)")
     env_cmd.add_argument("--off", action="store_true", help="print the commands that turn it off")
     env_cmd.add_argument("--shell", choices=["sh", "powershell", "cmd"], default="powershell" if os.name == "nt" else "sh")
+    tests_cmd = commands.add_parser("tests", help="list the test files (test_*.py, *_test.py) that import a file's module")
+    tests_cmd.add_argument("file", type=Path, help="Python file")
+    tests_cmd.add_argument("--root", type=Path, default=Path.cwd(), help="project directory to search (default: the current directory)")
+    tests_cmd.add_argument("--json", action="store_true", help="print a JSON list of absolute paths")
     args = parser.parse_args(argv)
 
     logging.basicConfig(format="luciole: %(message)s", level=logging.WARNING)
@@ -52,6 +57,14 @@ def main(argv: list[str] | None = None) -> int:
         if not args.off and not args.port:
             parser.error("env: give the --port of the Luciole view")
         print(env_commands(auto_start_env(args.port, args.root, args.off), args.shell))
+        return 0
+    if args.command == "tests":
+        if not args.file.is_file():
+            parser.error(f"no such file: {args.file}")
+        from luciole.testfinder import tests_for
+
+        found = tests_for(args.file, args.root)
+        print(json.dumps([str(path.resolve()) for path in found]) if args.json else "\n".join(map(str, found)))
         return 0
     if args.command == "run":
         if not args.target:

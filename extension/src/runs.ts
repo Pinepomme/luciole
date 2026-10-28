@@ -56,6 +56,24 @@ export function resolveRun(config: RunConfiguration, variables: RunVariables): R
   return { label: config.name, target: [script, ...args], cwd, env, script };
 }
 
+/**
+ * How ⚡ Run Live runs a file: a test file with pytest, a script (it has an
+ * `if __name__ == "__main__":` block) as itself, and any other module, a library file that is
+ * not meant to run on its own, through the tests that import it.
+ */
+export function fileRunKind(file: string, source: string): "test" | "script" | "module" {
+  const name = path.basename(file);
+  if (/^test_.*\.py$/.test(name) || /_test\.py$/.test(name)) {
+    return "test";
+  }
+  return /^if\s+__name__\s*==\s*(['"])__main__\1\s*:/m.test(source) ? "script" : "module";
+}
+
+/** pytest on `tests` (absolute paths), shown relative to the workspace folder. */
+export function pytestRun(name: string, tests: string[], workspaceFolder: string): RunConfiguration {
+  return { name, module: "pytest", args: tests.map((test) => path.relative(workspaceFolder, test) || test) };
+}
+
 /** `${workspaceFolder}` and `${file}`, as in VS Code's launch.json. */
 export function substituteVariables(text: string, variables: RunVariables): string {
   return text.replace(/\$\{(workspaceFolder|file)\}/g, (match, name: keyof RunVariables) => variables[name] ?? match);

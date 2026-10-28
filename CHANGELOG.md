@@ -6,6 +6,8 @@
   Python program started in a new VS Code terminal lights up the view, child processes included
   (forked ones too). Nothing is started when the view is not listening. `luciole env` does the
   same for any shell, and `luciole.start()` / `luciole.stop()` from inside a program.
+- Run Live on a library module (no `if __name__ == "__main__":`) runs the test files that import
+  it with pytest, and on a test file runs pytest on it. `luciole tests FILE` lists those tests.
 - The view shows several processes at once; Pause and Stop apply to all of them.
 - The recorder uses a `sys.monitoring` tool id of its own, so `cProfile`, coverage and debuggers
   keep working with it.

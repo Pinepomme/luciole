@@ -8,7 +8,9 @@ the functions light up as they run.
 ## Use
 
 - **Run Live** (⚡ in the title bar of a Python editor) runs the file in a terminal and lights up
-  the brain: functions on the current call path glow, functions that just ran flash and fade,
+  the brain. A test file runs with pytest; a script (it has `if __name__ == "__main__":`) runs as
+  itself; any other module, which is not meant to run on its own, runs through the test files that
+  import it. In the brain: functions on the current call path glow, functions that just ran flash and fade,
   pulses travel along the lines as calls happen. The bar at the bottom shows what is running now.
   Functions that ran stay softly lit afterwards. Calls the static analysis missed appear as
   orange lines.
@@ -46,7 +48,8 @@ the functions light up as they run.
 The graph refreshes when you save a Python file.
 
 To run something other than the current file, use **Luciole: Run Live…** (the panel's **Run…**
-button, or the editor title bar's menu): the current file with arguments, a module such as
+button, or the editor title bar's menu): the current file as a script or with arguments, the tests
+for the current file, a module such as
 `pytest -x tests`, or one of your run configurations. The panel's **Run live** button repeats the
 last run. Run configurations go in `settings.json`:
 
