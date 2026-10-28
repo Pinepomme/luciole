@@ -203,27 +203,59 @@ Every 50 ms the recorder sends one JSON line, to the port and/or the file:
 - `waiting`: project coroutines suspended on an `await` right now, per function. A coroutine
   awaiting another one counts too (`main` waiting on `crawl` waiting on `download`).
 
-A line is only sent when something changed. The last line is `{"done": true}`. The view also
-gets, first, the process it is watching (not the `--events` file):
-`{"process": {"pid": 4242, "argv": ["python", "-m", "pytest"]}}`.
+A line is only sent when something changed. The last line is `{"done": true}`.
+
+### The engine
+
+`luciole engine` ([`src/luciole/engine.py`](../src/luciole/engine.py)) is the one local process
+that recording Python processes connect to and viewers (the VS Code extension; later agents and
+other editors) subscribe to. The extension starts it when none runs; it exits after 10 minutes
+with nobody connected. It writes its port to `~/.luciole/engine-v1.json` (`LUCIOLE_HOME` moves
+the folder), where recorders and viewers find it; `--port` or `LUCIOLE_LIVE_PORT` name one
+explicitly.
+
+Every connection starts with a hello, answered before anything else
+([`src/luciole/protocol.py`](../src/luciole/protocol.py)):
+
+```json
+{"hello": {"role": "recorder", "protocol": 1, "version": "0.1.0", "pid": 4242,
+           "argv": ["python", "-m", "pytest"], "root": "/work/app"}}
+{"hello": {"role": "viewer", "protocol": 1, "version": "0.1.0", "name": "vscode", "roots": ["/work/app"]}}
+{"welcome": {"protocol": 1, "version": "0.1.0"}}
+{"refused": "this engine speaks protocol 1 (Luciole 0.1.0), not 2"}
+```
+
+`protocol` changes when a message changes meaning; the engine's file is per protocol, so engines
+of two protocols can run side by side. The engine numbers each recorder and tells the viewers that
+show its project (one's root contains the other's; a viewer without roots shows all) about it, then
+passes on everything it sends with its number:
+
+```json
+{"process": {"id": 3, "pid": 4242, "argv": ["python", "-m", "pytest"], "root": "/work/app"}}
+{"from": 3, "t": 1.25, "stacks": [...], "calls": {...}}
+{"exit": 3}
+```
+
+Viewers' commands (below) go to one recorder with `"to": 3`, or to every recorder the viewer shows
+without it. When the last viewer leaves, the engine resumes paused programs.
 
 ### Starting the recorder
 
-- `luciole run`, as above.
+- `luciole run`, as above. Without `--port`, it reports to the running engine, if any.
 - `luciole.start(root=None, port=None, events=None)` and `luciole.stop()`, from the program
   itself (a server, a notebook). `root` defaults to `LUCIOLE_ROOT`, else the working directory, and
-  `port` to `LUCIOLE_LIVE_PORT`. Nothing is recorded, and `start` returns `False`, when nothing
-  would see the events: no view listens and there is no events file.
+  `port` to the running engine's. Nothing is recorded, and `start` returns `False`, when nothing
+  would see the events: no engine runs and there is no events file.
 - Auto-start: with the folder `luciole/_autostart` on `PYTHONPATH`, its `sitecustomize.py` starts
-  the recorder in any Python process whose `LUCIOLE_LIVE_PORT` reaches a listening view, and does
-  nothing otherwise (not even importing the recorder). Child processes inherit the environment;
-  forked children connect again as processes of their own. The VS Code switch ("Luciole: on" in
-  the status bar, setting `luciole.autoStart`) sets these variables in new terminals;
-  `luciole env --port PORT` prints them for a shell (`--off` to undo). The `sitecustomize` it
-  hides still runs, and `luciole run` processes are left to their own recorder.
+  the recorder in any Python process when the engine runs, and does nothing otherwise (not even
+  importing the recorder). Child processes inherit the environment; forked children connect again
+  as processes of their own. The VS Code switch ("Luciole: on" in the status bar, setting
+  `luciole.autoStart`) sets `PYTHONPATH` and `LUCIOLE_ROOT` in new terminals; `luciole env` prints
+  them for a shell (`--off` to undo). The `sitecustomize` it hides still runs, and `luciole run`
+  processes are left to their own recorder.
 
-Every connection is one process; the view lights up all of them at once. The recorder uses
-`sys.monitoring` tool id 4 (or 3): the debugger, coverage and profiler ids stay free.
+The recorder uses `sys.monitoring` tool id 4 (or 3): the debugger, coverage and profiler ids stay
+free.
 
 The recorder sends aggregates rather than one event per call. That keeps the stream small however
 fast the program runs (pytest makes about 30,000 calls per second through it), which is all the
@@ -236,7 +268,7 @@ threads' frames: `sys._current_frames()` breaks `torch.export` tracing.
 
 ### Pausing and variables
 
-The socket also carries commands from the view to the recorder, one JSON object per line:
+The connection also carries commands from viewers to the recorder, one JSON object per line:
 `{"cmd": "pause"}`, `{"cmd": "resume"}`, `{"cmd": "expand", "ref": 7}` and
 `{"cmd": "step", "thread": 1401, "mode": "over"}` (`mode`: `over`, `into` or `out`). On pause, the
 recorder turns on `LINE` events and each thread stops at its next line of project code. It sends

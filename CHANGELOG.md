@@ -8,6 +8,11 @@
   same for any shell, and `luciole.start()` / `luciole.stop()` from inside a program.
 - Run Live on a library module (no `if __name__ == "__main__":`) runs the test files that import
   it with pytest, and on a test file runs pytest on it. `luciole tests FILE` lists those tests.
+- The Luciole engine (`luciole engine`): one local process that recording programs connect to and
+  views subscribe to, started by the extension when none runs and found through
+  `~/.luciole/engine-v1.json`. Every connection starts with a handshake that checks the protocol
+  version. Each VS Code window sees the programs of its own folders. `luciole run` and
+  `luciole env` no longer need a port.
 - The view shows several processes at once; Pause and Stop apply to all of them.
 - The recorder uses a `sys.monitoring` tool id of its own, so `cProfile`, coverage and debuggers
   keep working with it.

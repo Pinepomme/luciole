@@ -71,10 +71,10 @@ caller→callee links seen at runtime are missing from the static graph (imports
   `LUCIOLE_*` set, so terminal runs, test runners and child processes light up unchanged.
   `os.register_at_fork` covers forked children. This is also the multi-process support. Turned on
   and off by a status bar switch in VS Code (new terminals) or `luciole env` in a shell.
-- `luciole engine`: a local process that recorders connect to (each labelled with its process id
-  and command line) and that viewers subscribe to. The VS Code extension becomes one viewer, and
+- [x] `luciole engine`: a local process that recorders connect to (each labelled with its process
+  id and command line) and that viewers subscribe to. The VS Code extension becomes one viewer, and
   starts the engine when none is running.
-- A protocol handshake: recorder, engine and viewers state the protocol version they speak.
+- [x] A protocol handshake: recorder, engine and viewers state the protocol version they speak.
 - [x] Run Live → tests for this file: most files of a library are not meant to run on their own, so
   find the test files that import the current module and run pytest on them (`luciole tests`).
 

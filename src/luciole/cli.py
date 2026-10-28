@@ -3,6 +3,7 @@
     luciole graph <path> [--json] [-o FILE]       static graph of a file or project
     luciole run [options] script.py [args...]     run a program and stream live events
     luciole run [options] -m module [args...]
+    luciole engine [--port PORT] [--idle SECONDS]  the local process recorders and viewers connect to
     luciole env [--port PORT] [--root DIR] [--off]  shell commands that turn auto-start on or off
     luciole tests FILE [--root DIR] [--json]      test files that import FILE's module
 """
@@ -20,6 +21,7 @@ from pathlib import Path
 
 from luciole import __version__
 from luciole.analyzer import build_graph
+from luciole.protocol import engine_port
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,20 +34,23 @@ def main(argv: list[str] | None = None) -> int:
     graph_cmd.add_argument("-o", "--output", type=Path, help="write the graph JSON to this file")
     run_cmd = commands.add_parser("run", help="run a Python program and stream which functions run (Python 3.12+)")
     run_cmd.add_argument("--root", type=Path, default=Path.cwd(), help="project directory: only code inside it is reported")
-    run_cmd.add_argument("--port", type=int, default=os.environ.get("LUCIOLE_LIVE_PORT"), help="send events to the Luciole view on this port")
+    run_cmd.add_argument("--port", type=int, default=os.environ.get("LUCIOLE_LIVE_PORT"), help="engine port (default: the running engine's, if any)")
     run_cmd.add_argument("--events", type=Path, help="also write events to this JSON Lines file")
     run_cmd.add_argument("-m", dest="as_module", action="store_true", help="run a module, like python -m")
     run_cmd.add_argument("target", nargs=argparse.REMAINDER, help="script (or module) and its arguments")
     env_cmd = commands.add_parser(
         "env",
         help="print shell commands that make every Python process started from this shell light up the view",
-        description='Turn on: eval "$(luciole env --port PORT)". Turn off: eval "$(luciole env --off)". '
-        "PowerShell: luciole env --port PORT | Invoke-Expression.",
+        description='Turn on: eval "$(luciole env)". Turn off: eval "$(luciole env --off)". '
+        "PowerShell: luciole env | Invoke-Expression. Programs report to the running engine, found when they start.",
     )
-    env_cmd.add_argument("--port", type=int, default=os.environ.get("LUCIOLE_LIVE_PORT"), help="port of the Luciole view")
+    env_cmd.add_argument("--port", type=int, help="report to the engine on this port rather than the running engine")
     env_cmd.add_argument("--root", type=Path, help="project directory: only code inside it is reported (default: each process's working directory)")
     env_cmd.add_argument("--off", action="store_true", help="print the commands that turn it off")
     env_cmd.add_argument("--shell", choices=["sh", "powershell", "cmd"], default="powershell" if os.name == "nt" else "sh")
+    engine_cmd = commands.add_parser("engine", help="run the engine that recorders connect to and viewers subscribe to")
+    engine_cmd.add_argument("--port", type=int, default=0, help="port to listen on (default: any free port)")
+    engine_cmd.add_argument("--idle", type=float, default=600, help="exit after this many seconds with nobody connected (0: never)")
     tests_cmd = commands.add_parser("tests", help="list the test files (test_*.py, *_test.py) that import a file's module")
     tests_cmd.add_argument("file", type=Path, help="Python file")
     tests_cmd.add_argument("--root", type=Path, default=Path.cwd(), help="project directory to search (default: the current directory)")
@@ -54,10 +59,14 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(format="luciole: %(message)s", level=logging.WARNING)
     if args.command == "env":
-        if not args.off and not args.port:
-            parser.error("env: give the --port of the Luciole view")
+        if not args.off and not args.port and not engine_port():
+            print("luciole: no engine is running yet: programs light up once one runs (open the Luciole view in VS Code, or run `luciole engine`)", file=sys.stderr)
         print(env_commands(auto_start_env(args.port, args.root, args.off), args.shell))
         return 0
+    if args.command == "engine":
+        from luciole.engine import serve
+
+        return serve(args.port, args.idle)
     if args.command == "tests":
         if not args.file.is_file():
             parser.error(f"no such file: {args.file}")
@@ -98,7 +107,7 @@ def auto_start_env(port: int | None, root: Path | None, off: bool) -> dict[str, 
         return {"PYTHONPATH": os.pathsep.join(entries) or None, "LUCIOLE_LIVE_PORT": None, "LUCIOLE_ROOT": None}
     return {
         "PYTHONPATH": os.pathsep.join([str(AUTO_START_DIR), *entries]),
-        "LUCIOLE_LIVE_PORT": str(port),
+        "LUCIOLE_LIVE_PORT": str(port) if port else None,
         "LUCIOLE_ROOT": str(root.resolve()) if root else None,
     }
 

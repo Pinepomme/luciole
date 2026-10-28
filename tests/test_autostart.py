@@ -7,49 +7,58 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 
 import pytest
 
 from graphcheck import REPO
+from luciole import protocol
 from luciole.cli import AUTO_START_DIR, auto_start_env, env_commands
+from luciole.engine import Engine
 
 pytestmark = pytest.mark.skipif(sys.version_info < (3, 12), reason="sys.monitoring needs Python 3.12")
 
 
 class View:
-    """Stands in for the extension: accepts recorders, keeps each connection's messages."""
+    """A real engine, and a viewer connected to it that keeps each process's messages."""
 
-    def __init__(self):
-        self.server = socket.create_server(("127.0.0.1", 0))
-        self.port = self.server.getsockname()[1]
-        self.connections: list[list[dict]] = []
-        self.readers: list[threading.Thread] = []
-        threading.Thread(target=self.accept, daemon=True).start()
+    def __init__(self, roots=()):
+        self.engine = Engine(idle=0)
+        self.port = self.engine.port
+        threading.Thread(target=self.engine.serve, daemon=True).start()
+        deadline = time.monotonic() + 10
+        while protocol.engine_port() != self.port and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.connection = socket.create_connection(("127.0.0.1", self.port))
+        protocol.send(self.connection, protocol.hello("viewer", name="test", roots=[str(root) for root in roots]))
+        self.welcome = None
+        self.infos: dict[int, dict] = {}
+        self.messages: dict[int, list[dict]] = {}
+        self.exited: set[int] = set()
+        threading.Thread(target=self.read, daemon=True).start()
 
-    def accept(self):
-        while True:
-            try:
-                connection, _ = self.server.accept()
-            except OSError:
-                return
-            messages = []
-            self.connections.append(messages)
-            reader = threading.Thread(target=self.read, args=(connection, messages), daemon=True)
-            reader.start()
-            self.readers.append(reader)
-
-    @staticmethod
-    def read(connection, messages):
-        with connection, connection.makefile(encoding="utf-8") as lines:
+    def read(self):
+        with self.connection.makefile(encoding="utf-8") as lines:
             for line in lines:
-                messages.append(json.loads(line))
+                message = json.loads(line)
+                if "welcome" in message:
+                    self.welcome = message["welcome"]
+                elif "process" in message:
+                    self.infos[message["process"]["id"]] = message["process"]
+                    self.messages.setdefault(message["process"]["id"], [])
+                elif "exit" in message:
+                    self.exited.add(message["exit"])
+                else:
+                    self.messages.setdefault(message.pop("from"), []).append(message)
 
     def processes(self):
-        """Messages of each connection that reported calls, once every connection closed."""
-        for reader in self.readers:
-            reader.join(timeout=20)
-        self.server.close()
-        return [messages for messages in self.connections if calls(messages)]
+        """Info and messages of each process that reported calls, once every process left."""
+        deadline = time.monotonic() + 20
+        while set(self.infos) - self.exited and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.engine.stop()
+        self.connection.close()
+        return [{"info": self.infos[id], "messages": messages} for id, messages in self.messages.items() if calls(messages)]
 
 
 def calls(messages):
@@ -62,7 +71,7 @@ def calls(messages):
 
 def python(tmp_path, source, *args, port=None, extra_path=(), **env):
     (tmp_path / "prog.py").write_text(textwrap.dedent(source))
-    environ = {key: value for key, value in os.environ.items() if not key.startswith("LUCIOLE_")}
+    environ = {key: value for key, value in os.environ.items() if not key.startswith("LUCIOLE_") or key == "LUCIOLE_HOME"}
     environ["PYTHONPATH"] = os.pathsep.join([str(AUTO_START_DIR), *map(str, extra_path)])
     environ["LUCIOLE_ROOT"] = str(tmp_path)
     if port:
@@ -88,6 +97,12 @@ def test_off_without_a_port(tmp_path):
     assert "recorder loaded: False" in result.stdout
 
 
+def test_nothing_starts_without_an_engine(tmp_path):
+    result = python(tmp_path, PROGRAM, "prog.py")
+    assert result.returncode == 0 and result.stderr == ""
+    assert "recorder loaded: False" in result.stdout
+
+
 def test_nothing_starts_when_nothing_listens(tmp_path):
     with socket.create_server(("127.0.0.1", 0)) as server:
         closed_port = server.getsockname()[1]
@@ -100,10 +115,19 @@ def test_reports_to_the_view(tmp_path):
     view = View()
     result = python(tmp_path, PROGRAM, "prog.py", port=view.port)
     assert result.returncode == 0 and result.stderr == ""
-    [messages] = view.processes()
-    assert messages[0]["process"]["pid"] > 0 and messages[0]["process"]["argv"][-1] == "prog.py"
-    assert calls(messages) == {"prog": 1, "prog:work": 1}
-    assert messages[-1] == {"done": True}
+    [process] = view.processes()
+    assert view.welcome["protocol"] == protocol.PROTOCOL
+    assert process["info"]["pid"] > 0 and process["info"]["argv"][-1] == "prog.py"
+    assert process["info"]["root"] == str(tmp_path.resolve())
+    assert calls(process["messages"]) == {"prog": 1, "prog:work": 1}
+    assert process["messages"][-1] == {"done": True}
+
+
+def test_finds_the_engine_without_a_port(tmp_path):
+    view = View()
+    result = python(tmp_path, PROGRAM, "prog.py")  # LUCIOLE_HOME holds the engine's file
+    assert result.returncode == 0 and "recorder loaded: True" in result.stdout
+    assert [calls(process["messages"]) for process in view.processes()] == [{"prog": 1, "prog:work": 1}]
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="no fork")
@@ -128,9 +152,8 @@ def test_forked_children_report_as_their_own_process(tmp_path):
     assert result.returncode == 0, result.stderr
     processes = view.processes()
     assert len(processes) == 2
-    pids = {messages[0]["process"]["pid"] for messages in processes}
-    assert len(pids) == 2
-    by_function = {name: messages[0]["process"]["pid"] for messages in processes for name in calls(messages)}
+    assert len({process["info"]["pid"] for process in processes}) == 2
+    by_function = {name: process["info"]["pid"] for process in processes for name in calls(process["messages"])}
     assert by_function["prog:in_child"] != by_function["prog:in_parent"]
 
 
@@ -143,7 +166,7 @@ def test_child_processes_inherit_it(tmp_path):
         subprocess.run([sys.executable, "child.py"], check=True)
     """, "prog.py", port=view.port)
     assert result.returncode == 0, result.stderr
-    assert any("child:in_child" in calls(messages) for messages in view.processes())
+    assert any("child:in_child" in calls(process["messages"]) for process in view.processes())
 
 
 def test_the_hidden_sitecustomize_still_runs(tmp_path):
@@ -170,7 +193,7 @@ def test_profilers_keep_working(tmp_path):
     result = python(tmp_path, PROGRAM, "-m", "cProfile", "prog.py", port=view.port)
     assert result.returncode == 0, result.stderr
     assert "function calls" in result.stdout
-    assert any("prog:work" in calls(messages) for messages in view.processes())
+    assert any("prog:work" in calls(process["messages"]) for process in view.processes())
 
 
 def test_luciole_run_takes_over(tmp_path):
@@ -178,8 +201,8 @@ def test_luciole_run_takes_over(tmp_path):
     env = {"PYTHONPATH": os.pathsep.join([str(AUTO_START_DIR), str(REPO / "src")])}
     result = python(tmp_path, PROGRAM, "-m", "luciole", "run", "--root", str(tmp_path), "--port", str(view.port), "prog.py", port=view.port, **env)
     assert result.returncode == 0, result.stderr
-    [messages] = view.processes()  # the auto-started session stopped before reporting anything
-    assert calls(messages) == {"prog": 1, "prog:work": 1}
+    [process] = view.processes()  # auto-start leaves luciole run to its own recorder
+    assert calls(process["messages"]) == {"prog": 1, "prog:work": 1}
 
 
 def test_start_and_stop_from_code(tmp_path):
@@ -208,6 +231,7 @@ def test_start_and_stop_from_code(tmp_path):
 
 def test_env_commands(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", "/somewhere")
+    assert auto_start_env(None, None, off=False)["LUCIOLE_LIVE_PORT"] is None  # found when programs start
     on = auto_start_env(5000, tmp_path, off=False)
     assert on["PYTHONPATH"] == os.pathsep.join([str(AUTO_START_DIR), "/somewhere"])
     assert on["LUCIOLE_LIVE_PORT"] == "5000" and on["LUCIOLE_ROOT"] == str(tmp_path.resolve())

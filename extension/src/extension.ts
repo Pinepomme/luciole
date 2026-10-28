@@ -54,6 +54,11 @@ export function activate(context: vscode.ExtensionContext): void {
       },
     },
     output,
+    {
+      python: () => pythonPath(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd()),
+      analyzerDir: () => analyzerDir(context),
+      version: String(context.extension.packageJSON.version),
+    },
   );
   autoStartItem = vscode.window.createStatusBarItem("luciole.autoStart", vscode.StatusBarAlignment.Left);
   autoStartItem.name = "Luciole Auto-Start";
@@ -104,14 +109,14 @@ export function activate(context: vscode.ExtensionContext): void {
 /**
  * Auto-start: Python programs started in VS Code's terminals light up the view, with no change to
  * how they are run. The switch only sets environment variables for new terminals: the auto-start
- * folder on PYTHONPATH, whose sitecustomize starts the recorder when the view listens on
- * LUCIOLE_LIVE_PORT. Off, nothing is set. Terminals already open keep what they had (VS Code
- * flags them as stale).
+ * folder on PYTHONPATH, whose sitecustomize starts the recorder when the engine runs (found through
+ * its file), and the project root. Off, nothing is set. Terminals already open keep what they had
+ * (VS Code flags them as stale).
  */
 async function applyAutoStart(context: vscode.ExtensionContext): Promise<void> {
   const on = vscode.workspace.getConfiguration("luciole").get<boolean>("autoStart", false);
   const env = context.environmentVariableCollection;
-  env.persistent = false; // the port changes with every window
+  env.persistent = false; // the extension's folder changes with its version
   env.clear();
   const folders = vscode.workspace.workspaceFolders ?? [];
   for (const folder of folders) {
@@ -123,7 +128,7 @@ async function applyAutoStart(context: vscode.ExtensionContext): Promise<void> {
     // Prepended, so that PYTHONPATH set elsewhere (Run Live, the user's) stays; when PYTHONPATH is
     // empty, the auto-start folder drops the empty entry this leaves.
     env.prepend("PYTHONPATH", path.join(dir, "luciole", "_autostart") + path.delimiter);
-    env.replace("LUCIOLE_LIVE_PORT", String(await live.listen()));
+    void live.connect().catch((error) => output.appendLine(`Luciole engine: ${error}`)); // programs find it as they start
     for (const folder of folders) {
       env.getScoped({ workspaceFolder: folder }).replace("LUCIOLE_ROOT", folder.uri.fsPath);
     }
