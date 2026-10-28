@@ -47,6 +47,23 @@ export interface Brain {
 /** A variable shared by more writer × reader pairs than this is too generic to draw. */
 export const MAX_STATE_PAIRS = 64;
 
+/**
+ * The innermost neuron whose code holds `line` of `file` (a path relative to the graph's root):
+ * a function, else its module. Where the debugger stopped, or where a breakpoint is.
+ */
+export function neuronAt(neurons: Neuron[], file: string, line: number): Neuron | undefined {
+  const span = (neuron: Neuron) => (neuron.node.kind === "module" ? Infinity : neuron.node.loc.end_line - neuron.node.loc.line);
+  let best: Neuron | undefined;
+  for (const neuron of neurons) {
+    const { node } = neuron;
+    const inside = node.kind === "module" || (node.loc.line <= line && line <= node.loc.end_line);
+    if (node.file === file && inside && (!best || span(neuron) < span(best))) {
+      best = neuron;
+    }
+  }
+  return best;
+}
+
 export function synapseId(kind: SynapseKind, source: string, target: string): string {
   return `${kind}|${source}>${target}`;
 }

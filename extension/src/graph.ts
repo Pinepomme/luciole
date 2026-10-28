@@ -21,6 +21,8 @@ export interface GraphNode {
   role?: Role;
   param_index?: number;
   is_async?: boolean;
+  /** Functions: first line that runs on each call, where a breakpoint stops every call. */
+  body_line?: number;
   decorators?: string[];
   bases?: string[];
 }

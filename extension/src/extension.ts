@@ -5,6 +5,7 @@ import { randomBytes } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
+import { registerDebugging, sourceBreakpoints, toggleBreakpoint } from "./debugging";
 import type { Graph } from "./graph";
 import { webviewHtml } from "./html";
 import { LiveSession } from "./live";
@@ -90,6 +91,20 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => applyAutoStart(context)),
+    ...registerDebugging({
+      autoStartEnv: async (folder) => {
+        const dir = analyzerDir(context);
+        if (!dir || !vscode.workspace.getConfiguration("luciole").get<boolean>("autoStart", false)) {
+          return undefined;
+        }
+        await live.connect().catch((error) => output.appendLine(`Luciole engine: ${error}`));
+        const root = folder?.uri.fsPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        return { PYTHONPATH: path.join(dir, "luciole", "_autostart"), ...(root ? { LUCIOLE_ROOT: root } : {}) };
+      },
+      stopped: (file, line) => panel?.debugStopped(file, line),
+      continued: () => panel?.post({ type: "debugStopped", at: undefined }),
+    }),
+    vscode.debug.onDidChangeBreakpoints(() => panel?.postBreakpoints()),
     // A file graph follows the editor: switching to another Python file shows that file's graph.
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       const document = editor?.document;
@@ -416,6 +431,27 @@ class GraphPanel {
   }
 
   /** True when this panel shows a folder graph that includes `file`. */
+  /** `file` relative to the graph's root, as the graph writes it; undefined outside it. */
+  private relative(file: string): string | undefined {
+    const relative = this.root ? path.relative(this.root, file) : "..";
+    return relative.startsWith("..") || path.isAbsolute(relative) ? undefined : relative.split(path.sep).join("/");
+  }
+
+  /** VS Code's breakpoints in this graph's files, for the brain to mark their functions. */
+  postBreakpoints(): void {
+    const breakpoints = sourceBreakpoints().flatMap(({ file, line }) => {
+      const relative = this.relative(file);
+      return relative ? [{ file: relative, line }] : [];
+    });
+    this.post({ type: "breakpoints", breakpoints });
+  }
+
+  /** The debugger stopped at `line` of `file`: show its function, if it is in this graph. */
+  debugStopped(file: string, line: number): void {
+    const relative = this.relative(file);
+    this.post({ type: "debugStopped", at: relative ? { file: relative, line } : undefined });
+  }
+
   covers(file: string): boolean {
     const relative = path.relative(this.target, file);
     return !this.target.endsWith(".py") && relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
@@ -450,6 +486,8 @@ class GraphPanel {
       live.pause(message.paused);
     } else if (message.type === "step") {
       step(message.mode);
+    } else if (message.type === "toggleBreakpoint" && this.root) {
+      toggleBreakpoint(path.resolve(this.root, message.file), message.line);
     } else if (message.type === "reveal" && this.root) {
       const position = new vscode.Position(message.line - 1, message.col);
       void vscode.window.showTextDocument(vscode.Uri.file(path.resolve(this.root, message.file)), {
@@ -473,6 +511,7 @@ class GraphPanel {
       } else {
         this.root = result.graph.root;
         this.post({ type: "graph", target: this.target, graph: result.graph, warnings: result.warnings });
+        this.postBreakpoints();
       }
     });
   }

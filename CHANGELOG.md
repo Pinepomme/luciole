@@ -13,6 +13,9 @@
   `~/.luciole/engine-v1.json`. Every connection starts with a handshake that checks the protocol
   version. Each VS Code window sees the programs of its own folders. `luciole run` and
   `luciole env` no longer need a port.
+- Debugging: the brain follows VS Code's Python debugger (the function it stopped in glows red),
+  right-click a neuron to stop on each call of its function, and with auto-start on, debugged
+  programs light up too. Function nodes gain `body_line`, the first line each call runs.
 - The view shows several processes at once; Pause and Stop apply to all of them.
 - The recorder uses a `sys.monitoring` tool id of its own, so `cProfile`, coverage and debuggers
   keep working with it.

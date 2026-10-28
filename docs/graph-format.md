@@ -62,7 +62,7 @@ separators), and `loc`.
 |---|---|---|---|
 | `module` | `null` | — | whole file |
 | `class` | module, class or function | `bases`, `decorators` (source text) | `class` statement, without decorators |
-| `function` | module, class or function | `is_async`, `decorators` (source text) | `def` statement, without decorators |
+| `function` | module, class or function | `body_line`, `is_async`, `decorators` (source text) | `def` statement, without decorators |
 | `variable` | module, class or function | `role`, and `param_index` when `role` is `param` | first binding |
 
 Variable roles:
