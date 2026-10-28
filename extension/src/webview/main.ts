@@ -238,7 +238,8 @@ function neuronTooltip(neuron: Neuron): string {
 }
 
 function synapseTooltip(synapse: Synapse): string {
-  const title = { call: "calls", state: "shared state", runtime: "call seen at runtime", spawn: "starts a thread or task" }[synapse.kind];
+  const callTitle = synapse.byName ? "probably calls (matched by method name)" : "calls";
+  const title = { call: callTitle, state: "shared state", runtime: "call seen at runtime", spawn: "starts a thread or task" }[synapse.kind];
   const variables = synapse.variables.map((v) => escape(v)).join("<br>");
   return `<span class="dim">${title}</span>${variables ? `<br>${variables}` : ""}`;
 }

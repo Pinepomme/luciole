@@ -8,6 +8,7 @@ again, resolves names against those bindings, and records the edges.
 from __future__ import annotations
 
 import ast
+import io
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +21,21 @@ SKIP_DIRS = {"__pycache__", "node_modules", "site-packages", "venv"}
 FUNCTION_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef)
 COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 VARIABLE_ROLE = {"module": "global", "class": "class_attr", "function": "local"}
+PROPERTY_DECORATORS = {"property", "cached_property", "abstractproperty"}
+MAX_OVERRIDES = 30  # override edges per call, so a call on a base of a big hierarchy stays readable
+# Operators and builtins that call a special method of their operand.
+BINARY_DUNDERS = {
+    ast.Add: "__add__", ast.Sub: "__sub__", ast.Mult: "__mul__", ast.MatMult: "__matmul__", ast.Div: "__truediv__",
+    ast.FloorDiv: "__floordiv__", ast.Mod: "__mod__", ast.Pow: "__pow__", ast.BitOr: "__or__", ast.BitAnd: "__and__",
+    ast.BitXor: "__xor__", ast.LShift: "__lshift__", ast.RShift: "__rshift__",
+}
+COMPARE_DUNDERS = {ast.Eq: "__eq__", ast.NotEq: "__ne__", ast.Lt: "__lt__", ast.LtE: "__le__", ast.Gt: "__gt__", ast.GtE: "__ge__"}
+# Method names of built-in types: `x.split()` on an unknown `x` is a str's far more often than the
+# project's only `split`, so these names are never matched by name alone.
+BUILTIN_METHOD_NAMES = {
+    name for kind in (object, str, bytes, bytearray, int, float, list, tuple, dict, set, frozenset, io.TextIOWrapper, io.BytesIO) for name in dir(kind)
+}
+BUILTIN_DUNDERS = {"len": "__len__", "str": "__str__", "repr": "__repr__", "iter": "__iter__", "next": "__next__", "bool": "__bool__", "hash": "__hash__", "format": "__format__", "abs": "__abs__"}
 
 
 @dataclass(frozen=True)
@@ -54,8 +70,9 @@ class Scope:
     global_names: set[str] = field(default_factory=set)
     nonlocal_names: set[str] = field(default_factory=set)
     children: list[Scope] = field(default_factory=list)
-    # Modules only: the package that relative imports start from.
+    # Modules only: the package that relative imports start from, and `from m import *` modules.
     package: str = ""
+    star_imports: list[str] = field(default_factory=list)
     # Classes only: `self.<name>` attributes assigned in methods.
     attrs: dict[str, str] = field(default_factory=dict)
     # Functions only.
@@ -110,6 +127,11 @@ def scope_walk(nodes: list[ast.AST]):
             stack.extend(reversed(list(ast.iter_child_nodes(node))))
 
 
+def is_super(node: ast.expr) -> bool:
+    """`super()` or `super(Class, self)`."""
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "super"
+
+
 def is_overload(node: ast.AST) -> bool:
     """`@typing.overload` stubs only exist for type checkers; they are left out of the graph."""
     return isinstance(node, FUNCTION_DEFS) and any(
@@ -147,6 +169,11 @@ class Analyzer:
         self.var_types: dict[str, str] = {}  # variable id -> id of the class of its value
         self.self_vars: set[str] = set()
         self.bases: dict[str, list[str]] = {}
+        self.subclasses: dict[str, list[str]] | None = None  # class id -> direct subclasses, built on first use
+        self.return_types: dict[str, str | None] = {}  # function id -> class of what it returns
+        self.aliases: dict[str, str] = {}  # variable id -> function it holds (`parse = staticmethod(parse_header)`)
+        self.method_names: dict[str, list[str]] | None = None  # method name -> functions defined in classes
+        self.by_name: set[tuple[str, str, str]] = set()  # edges resolved by method name alone
 
     # Nodes and edges
 
@@ -161,10 +188,28 @@ class Analyzer:
     def add_variable(self, scope: Scope, name: str, role: str, node: ast.AST, **extra) -> str:
         return self.add_node("variable", name, scope, scope.file, loc(node), f"{scope.node_id}#{name}", role=role, **extra)
 
-    def add_edge(self, kind: str, source: str, target: str, site: tuple[int, int]) -> None:
-        sites = self.edges.setdefault((kind, source, target), [])
+    def add_edge(self, kind: str, source: str, target: str, site: tuple[int, int], by_name: bool = False) -> None:
+        """Record an edge. `by_name`: a call resolved by method name alone; any other way of
+        finding the same edge makes it certain."""
+        key = (kind, source, target)
+        if by_name and key not in self.edges:
+            self.by_name.add(key)
+        elif not by_name:
+            self.by_name.discard(key)
+        sites = self.edges.setdefault(key, [])
         if site not in sites:
             sites.append(site)
+
+    def only_method_named(self, name: str) -> str | None:
+        """The project's one method called `name`, when there is exactly one and no built-in type
+        has a method of that name: the likely target of `x.name` when `x`'s type is unknown."""
+        if self.method_names is None:
+            self.method_names = {}
+            for scope in self.scopes.values():
+                if scope.kind == "function" and scope.parent is not None and scope.parent.kind == "class":
+                    self.method_names.setdefault(self.nodes[scope.node_id]["name"], []).append(scope.node_id)
+        found = self.method_names.get(name, [])
+        return found[0] if len(found) == 1 and name not in BUILTIN_METHOD_NAMES else None
 
     def is_variable(self, node_id: str | None) -> bool:
         return node_id is not None and self.nodes[node_id]["kind"] == "variable"
@@ -180,7 +225,13 @@ class Analyzer:
             "generator": {"name": "luciole", "version": __version__},
             "nodes": list(self.nodes.values()),
             "edges": [
-                {"kind": kind, "source": source, "target": target, "sites": [{"line": l, "col": c} for l, c in sorted(sites)]}
+                {
+                    "kind": kind,
+                    "source": source,
+                    "target": target,
+                    "sites": [{"line": l, "col": c} for l, c in sorted(sites)],
+                    **({"by_name": True} if (kind, source, target) in self.by_name else {}),
+                }
                 for (kind, source, target), sites in self.edges.items()
             ],
         }
@@ -237,6 +288,8 @@ class Analyzer:
                 for alias in node.names:
                     if alias.name != "*":
                         scope.bindings[alias.asname or alias.name] = None if base is None else Import(base, alias.name)
+                    elif base is not None and scope.kind == "module":
+                        scope.star_imports.append(base)
 
     def bind_variable(self, scope: Scope, name: str, node: ast.AST) -> None:
         if name in scope.nonlocal_names:
@@ -256,7 +309,9 @@ class Analyzer:
         if fn.decorator_list:
             extra["decorators"] = [ast.unparse(d) for d in fn.decorator_list]
         fid = self.add_node("function", fn.name, scope, scope.file, loc(fn), self.child_id(scope, fn.name), body_line=body_line(fn), **extra)
-        scope.bindings[fn.name] = fid
+        accessor = any(isinstance(d, ast.Attribute) and d.attr in ("setter", "deleter") and isinstance(d.value, ast.Name) and d.value.id == fn.name for d in fn.decorator_list)
+        if not (accessor and fn.name in scope.bindings):  # `obj.x` reads the property's getter
+            scope.bindings[fn.name] = fid
         fscope = Scope(fid, "function", fn, scope, scope.file)
         self.scopes[fid] = fscope
         self.def_scopes[fn] = fscope
@@ -345,10 +400,24 @@ class Analyzer:
             module = self.modules.get(binding.module)
             return module.node_id if module else None
         module = self.modules.get(binding.module)
-        if module and binding.name in module.bindings:
-            return self.resolve(module.bindings[binding.name], depth + 1)
+        found = self.module_binding(module, binding.name, depth + 1) if module else None
+        if found:
+            return found
         submodule = self.modules.get(f"{binding.module}.{binding.name}" if binding.module else binding.name)
         return submodule.node_id if submodule else None
+
+    def module_binding(self, module: Scope, name: str, depth: int = 0) -> str | None:
+        """A module's own binding for `name`, else one its `from m import *` lines bring in."""
+        if name in module.bindings:
+            return self.resolve(module.bindings[name], depth)
+        if depth > 20 or name.startswith("_"):  # star imports leave out _private names
+            return None
+        for star in module.star_imports:
+            source = self.modules.get(star)
+            found = self.module_binding(source, name, depth + 1) if source else None
+            if found:
+                return found
+        return None
 
     def lookup(self, scope: Scope, name: str, shadowed: list[set[str]] = ()) -> str | None:
         """Resolve a name read in `scope` (LEGB; class bodies are not visible from methods)."""
@@ -358,9 +427,11 @@ class Analyzer:
         while current is not None:
             if first or current.kind != "class":
                 if name in current.global_names:
-                    return self.resolve(self.module_scope(current).bindings.get(name))
+                    return self.module_binding(self.module_scope(current), name)
                 if name in current.bindings and name not in current.nonlocal_names:
                     return self.resolve(current.bindings[name])
+                if current.parent is None:
+                    return self.module_binding(current, name)
             current, first = current.parent, False
         return None
 
@@ -369,6 +440,10 @@ class Analyzer:
         if isinstance(node, ast.Name):
             return self.lookup(scope, node.id, shadowed)
         if isinstance(node, ast.Attribute):
+            if is_super(node.value):
+                cls = self.enclosing_class(scope)
+                found = (self.class_member(base, node.attr) for base in self.class_bases(cls)) if cls else ()
+                return next(filter(None, found), None)
             base = self.ref(scope, node.value, shadowed)
             return self.member(base, node.attr) if base else None
         return None
@@ -376,9 +451,9 @@ class Analyzer:
     def member(self, node_id: str, name: str) -> str | None:
         kind = self.kind(node_id)
         if kind == "module":
-            module = self.scopes[node_id]
-            if name in module.bindings:
-                return self.resolve(module.bindings[name])
+            found = self.module_binding(self.scopes[node_id], name)
+            if found:
+                return found
             submodule = self.modules.get(f"{self.nodes[node_id]['name']}.{name}")
             return submodule.node_id if submodule else None
         if kind == "class":
@@ -399,6 +474,91 @@ class Analyzer:
             found = self.class_member(base, name, seen | {class_id})
             if found:
                 return found
+        return None
+
+    def is_property(self, node_id: str | None) -> bool:
+        decorators = self.nodes[node_id].get("decorators", []) if self.kind(node_id) == "function" else []
+        return any(d.rpartition(".")[2] in PROPERTY_DECORATORS for d in decorators)
+
+    def enclosing_class(self, scope: Scope) -> str | None:
+        """The class of the method `scope` is (or is nested in), for `super()`."""
+        while scope is not None:
+            if scope.kind == "function" and scope.parent is not None and scope.parent.kind == "class":
+                return scope.parent.node_id
+            scope = scope.parent
+        return None
+
+    def overrides(self, class_id: str, name: str) -> list[str]:
+        """Functions named `name` defined in the subclasses of `class_id`, at any depth: what a
+        call on an instance may run instead, when the instance is of a subclass."""
+        if self.subclasses is None:
+            self.subclasses = {}
+            for cid, scope in self.scopes.items():
+                if scope.kind == "class":
+                    for base in self.class_bases(cid):
+                        self.subclasses.setdefault(base, []).append(cid)
+        found, stack, seen = [], list(self.subclasses.get(class_id, [])), {class_id}
+        while stack and len(found) < MAX_OVERRIDES:
+            cid = stack.pop()
+            if cid in seen:
+                continue
+            seen.add(cid)
+            own = self.resolve(self.scopes[cid].bindings.get(name))
+            if self.kind(own) == "function":
+                found.append(own)
+            stack.extend(self.subclasses.get(cid, []))
+        return found
+
+    def return_type(self, function_id: str, depth: int = 0) -> str | None:
+        """Class of the instances a function returns: from its return annotation, else from its
+        `return` statements (`return Cart(...)`, `return self`, a call to a function of known type)."""
+        if function_id in self.return_types:
+            return self.return_types[function_id]
+        self.return_types[function_id] = None  # recursion guard
+        scope = self.scopes[function_id]
+        found = self.annotation_class(scope.parent, scope.tree.returns) if scope.tree.returns else None
+        if found is None and depth < 10:
+            for node in scope_walk(scope.tree.body):
+                if isinstance(node, ast.Return) and node.value is not None:
+                    found = self.value_class(scope, node.value, depth + 1)
+                    if found:
+                        break
+        self.return_types[function_id] = found
+        return found
+
+    def annotation_class(self, scope: Scope, annotation: ast.expr) -> str | None:
+        """The class an annotation names: `Cart`, `"Cart"`, `Cart | None`, `Optional[Cart]`."""
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            try:
+                annotation = ast.parse(annotation.value, mode="eval").body
+            except SyntaxError:
+                return None
+        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+            return self.annotation_class(scope, annotation.left) or self.annotation_class(scope, annotation.right)
+        if isinstance(annotation, ast.Subscript) and ast.unparse(annotation.value).rpartition(".")[2] == "Optional":
+            return self.annotation_class(scope, annotation.slice)
+        found = self.ref(scope, annotation)
+        return found if self.kind(found) == "class" else None
+
+    def value_class(self, scope: Scope, node: ast.expr, depth: int = 0) -> str | None:
+        """Class of the instance an expression evaluates to, when the code makes it plain."""
+        if isinstance(node, ast.Call):
+            callee = self.ref(scope, node.func)
+            if self.kind(callee) == "class":
+                return callee
+            if self.kind(callee) == "function":
+                return self.return_type(callee, depth)
+            if isinstance(node.func, ast.Attribute):
+                receiver = self.value_class(scope, node.func.value, depth)
+                method = self.class_member(receiver, node.func.attr) if receiver else None
+                return self.return_type(method, depth) if self.kind(method) == "function" else None
+            return None
+        if isinstance(node, (ast.Name, ast.Attribute)):
+            found = self.ref(scope, node)
+            if self.is_variable(found):
+                return self.var_types.get(found)
+            if self.is_property(found):
+                return self.return_type(found, depth)
         return None
 
     def class_bases(self, class_id: str) -> list[str]:
@@ -468,6 +628,10 @@ class FlowVisitor:
         elif isinstance(node, ast.AnnAssign):
             if node.value:
                 self.assign_typed(node.target, node.value, self.expr(node.value))
+            cls = self.an.annotation_class(self.scope, node.annotation)
+            var = self.ref(node.target)
+            if cls and self.an.is_variable(var):
+                self.an.var_types.setdefault(var, cls)
         elif isinstance(node, ast.AugAssign):
             targets = self.targets(node.target)
             for var, target in targets:
@@ -479,17 +643,48 @@ class FlowVisitor:
             elif node.value:  # `return` outside a function parses but never runs
                 self.expr(node.value)
         elif isinstance(node, (ast.For, ast.AsyncFor)):
+            self.dunder(node.iter, "__aiter__" if isinstance(node, ast.AsyncFor) else "__iter__", node.iter)
             self.assign(self.targets(node.target), self.expr(node.iter))
             self.run(node.body)
             self.run(node.orelse)
         elif isinstance(node, (ast.With, ast.AsyncWith)):
+            is_async = isinstance(node, ast.AsyncWith)
             for item in node.items:
                 flows = self.expr(item.context_expr)
+                self.dunder(item.context_expr, "__aenter__" if is_async else "__enter__", item.context_expr)
+                self.dunder(item.context_expr, "__aexit__" if is_async else "__exit__", item.context_expr)
                 if item.optional_vars:
-                    self.assign(self.targets(item.optional_vars), flows)
+                    targets = self.targets(item.optional_vars)
+                    self.assign(targets, flows)
+                    # `as x` is what __enter__ returns, often the context manager itself.
+                    cls = self.an.value_class(self.scope, item.context_expr)
+                    enter = self.an.class_member(cls, "__aenter__" if is_async else "__enter__") if cls else None
+                    entered = self.an.return_type(enter) if self.an.kind(enter) == "function" else None
+                    for var, target in targets:
+                        if entered and target is item.optional_vars:
+                            self.an.var_types.setdefault(var, entered)
             self.run(node.body)
-        elif not isinstance(node, (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal)):
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            self.imports(node)
+        elif not isinstance(node, (ast.Global, ast.Nonlocal)):
             self.generic(node)
+
+    def imports(self, node: ast.Import | ast.ImportFrom) -> None:
+        """Importing a module runs its code, and its packages' first: calls to each module."""
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        else:
+            base = self.an.import_base(self.scope, node)
+            if base is None:
+                return
+            names = [base] + [f"{base}.{alias.name}" if base else alias.name for alias in node.names if alias.name != "*"]
+        own = self.an.module_scope(self.scope).node_id
+        for name in names:
+            parts = name.split(".")
+            for end in range(1, len(parts) + 1):
+                module = self.an.modules.get(".".join(parts[:end]))
+                if module is not None and module.node_id != own:
+                    self.an.add_edge("calls", self.actor, module.node_id, pos(node))
 
     def generic(self, node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
@@ -503,10 +698,28 @@ class FlowVisitor:
     def assign_typed(self, target: ast.expr, value: ast.expr, flows: list[Flow]) -> None:
         targets = self.targets(target)
         self.assign(targets, flows)
-        if isinstance(value, ast.Call) and self.an.kind(self.ref(value.func)) == "class":
-            for var, node in targets:
-                if node is target:
-                    self.an.var_types[var] = self.ref(value.func)
+        cls = self.an.value_class(self.scope, value)
+        held = self.held_function(value)
+        for var, node in targets:
+            if node is target:
+                if cls:
+                    self.an.var_types.setdefault(var, cls)
+                if held:
+                    self.an.aliases.setdefault(var, held)
+
+    def held_function(self, value: ast.expr) -> str | None:
+        """The function a value is, when a variable is set to one: `f`, `staticmethod(f)`."""
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in ("staticmethod", "classmethod") and len(value.args) == 1:
+            value = value.args[0]
+        found = self.ref(value) if isinstance(value, (ast.Name, ast.Attribute)) else None
+        return found if self.an.kind(found) == "function" else None
+
+    def dunder(self, receiver: ast.expr, name: str, site: ast.AST) -> None:
+        """A special method that an operation on `receiver` calls (`x[i]`, `with x:`, `len(x)`...)."""
+        cls = self.an.value_class(self.scope, receiver)
+        method = self.an.class_member(cls, name) if cls else None
+        if self.an.kind(method) == "function":
+            self.an.add_edge("calls", self.actor, method, pos(site))
 
     def function_def(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         fscope = self.an.def_scopes[node]
@@ -556,6 +769,7 @@ class FlowVisitor:
                 return [(var, node)]
             return self.mutated(node.value, node) if isinstance(node, ast.Attribute) else []
         if isinstance(node, ast.Subscript):
+            self.dunder(node.value, "__setitem__", node)
             self.expr(node.slice)
             return self.mutated(node.value, node)
         return []
@@ -582,9 +796,36 @@ class FlowVisitor:
             if self.an.is_variable(target):
                 self.read(target, node)
                 return [(target, None)]
+            by_name = False
+            if isinstance(node, ast.Attribute) and target is None:
+                target = self.typed_member(node)
+                if target is None and self.an.value_class(self.scope, node.value) is None:
+                    target = self.an.only_method_named(node.attr)
+                    by_name = target is not None
+            if self.an.is_property(target):  # reading `obj.prop` runs its getter, maybe a subclass's
+                self.an.add_edge("calls", self.actor, target, pos(node), by_name)
+                cls = self.an.value_class(self.scope, node.value) if isinstance(node, ast.Attribute) else None
+                for getter in self.an.overrides(cls, node.attr) if cls else []:
+                    if self.an.is_property(getter):
+                        self.an.add_edge("calls", self.actor, getter, pos(node))
+                return_var = self.an.scopes[target].return_var
+                return [(return_var, pos(node))] if return_var else []
             if target or isinstance(node, ast.Name):
                 return []
             return self.expr(node.value)
+        if isinstance(node, ast.Subscript):
+            self.dunder(node.value, "__delitem__" if isinstance(node.ctx, ast.Del) else "__getitem__", node)
+        elif isinstance(node, ast.Compare):
+            for left, op, right in zip([node.left, *node.comparators], node.ops, node.comparators):
+                if isinstance(op, (ast.In, ast.NotIn)):
+                    self.dunder(right, "__contains__", node)
+                elif type(op) in COMPARE_DUNDERS:
+                    self.dunder(left, COMPARE_DUNDERS[type(op)], node)
+        elif isinstance(node, ast.BinOp) and type(node.op) in BINARY_DUNDERS:
+            self.dunder(node.left, BINARY_DUNDERS[type(node.op)], node)
+        elif isinstance(node, ast.FormattedValue):
+            cls = self.an.value_class(self.scope, node.value)
+            self.dunder(node.value, "__format__" if cls and self.an.class_member(cls, "__format__") else "__str__", node)
         if isinstance(node, ast.Call):
             return self.call(node)
         if isinstance(node, ast.NamedExpr):
@@ -627,10 +868,37 @@ class FlowVisitor:
         self.shadowed.pop()
         return flows
 
+    def typed_member(self, node: ast.Attribute) -> str | None:
+        """`x.m` when `x` itself has no node but its class is plain: `make().m`, `self.items[0].m`."""
+        cls = self.an.value_class(self.scope, node.value)
+        return self.an.class_member(cls, node.attr) if cls else None
+
+    def instance_class(self, func: ast.expr) -> str | None:
+        """`type(x)` or `x.__class__`, called to make another instance of `x`'s class."""
+        if isinstance(func, ast.Attribute) and func.attr == "__class__":
+            return self.an.value_class(self.scope, func.value)
+        if isinstance(func, ast.Call) and isinstance(func.func, ast.Name) and func.func.id == "type" and len(func.args) == 1:
+            return self.an.value_class(self.scope, func.args[0])
+        return None
+
     def call(self, node: ast.Call) -> list[Flow]:
         site = pos(node)
         target = self.ref(node.func)
+        if target is None and isinstance(node.func, ast.Attribute):
+            target = self.typed_member(node.func)
+        target = target or self.instance_class(node.func)
+        by_name = False
+        if target is None and isinstance(node.func, ast.Attribute) and self.an.value_class(self.scope, node.func.value) is None:
+            target = self.an.only_method_named(node.func.attr)
+            by_name = target is not None
+        if target is None and isinstance(node.func, ast.Name) and node.func.id in BUILTIN_DUNDERS and node.args:
+            self.dunder(node.args[0], BUILTIN_DUNDERS[node.func.id], node)
         kind = self.an.kind(target)
+        if kind == "variable" and target in self.an.aliases:
+            target, kind = self.an.aliases[target], "function"
+        elif kind == "variable" and target in self.an.var_types:
+            self.dunder(node.func, "__call__", node)  # calling an instance
+        self.override_calls(node.func, site)
         offset, receiver = 0, None
         if kind == "class":
             init = self.an.class_member(target, "__init__")
@@ -639,6 +907,10 @@ class FlowVisitor:
                 self.unmapped_args(node)
                 return []
             target, kind, offset = init, "function", 1
+        elif kind == "function" and by_name:
+            # Through an instance of a class this code doesn't know: a method bound to `node.func.value`.
+            is_method = self.an.scopes[target].method_kind == "method"
+            offset, receiver = (1, node.func.value) if is_method else (int(self.an.scopes[target].method_kind == "class"), None)
         elif kind == "function":
             offset, receiver = self.binding(node.func, self.an.scopes[target])
 
@@ -647,7 +919,7 @@ class FlowVisitor:
             flows = self.expr(node.func) if kind in (None, "variable") else []
             return flows + self.unmapped_args(node)
 
-        self.an.add_edge("calls", self.actor, target, site)
+        self.an.add_edge("calls", self.actor, target, site, by_name)
         callee = self.an.scopes[target]
         if receiver is not None and callee.params:
             var = self.ref(receiver)
@@ -675,10 +947,18 @@ class FlowVisitor:
         """How a call binds the callee's first parameter: (argument offset, receiver expression)."""
         if callee.method_kind in (None, "static") or not isinstance(func, ast.Attribute):
             return 0, None
-        if callee.method_kind == "class":
+        if callee.method_kind == "class" or is_super(func.value):
             return 1, None
-        via_instance = self.an.is_variable(self.ref(func.value))
+        via_instance = self.an.is_variable(self.ref(func.value)) or self.an.value_class(self.scope, func.value) is not None
         return (1, func.value) if via_instance else (0, None)
+
+    def override_calls(self, func: ast.expr, site: tuple[int, int]) -> None:
+        """`obj.m()` may run any subclass's own `m`: a call to each (not for `super().m()`)."""
+        if not isinstance(func, ast.Attribute) or is_super(func.value):
+            return
+        cls = self.an.value_class(self.scope, func.value)  # an instance, or `cls` in a classmethod
+        for method in self.an.overrides(cls, func.attr) if cls else []:
+            self.an.add_edge("calls", self.actor, method, site)
 
     def pass_value(self, flows: list[Flow], param: Param | None, arg: ast.expr) -> None:
         if param is None:

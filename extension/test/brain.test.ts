@@ -78,3 +78,17 @@ test("a line belongs to the innermost function around it, else to its module", (
   assert.equal(neuronAt(neurons, "shop.py", 2)?.id, "shop"); // module code
   assert.equal(neuronAt(neurons, "other.py", 7), undefined);
 });
+
+test("imports and calls matched by name become call synapses", () => {
+  const graph: Graph = {
+    ...shop,
+    nodes: [...shop.nodes, { ...shop.nodes.find((n) => n.kind === "module")!, id: "other", name: "other", file: "other.py" }],
+    edges: [
+      ...shop.edges,
+      { kind: "calls", source: "other", target: "shop", sites: [{ line: 1, col: 0 }] },
+      { kind: "calls", source: "other", target: "shop:with_tax", sites: [{ line: 2, col: 0 }], by_name: true },
+    ],
+  };
+  const calls = buildBrain(graph).synapses.filter((s) => s.kind === "call" && s.source === "other");
+  assert.deepEqual(calls.map((s) => [s.target, Boolean(s.byName)]).sort(), [["shop", false], ["shop:with_tax", true]]);
+});

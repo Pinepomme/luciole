@@ -140,6 +140,10 @@
           "description": "`runtime` marks edges only observed while the program ran (dynamic calls, monkey-patching). Defaults to `static`.",
           "enum": ["static", "runtime"],
           "default": "static"
+        },
+        "by_name": {
+          "description": "`calls` only: resolved by method name alone (the receiver's type is unknown, and one project class has a method of that name). Likely, not certain.",
+          "const": true
         }
       }
     }

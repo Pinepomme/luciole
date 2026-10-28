@@ -85,7 +85,7 @@ Variable roles:
 
 | Kind | Source → target | Meaning | Site points at |
 |---|---|---|---|
-| `calls` | module/function → function/class | source calls target | the call expression |
+| `calls` | module/function → function/class/module | source calls target (or imports the module, which runs its code) | the call expression, or the import |
 | `reads` | variable → module/function | code reads the variable | the name |
 | `writes` | module/function → variable | code assigns the variable | the assignment target |
 | `flows_to` | variable → variable | source's value is used to compute target | the assignment target |
@@ -116,15 +116,36 @@ They decide what ends up in the graph.
   methods skip `cls`. `Class.m(obj, a)` passes `obj` to `self` like any other argument.
 - **Arguments** map to parameters by position, then by keyword. Extra ones go to `*args` or
   `**kwargs`. Positions after a `*iterable` argument are unknown, so those arguments go to `*args`.
-- **`obj.m()` resolves** only when the analyzer knows `obj`'s class. That's the case for `self`,
-  for a variable assigned from a constructor (`c = Cart()`), and for a parameter annotated with a
-  project class. Methods are looked up through base classes too. Anything else is unresolved, until
-  roadmap step 4 adds a real type checker.
+- **`obj.m()` resolves** when the analyzer knows `obj`'s class: `self` and `cls`; a variable or
+  attribute assigned from a constructor (`c = Cart()`) or from a call whose return type is plain (a
+  return annotation, or `return Cart(...)` / `return self` in the function); a parameter, variable
+  or class attribute annotated with a project class (`Cart`, `"Cart"`, `Cart | None`,
+  `Optional[Cart]`); `with make() as c` (what `__enter__` returns); and receivers that are calls
+  themselves (`make().total()`). Methods are looked up through base classes too.
+- **Overrides**: `obj.m()` may run the `m` of any subclass of `obj`'s class, so each override gets
+  a `calls` edge too (30 at most), as does a method defined only in subclasses (`self.render()` in a
+  base class). `super().m()` resolves through the bases of the method's class, without overrides.
+- **Properties**: reading `obj.p` calls `p`'s getter (`@property`, `@cached_property`), and the
+  getters overriding it; a `@p.setter` never hides the getter.
+- **Special methods** run by operations on a value of known class get `calls` edges: `x[i]`
+  (`__getitem__`, `__setitem__`, `__delitem__`), `with x` (`__enter__`/`__exit__`, async too),
+  `for … in x` (`__iter__`), `in`, comparisons, arithmetic operators, f-strings (`__format__` or
+  `__str__`), `len`/`str`/`repr`/`iter`/`next`/`bool`/`hash`/`abs`, calling an instance
+  (`__call__`), and `type(x)(…)` / `x.__class__(…)` (the class's `__init__`).
+- **Functions held in variables**: `parse = staticmethod(parse_date)` (or `= parse_date`), then
+  `self.parse(v)` calls `parse_date`.
+- **By name**: when the receiver's class is unknown, `x.m()` (or reading the property `x.m`)
+  resolves to the project's only method named `m`, if there is exactly one and no built-in type has
+  a method of that name (`split`, `get`, `close`… never match). The edge gets `"by_name": true`:
+  likely, not certain. Anything else is unresolved.
 - **Unresolved calls** (builtins, third-party code, unknown receivers), like `y = round(x, 2)` or
   `t = s.upper()`, produce no `calls` edge. Their arguments and receiver `flows_to` the assignment
   target directly, which is a conservative approximation.
 - **Resolved calls** `y = f(x)` produce no direct `x → y` flow. The value goes
   `passes_arg` x → `f#param`, then `returns` `f#return` → y.
+- **Imports** run the imported module, and the packages around it first: `import a.b` and
+  `from a.b import c` give `calls` edges to the project modules `a` and `a.b` (and `a.b.c` when it
+  is a submodule). `from m import *` makes `m`'s public names resolvable in the importing module.
 - **Decorators** that are project functions get a `calls` edge from the code that defines the
   decorated function.
 
