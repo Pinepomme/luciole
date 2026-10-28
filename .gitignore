@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Extension
+extension/node_modules/
+extension/out/
+*.vsix
+extension/python/
+extension/LICENSE
+extension/CHANGELOG.md
