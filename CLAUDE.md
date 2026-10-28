@@ -67,17 +67,51 @@ Spec: `docs/graph-format.md`. JSON Schema: `schema/graph.schema.json`. Example: 
   The extension runs the analyzer as `python -m luciole` with `PYTHONPATH` pointing at `../src` (stdlib only, any Python 3.10+).
 - Webview without VS Code: `npm run screenshot -- [path] [--events FILE]` renders the real webview bundle in headless Chromium (software WebGL) and saves PNGs to `extension/out/dev/shots/`; `--events` replays a `luciole run --events FILE` recording. On this WSL setup Chromium needs `libasound.so.2`: install `libasound2t64`, or point `LD_LIBRARY_PATH` at an extracted copy.
 
-## Roadmap
+## Roadmap and status
 
-Full plan: `docs/roadmap.md` (phases 0–7: ship v0.1, engine foundation (auto-start recorder, local engine that recorders and viewers connect to), debugging through a DAP proxy around debugpy, agents (MCP + Claude Code plugin), recording and time travel, beyond VS Code, JS/TS, native languages).
+Detailed plan: `docs/roadmap.md`. This section is the summary a new session needs to pick up the work.
 
-Done so far:
+### Done
 
 - **Graph schema**: `docs/graph-format.md`.
 - **Static parser**: `luciole graph <path> [--json] [-o FILE]`, in `src/luciole/analyzer.py` (rules in `docs/graph-format.md`).
 - **Extension**: `extension/` (see Development setup), a 3D brain. The editor title button graphs the current file and follows the active editor; "Show Graph (Whole Folder)" from the palette or Explorer.
-- **Live mode**: `luciole run` + "Luciole: Run Live" (⚡ button) light up running functions, the current call path and pulses along synapses; calls missed by static analysis appear as runtime synapses. Threads (one stack per named thread, `Thread.start` spawn links) and asyncio (waiting coroutines in blue, task spawn links from where the coroutine was created) are covered; `examples/workers.py` exercises both. The recorder must never read other threads' frames (`sys._current_frames()` breaks `torch.export`): all state is kept by the monitoring callbacks in-thread.
+- **Live mode**: `luciole run` + "Luciole: Run Live" (⚡ button) light up running functions, the current call path and pulses along synapses; calls missed by static analysis appear as runtime synapses. Threads (one stack per named thread, `Thread.start` spawn links) and asyncio (waiting coroutines in blue, task spawn links from where the coroutine was created) are covered; `examples/workers.py` exercises both. The recorder must never read other threads' frames (`sys._current_frames()` breaks `torch.export`): all state is kept by the monitoring callbacks in-thread. When no project caller is within 40 frames, the recorder walks the whole stack (never guesses from its own stack).
+- **Run Live…** (`extension/src/runs.ts`): current file with arguments, a module (`pytest -x tests`), or `luciole.runConfigurations` from settings; the panel's Run live button repeats the last run.
 - **Live debugger controls**: Pause/Resume and Step over/into/out (F10/F11/Shift+F11) with a Variables view (cooperative: LINE events, each thread snapshots its own frames, commands over the live socket, `src/luciole/values.py`, `extension/src/variables.ts`); Stop (SIGINT to the run's process, then SIGKILL; `hide_recorder_frames` keeps the traceback ending in project code).
+- **Phase 0 (ship v0.1)**: CI, version 0.1.0 for both halves, README, CHANGELOG, Marketplace icon, release steps above. PR #1 (`phase-0` into `main`) is merged; CI passed on Linux 3.10–3.14 and Windows, macOS was still queued at the last check.
+
+### Next steps, in order
+
+1. **Hands-on test of the extension in a real VS Code window** (never done; only the Python side and headless rendering were tested): `examples/workers.py` with ⚡ Run Live, Pause / F10 / F5 / Stop, the Variables view; in `~/dev/mountain-zenith`, Run… → Module → `pytest -q -m "not slow" tests/test_catalog.py`. Fix what breaks. Check macOS CI on PR #1 / main.
+2. **Publish v0.1.0** (needs the user's accounts and tokens; nothing published yet): VS Code Marketplace (publisher `pinepomme`, to create), Open VSX (namespace `pinepomme`, free), PyPI (`luciole`, free). Steps in Development setup.
+3. **Phase 1: engine foundation** (~1 week):
+   - Recorder as a library: `luciole.start()`.
+   - Auto-start: a `sitecustomize.py` starts the recorder in any interpreter whose environment has `LUCIOLE_*` set (terminal runs, test runners, debug sessions, child processes); `os.register_at_fork` for forked children. This is also the multi-process support.
+   - `luciole engine`: a local process recorders connect to (labelled with pid and command line) and viewers subscribe to; the VS Code extension becomes one viewer and starts the engine when none runs.
+   - Protocol handshake: recorder, engine and viewers state the protocol version they speak.
+   - Run Live → tests for this file: find test files that import the current module and run pytest on them (library files are not meant to run on their own).
+4. **Phase 2: debugging through the engine**: a DAP proxy around debugpy registered as a VS Code debug type ("Debug Live"); breakpoints, exceptions, watch, hover and console come from debugpy (VS Code's own gutter breakpoints flow through the proxy: merge VS Code's per-file breakpoint list with Luciole's own, and create graph-driven breakpoints through the VS Code API so they show in the Breakpoints panel); the recorder keeps the graph lit; click a neuron to stop the next time that function runs; several clients on one session. Also: better call resolution (Pyright/jedi), and scale (whole-folder graphs of 30k+ lines are an unreadable cloud today: search, filtering, collapsible modules). Decide the future of live mode's own pause/step view.
+5. **Phase 3: agents**: `luciole mcp` server (graph queries, record a run, calls per function, compare runs, breakpoints/inspection on the shared session), a Claude Code plugin (MCP + a skill teaching when to debug with Luciole + slash commands, optional hooks), the agent's activity shown on the graph, explicit approval to run programs, summarized/paginated answers, a small planted-bug benchmark.
+6. **Phase 4: recording and time travel** (Python): variable-level events with size limits and secret redaction, trace storage (SQLite or column store), a replay timeline, stepping backwards, MCP tools for values/slicing/run diffs.
+7. **Phase 5: beyond VS Code**: `luciole serve` (3D view in a browser), other editors through DAP, a `language` field in both formats, decide the engine's implementation language.
+8. **Phase 6: JS/TS** (js-debug behind the proxy, Chrome DevTools Protocol recorder, graph from SCIP/language servers) and **phase 7: native** (gdb/lldb behind the proxy, `-finstrument-functions` or XRay, rr for time travel).
+
+Open question: phases 2 and 3 could swap (MCP graph and run tools are cheap once the engine exists).
+
+### Findings from the first real-project test (`~/dev/mountain-zenith`, 36k lines)
+
+- Analyzer: 5 s, no parse failures. Recorder: every function that ran matched a graph node; about 20% overhead on pytest.
+- 45% of runtime caller→callee links are missing from the static graph: imports (module runs module), class bodies running, `@property` getters, methods on objects of unknown type. Candidates for phase 2's resolution work.
+- A 2,000-function graph renders but is an unreadable cloud (phase 2 scale work).
+
+### Decisions and conventions
+
+- Personal project of the user (not tied to their employer), MIT. Their work email must never appear in commits: commit as `Pinepomme <45495853+Pinepomme@users.noreply.github.com>` (set in this repo's git config). History was rewritten once to remove it.
+- Git pushes go through the SSH alias `github-luciole` (Pinepomme). The `gh` CLI has two accounts: the active one is the user's work account `alexandresuescun`, which must not be used for this repo. For PRs: `gh auth switch --hostname github.com --user Pinepomme`, then switch back with `--user alexandresuescun`.
+- Work on a branch and open a PR into `main`; CI runs on PRs and pushes to `main`.
+- Delivery rules: the Python core stays standard-library only (debugpy is the one exception, for debugging); one version number for both halves; the extension bundles the analyzer; no telemetry; everything stays on the user's machine.
+- Branding is postponed.
 
 ## Prior art (for reference, not to copy)
 
@@ -90,4 +124,4 @@ Luciole's distinguishing features: variable-level flow plus runtime lighting on 
 
 ## Where to start
 
-Next work follows `docs/roadmap.md`, starting with phase 0 (commit, CI, run configurations, first release).
+Follow "Next steps, in order" above, starting with the hands-on test of the extension, then publishing (ask the user for their accounts), then phase 1.
