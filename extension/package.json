@@ -19,6 +19,9 @@
     "Programming Languages"
   ],
   "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "commands": [
       {
@@ -91,11 +94,22 @@
         "command": "luciole.revealFrame",
         "title": "Show Frame",
         "category": "Luciole"
+      },
+      {
+        "command": "luciole.toggleAutoStart",
+        "title": "Turn Auto-Start On or Off",
+        "category": "Luciole",
+        "icon": "$(zap)"
       }
     ],
     "configuration": {
       "title": "Luciole",
       "properties": {
+        "luciole.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Light up the Luciole view with every Python program (3.12+) started in VS Code's terminals: scripts, `pytest`, servers, and their child processes, run as usual. Applies to terminals opened afterwards. Also in the status bar."
+        },
         "luciole.pythonPath": {
           "type": "string",
           "default": "",

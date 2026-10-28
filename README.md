@@ -35,6 +35,20 @@ luciole run --events run.jsonl -m pytest -q
 Code extension, or to a file with `--events`. Only code under `--root` (default: the current
 directory) is reported.
 
+Without changing how a program is started, any Python process can light up the view too:
+
+```sh
+eval "$(luciole env --port PORT)"     # this shell's Python programs report to the view on PORT
+eval "$(luciole env --off)"           # back to normal
+```
+
+```python
+import luciole
+luciole.start()                       # from inside a program: a server, a notebook
+```
+
+In VS Code, the **Luciole: on/off** switch in the status bar does the same for new terminals.
+
 The graph format and the live events are documented in
 [docs/graph-format.md](docs/graph-format.md), and the plan in [docs/roadmap.md](docs/roadmap.md).
 

@@ -16,6 +16,7 @@ let panel: GraphPanel | undefined;
 let output: vscode.OutputChannel;
 let live: LiveSession;
 let variables: VariablesView;
+let autoStartItem: vscode.StatusBarItem;
 
 /** The last run started, to run it again from the panel. */
 const LAST_RUN = "luciole.lastRun";
@@ -42,9 +43,21 @@ export function activate(context: vscode.ExtensionContext): void {
           void revealFrame(thread.frames[0], thread);
         }
       },
+      started: (label) => {
+        // A program started in a terminal with auto-start on: show the project it lights up.
+        if (!panel && vscode.workspace.workspaceFolders?.length) {
+          showGraph(context, workspaceTarget(), false);
+        }
+        if (!live.current.running) {
+          panel?.post({ type: "liveStarted", script: label });
+        }
+      },
     },
     output,
   );
+  autoStartItem = vscode.window.createStatusBarItem("luciole.autoStart", vscode.StatusBarAlignment.Left);
+  autoStartItem.name = "Luciole Auto-Start";
+  autoStartItem.command = "luciole.toggleAutoStart";
   variables = new VariablesView((ref) => live.expand(ref));
   context.subscriptions.push(
     output,
@@ -61,6 +74,17 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("luciole.resumeLive", () => live.pause(false)),
     vscode.commands.registerCommand("luciole.showGraph", () => showGraph(context, workspaceTarget(), false)),
     vscode.commands.registerCommand("luciole.showFileGraph", () => showGraph(context, fileTarget(), true)),
+    autoStartItem,
+    vscode.commands.registerCommand("luciole.toggleAutoStart", () => {
+      const settings = vscode.workspace.getConfiguration("luciole");
+      return settings.update("autoStart", !settings.get<boolean>("autoStart"), vscode.ConfigurationTarget.Global);
+    }),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("luciole.autoStart")) {
+        void applyAutoStart(context);
+      }
+    }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => applyAutoStart(context)),
     // A file graph follows the editor: switching to another Python file shows that file's graph.
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       const document = editor?.document;
@@ -74,6 +98,41 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
   );
+  void applyAutoStart(context);
+}
+
+/**
+ * Auto-start: Python programs started in VS Code's terminals light up the view, with no change to
+ * how they are run. The switch only sets environment variables for new terminals: the auto-start
+ * folder on PYTHONPATH, whose sitecustomize starts the recorder when the view listens on
+ * LUCIOLE_LIVE_PORT. Off, nothing is set. Terminals already open keep what they had (VS Code
+ * flags them as stale).
+ */
+async function applyAutoStart(context: vscode.ExtensionContext): Promise<void> {
+  const on = vscode.workspace.getConfiguration("luciole").get<boolean>("autoStart", false);
+  const env = context.environmentVariableCollection;
+  env.persistent = false; // the port changes with every window
+  env.clear();
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  for (const folder of folders) {
+    env.getScoped({ workspaceFolder: folder }).clear();
+  }
+  const dir = analyzerDir(context);
+  if (on && dir) {
+    env.description = "Luciole auto-start: Python programs started here light up the Luciole view.";
+    // Prepended, so that PYTHONPATH set elsewhere (Run Live, the user's) stays; when PYTHONPATH is
+    // empty, the auto-start folder drops the empty entry this leaves.
+    env.prepend("PYTHONPATH", path.join(dir, "luciole", "_autostart") + path.delimiter);
+    env.replace("LUCIOLE_LIVE_PORT", String(await live.listen()));
+    for (const folder of folders) {
+      env.getScoped({ workspaceFolder: folder }).replace("LUCIOLE_ROOT", folder.uri.fsPath);
+    }
+  }
+  autoStartItem.text = on ? "$(zap) Luciole: on" : "$(circle-slash) Luciole: off";
+  autoStartItem.tooltip = on
+    ? "Python programs started in new terminals light up the Luciole view. Click to turn off."
+    : "Click to light up the Luciole view with every Python program started in new terminals (pytest, scripts, servers).";
+  autoStartItem.show();
 }
 
 export function deactivate(): void {

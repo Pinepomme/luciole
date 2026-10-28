@@ -53,15 +53,18 @@ share the same session.
 - [x] Run configurations: `-m module`, script arguments, pytest, environment variables
   (Run Live…, `luciole.runConfigurations`).
 - [x] A wrong caller after deep library stacks was fixed.
-- [ ] Publish `luciole` on PyPI, and the extension on the VS Code Marketplace and Open VSX (which
-  Cursor, Windsurf and VSCodium install from). Packages are built and checked.
+- [x] Publish `luciole` on PyPI and the extension on the VS Code Marketplace (v0.1.0, from a tag by
+  `.github/workflows/release.yml`). Open VSX (which Cursor, Windsurf and VSCodium install from)
+  waits for its token.
 
 ### Phase 1: Engine foundation
 
-- The recorder as a library: `luciole.start()` for code you control (servers, notebooks).
-- Auto-start: a `sitecustomize.py` starts the recorder in any interpreter whose environment has
+- [x] The recorder as a library: `luciole.start()` / `luciole.stop()` for code you control
+  (servers, notebooks).
+- [x] Auto-start: a `sitecustomize.py` starts the recorder in any interpreter whose environment has
   `LUCIOLE_*` set, so terminal runs, test runners and child processes light up unchanged.
-  `os.register_at_fork` covers forked children. This is also the multi-process support.
+  `os.register_at_fork` covers forked children. This is also the multi-process support. Turned on
+  and off by a status bar switch in VS Code (new terminals) or `luciole env` in a shell.
 - `luciole engine`: a local process that recorders connect to (each labelled with its process id
   and command line) and that viewers subscribe to. The VS Code extension becomes one viewer, and
   starts the engine when none is running.
