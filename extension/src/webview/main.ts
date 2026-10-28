@@ -428,6 +428,7 @@ function resize(): void {
 new ResizeObserver(resize).observe(document.getElementById("brain")!);
 
 liveButton.addEventListener("click", () => vscode.postMessage({ type: "runLive" }));
+document.getElementById("runWith")!.addEventListener("click", () => vscode.postMessage({ type: "runLiveWith" }));
 stopButton.addEventListener("click", () => vscode.postMessage({ type: "stopLive" }));
 pauseButton.addEventListener("click", () => vscode.postMessage({ type: "pauseLive", paused: !paused }));
 for (const button of stepButtons) {

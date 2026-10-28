@@ -48,12 +48,13 @@ share the same session.
 
 ### Phase 0: Consolidate and ship v0.1
 
-- Commit the current work.
-- CI on GitHub Actions: pytest, the extension's unit tests and type check.
-- Run configurations: `-m module`, script arguments, pytest, environment variables.
-- First test on a real project: fix what breaks, and measure the recorder's overhead.
-- Publish `luciole` on PyPI, and the extension on the VS Code Marketplace and Open VSX (which
-  Cursor, Windsurf and VSCodium install from).
+- [x] Commit the current work.
+- [x] CI on GitHub Actions: pytest, the extension's unit tests and type check.
+- [x] Run configurations: `-m module`, script arguments, pytest, environment variables
+  (Run Live…, `luciole.runConfigurations`).
+- [x] A wrong caller after deep library stacks was fixed.
+- [ ] Publish `luciole` on PyPI, and the extension on the VS Code Marketplace and Open VSX (which
+  Cursor, Windsurf and VSCodium install from). Packages are built and checked.
 
 ### Phase 1: Engine foundation
 

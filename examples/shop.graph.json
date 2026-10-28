@@ -2,7 +2,7 @@
   "format": "luciole-graph",
   "format_version": 1,
   "root": "examples",
-  "generator": { "name": "luciole", "version": "0.0.1" },
+  "generator": { "name": "luciole", "version": "0.1.0" },
   "nodes": [
     { "id": "shop", "kind": "module", "name": "shop", "parent": null, "file": "shop.py",
       "loc": { "line": 1, "col": 0, "end_line": 31, "end_col": 10 } },

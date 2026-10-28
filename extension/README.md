@@ -40,9 +40,20 @@ the functions light up as they run.
 
 The graph refreshes when you save a Python file.
 
-To light up something other than a single file, run it yourself under the recorder, from a
-terminal opened by Run Live (it has the right environment):
-`python -m luciole run -m pytest`, `python -m luciole run app.py --port 8000`, and so on.
+To run something other than the current file, use **Luciole: Run Live…** (the panel's **Run…**
+button, or the editor title bar's menu): the current file with arguments, a module such as
+`pytest -x tests`, or one of your run configurations. The panel's **Run live** button repeats the
+last run. Run configurations go in `settings.json`:
+
+```json
+"luciole.runConfigurations": [
+  { "name": "train (small)", "program": "scripts/train.py", "args": ["--config", "configs/small.yaml"] },
+  { "name": "fast tests", "module": "pytest", "args": ["-q", "-m", "not slow"], "env": { "SEED": "0" } }
+]
+```
+
+`program` is relative to the workspace folder; `module` runs with `python -m`; `args`, `cwd` and
+`env` are optional; `${workspaceFolder}` and `${file}` are replaced.
 
 ## Requirements
 

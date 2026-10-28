@@ -56,7 +56,11 @@ Spec: `docs/graph-format.md`. JSON Schema: `schema/graph.schema.json`. Example: 
 - Python environment managed with **uv**: `uv sync`, `uv run ...`, `uv add <pkg>`, `uv add --dev <pkg>`.
 - `src/` layout, version in `src/luciole/__init__.py` (`__version__`), read dynamically by hatchling.
 - Tests with `pytest` (`uv run pytest`).
-- Build and release: `uv build`, `uv publish`, tag `vX.Y.Z`.
+- CI: `.github/workflows/ci.yml` (pytest on 3.10–3.14 and on macOS/Windows with 3.12; extension typecheck, tests, packaging).
+- Release (one version for both halves: `src/luciole/__init__.py` and `extension/package.json`, plus `CHANGELOG.md`):
+  1. `uv build && uv publish` (PyPI token).
+  2. `cd extension && npm run package`, then `npx vsce publish --packagePath luciole.vsix` (Marketplace publisher `pinepomme`, Azure DevOps token) and `npx ovsx publish luciole.vsix -p <token>` (Open VSX, namespace `pinepomme`).
+  3. Tag `vX.Y.Z` and push the tag.
 - Extension (`extension/`, npm): `npm install`, `npm run build`, `npm test` (view-model unit tests), `npx tsc --noEmit`.
   `npm run install-local` packages `luciole.vsix` (with a copy of the analyzer in `extension/python/`) and installs it in VS Code; reload the window afterwards. Re-run it after changing the extension or the analyzer.
   Or press F5 ("Run Luciole extension") to open a separate dev window on this repo, which uses `../src` live.

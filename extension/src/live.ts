@@ -8,6 +8,7 @@ import * as net from "net";
 import * as path from "path";
 import * as vscode from "vscode";
 import type { LiveFrame, LiveState, PausedThread, RecorderReply, StepMode, Variable } from "./messages";
+import type { ResolvedRun } from "./runs";
 
 export interface LiveListener {
   frame(frame: LiveFrame): void;
@@ -44,25 +45,26 @@ export class LiveSession implements vscode.Disposable {
     return this.state;
   }
 
-  /** Runs `script` in a fresh terminal, stopping the previous run if it is still going. */
-  async run(script: string, root: string, python: string, analyzerDir: string): Promise<void> {
+  /** Starts `run` in a fresh terminal, stopping the previous run if it is still going. */
+  async run(run: ResolvedRun, root: string, python: string, analyzerDir: string): Promise<void> {
     const port = await this.listen();
     // The previous run's connection closes when its terminal goes: that must not end this run.
     this.socket?.removeAllListeners();
     this.socket?.destroy();
     this.socket = undefined;
     this.terminal?.dispose();
-    const args = ["-m", "luciole", "run", "--root", root, script];
+    const args = ["-m", "luciole", "run", "--root", root, ...run.target];
     // Python is the terminal's process, with no shell: other extensions (venv auto-activation)
     // type into new shells, and their Ctrl+C would kill the run.
     this.terminal = vscode.window.createTerminal({
       name: "Luciole live",
-      cwd: root,
+      cwd: run.cwd,
       shellPath: python,
       shellArgs: args,
       env: {
+        ...run.env,
         LUCIOLE_LIVE_PORT: String(port),
-        PYTHONPATH: [analyzerDir, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+        PYTHONPATH: [analyzerDir, run.env.PYTHONPATH ?? process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
       },
     });
     this.terminal.show(true);

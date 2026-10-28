@@ -20,7 +20,8 @@ export function webviewHtml({ cspSource, nonce, scriptUri, styleUri }: PageOptio
 </head>
 <body>
   <div id="toolbar">
-    <button id="live" class="primary" title="Run this file and light up functions as they run">Run live</button>
+    <button id="live" class="primary" title="Run the last run again (or this file), lighting up functions as they run">Run live</button>
+    <button id="runWith" title="Choose what to run: a file with arguments, a configured run, a module (pytest…)">Run…</button>
     <button id="pause" hidden title="Put the program on hold; resume it later">Pause</button>
     <span id="stepping" hidden>
       <button data-step="over" title="Run to the next line of this function (F10)">Step over</button>

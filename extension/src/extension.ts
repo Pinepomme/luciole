@@ -9,12 +9,16 @@ import type { Graph } from "./graph";
 import { webviewHtml } from "./html";
 import { LiveSession } from "./live";
 import type { FromWebview, PausedFrame, PausedThread, StepMode, ToWebview } from "./messages";
+import { RunConfiguration, resolveRun, splitArgs } from "./runs";
 import { VariablesView } from "./variables";
 
 let panel: GraphPanel | undefined;
 let output: vscode.OutputChannel;
 let live: LiveSession;
 let variables: VariablesView;
+
+/** The last run started, to run it again from the panel. */
+const LAST_RUN = "luciole.lastRun";
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("Luciole");
@@ -50,7 +54,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("luciole.stepOver", () => step("over")),
     vscode.commands.registerCommand("luciole.stepInto", () => step("into")),
     vscode.commands.registerCommand("luciole.stepOut", () => step("out")),
-    vscode.commands.registerCommand("luciole.runLive", () => runLive(context, fileTarget())),
+    vscode.commands.registerCommand("luciole.runLive", () => runFile(context, fileTarget())),
+    vscode.commands.registerCommand("luciole.runLiveWith", () => pickRun(context)),
     vscode.commands.registerCommand("luciole.stopLive", () => live.stop()),
     vscode.commands.registerCommand("luciole.pauseLive", () => live.pause(true)),
     vscode.commands.registerCommand("luciole.resumeLive", () => live.pause(false)),
@@ -95,23 +100,117 @@ function fileTarget(): string | undefined {
   return document.uri.fsPath;
 }
 
-/** Show the file's brain, then run the file under the live recorder in a terminal. */
-async function runLive(context: vscode.ExtensionContext, script: string | undefined): Promise<void> {
-  if (!script) {
-    return;
+/** Run a Python file as a script, without arguments. */
+function runFile(context: vscode.ExtensionContext, script: string | undefined): Promise<void> {
+  return script ? startRun(context, { name: path.basename(script), program: script }) : Promise.resolve();
+}
+
+/** Run the last run again, else the panel's file, else ask what to run. */
+function runAgain(context: vscode.ExtensionContext, panelTarget: string): Promise<void> {
+  const last = context.workspaceState.get<RunConfiguration>(LAST_RUN);
+  if (last) {
+    return startRun(context, last);
   }
+  return panelTarget.endsWith(".py") ? runFile(context, panelTarget) : pickRun(context);
+}
+
+type RunPick = vscode.QuickPickItem & { choose?: () => Promise<RunConfiguration | undefined> };
+
+/** Ask what to run: the last run, the current file (with or without arguments), a configured run, or a module. */
+async function pickRun(context: vscode.ExtensionContext): Promise<void> {
+  const file = activePythonFile();
+  const last = context.workspaceState.get<RunConfiguration>(LAST_RUN);
+  const describe = (config: RunConfiguration) =>
+    [config.module ? `-m ${config.module}` : vscode.workspace.asRelativePath(config.program ?? ""), ...(config.args ?? [])].join(" ");
+  const picks: RunPick[] = [];
+  if (last) {
+    picks.push({ label: `$(debug-rerun) ${last.name}`, description: describe(last), detail: "Last run", choose: async () => last });
+  }
+  if (file) {
+    picks.push(
+      { label: "$(file) Current file", description: vscode.workspace.asRelativePath(file), choose: async () => ({ name: path.basename(file), program: file }) },
+      {
+        label: "$(file) Current file with arguments…",
+        description: vscode.workspace.asRelativePath(file),
+        choose: async () => {
+          const line = await vscode.window.showInputBox({ prompt: `Arguments for ${path.basename(file)}`, placeHolder: "--config configs/small.yaml" });
+          return line === undefined ? undefined : { name: `${path.basename(file)} ${line}`.trim(), program: file, args: splitArgs(line) };
+        },
+      },
+    );
+  }
+  const configured = vscode.workspace.getConfiguration("luciole").get<RunConfiguration[]>("runConfigurations") ?? [];
+  if (configured.length) {
+    picks.push({ label: "Configured", kind: vscode.QuickPickItemKind.Separator });
+    picks.push(...configured.map((config) => ({ label: `$(gear) ${config.name}`, description: describe(config), choose: async () => config })));
+  }
+  picks.push(
+    { label: "", kind: vscode.QuickPickItemKind.Separator },
+    {
+      label: "$(terminal) Module…",
+      description: "python -m …",
+      choose: async () => {
+        const line = await vscode.window.showInputBox({ prompt: "Module and arguments, as after python -m", placeHolder: "pytest -x tests" });
+        const [module, ...args] = splitArgs(line ?? "");
+        return module ? { name: `-m ${line!.trim()}`, module, args } : undefined;
+      },
+    },
+    {
+      label: "$(settings-edit) Add a run configuration…",
+      description: "luciole.runConfigurations in settings.json",
+      choose: async () => {
+        await vscode.commands.executeCommand("workbench.action.openWorkspaceSettingsFile");
+        return undefined;
+      },
+    },
+  );
+  const picked = await vscode.window.showQuickPick(picks, { title: "Luciole: Run Live", placeHolder: "What to run under the recorder" });
+  const config = await picked?.choose?.();
+  if (config) {
+    await startRun(context, config);
+  }
+}
+
+/** Show the brain the run will light up, then start the run under the recorder in a terminal. */
+async function startRun(context: vscode.ExtensionContext, config: RunConfiguration): Promise<void> {
   const dir = analyzerDir(context);
   if (!dir) {
     void vscode.window.showErrorMessage("Luciole: the analyzer is missing from the extension.");
     return;
   }
-  await vscode.workspace.textDocuments.find((d) => d.uri.fsPath === script && d.isDirty)?.save();
-  if (!panel?.covers(script)) {
-    showGraph(context, script, true); // a folder graph that includes the script stays, to light up the whole project
+  const file = activePythonFile();
+  const anchor = config.program && path.isAbsolute(config.program) ? config.program : file;
+  const folder =
+    (anchor && vscode.workspace.getWorkspaceFolder(vscode.Uri.file(anchor))?.uri.fsPath) ??
+    vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
+    (anchor && path.dirname(anchor));
+  if (!folder) {
+    void vscode.window.showErrorMessage("Luciole: open a folder or a Python file first.");
+    return;
   }
-  const root = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(script))?.uri.fsPath ?? path.dirname(script);
-  panel?.post({ type: "liveStarted", script: path.basename(script) });
-  await live.run(script, root, pythonPath(script), dir);
+  const run = resolveRun(config, { workspaceFolder: folder, file });
+  if ("error" in run) {
+    void vscode.window.showErrorMessage(`Luciole: ${run.error}.`);
+    return;
+  }
+  await Promise.all(
+    vscode.workspace.textDocuments.filter((d) => d.isDirty && d.languageId === "python" && d.uri.scheme === "file").map((d) => d.save()),
+  );
+  if (run.script) {
+    if (!panel?.covers(run.script)) {
+      showGraph(context, run.script, true); // a folder graph that includes the script stays, to light up the whole project
+    }
+  } else if (!panel?.showsFolder) {
+    showGraph(context, folder, false); // a module can run anything in the project
+  }
+  void context.workspaceState.update(LAST_RUN, config);
+  panel?.post({ type: "liveStarted", script: run.label });
+  await live.run(run, folder, pythonPath(folder), dir);
+}
+
+function activePythonFile(): string | undefined {
+  const document = vscode.window.activeTextEditor?.document;
+  return document?.languageId === "python" && document.uri.scheme === "file" ? document.uri.fsPath : undefined;
 }
 
 function step(mode: StepMode): void {
@@ -188,6 +287,10 @@ class GraphPanel {
     this.analyze();
   }
 
+  get showsFolder(): boolean {
+    return !this.target.endsWith(".py");
+  }
+
   /** True when this panel shows a folder graph that includes `file`. */
   covers(file: string): boolean {
     const relative = path.relative(this.target, file);
@@ -214,7 +317,9 @@ class GraphPanel {
     } else if (message.type === "refresh") {
       this.analyze();
     } else if (message.type === "runLive") {
-      void runLive(this.context, this.target.endsWith(".py") ? this.target : fileTarget());
+      void runAgain(this.context, this.target);
+    } else if (message.type === "runLiveWith") {
+      void pickRun(this.context);
     } else if (message.type === "stopLive") {
       void live.stop();
     } else if (message.type === "pauseLive") {
