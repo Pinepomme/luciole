@@ -67,25 +67,31 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     environment: release
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }} # not set: the Marketplace is skipped
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: extension
-      - run: npx --yes @vscode/vsce@2.24.0 publish --packagePath luciole.vsix
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      - if: env.VSCE_PAT == ''
+        run: echo "::notice::VSCE_PAT is not set, skipping the VS Code Marketplace"
+      - if: env.VSCE_PAT != ''
+        run: npx --yes @vscode/vsce@2.24.0 publish --packagePath luciole.vsix
 
   openvsx:
     needs: build
     runs-on: ubuntu-latest
     environment: release
+    env:
+      OVSX_PAT: ${{ secrets.OVSX_PAT }} # not set: Open VSX is skipped
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: extension
-      - run: npx --yes ovsx@0.10 publish luciole.vsix
-        env:
-          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+      - if: env.OVSX_PAT == ''
+        run: echo "::notice::OVSX_PAT is not set, skipping Open VSX"
+      - if: env.OVSX_PAT != ''
+        run: npx --yes ovsx@0.10 publish luciole.vsix
 
   github:
     needs: [pypi, vscode, openvsx]
