@@ -1,0 +1,150 @@
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: var(--vscode-editor-background);
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+#toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+button {
+  border: none;
+  padding: 3px 10px;
+  border-radius: 2px;
+  cursor: pointer;
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+  font: inherit;
+}
+
+button:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+button.primary {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+}
+
+button.primary:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+button.stop {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-statusBarItem-errorBackground, #c72e0f);
+}
+
+button.stop:hover {
+  filter: brightness(1.15);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+#stepping {
+  display: inline-flex;
+  gap: 6px;
+}
+
+button[hidden],
+#stepping[hidden] {
+  display: none;
+}
+
+#status {
+  flex: 1;
+  min-width: 120px;
+  color: var(--vscode-descriptionForeground);
+}
+
+#legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.key::before {
+  content: "";
+  display: inline-block;
+  width: 18px;
+  margin-right: 5px;
+  vertical-align: middle;
+  border-top: 2px solid var(--key-color);
+}
+
+.key.call { --key-color: #6f8bb3; }
+.key.state { --key-color: #8a6fb3; }
+.key.runtime { --key-color: #d18616; }
+.key.spawn { --key-color: #4fb3a9; }
+.key.waiting::before {
+  width: 9px;
+  height: 9px;
+  border: none;
+  border-radius: 50%;
+  background: #5aa9ff;
+}
+
+#brain {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+#message {
+  padding: 8px 12px;
+  white-space: pre-wrap;
+  color: var(--vscode-errorForeground);
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+#message[hidden] {
+  display: none;
+}
+
+#path {
+  min-height: 1.4em;
+  padding: 4px 8px;
+  font-family: var(--vscode-editor-font-family);
+  color: #ffc94d;
+  border-top: 1px solid var(--vscode-panel-border);
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 3d-force-graph's hover tooltip */
+.float-tooltip-kap,
+.scene-tooltip {
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 12px;
+  color: var(--vscode-editorHoverWidget-foreground, #ccc);
+  background: var(--vscode-editorHoverWidget-background, #252526);
+  border: 1px solid var(--vscode-editorHoverWidget-border, #454545);
+}
+
+.dim {
+  color: var(--vscode-descriptionForeground);
+}

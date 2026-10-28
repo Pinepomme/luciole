@@ -1,0 +1,11 @@
+src/**
+test/**
+dev/**
+out/test/**
+out/dev/**
+node_modules/**
+build.mjs
+tsconfig.json
+**/*.map
+package.mjs
+luciole.vsix
