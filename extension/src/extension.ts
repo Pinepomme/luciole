@@ -521,11 +521,15 @@ function runAnalyzer(context: vscode.ExtensionContext, target: string, done: (re
   );
 }
 
-/** Folder holding the `luciole` package: python/ in a packaged extension, ../src in this repo. */
+/**
+ * Folder holding the `luciole` package: python/ in a packaged extension, ../src in this repo. The
+ * development window (F5) always uses ../src: a python/ left by packaging may be out of date.
+ */
 function analyzerDir(context: vscode.ExtensionContext): string | undefined {
-  return [path.join(context.extensionPath, "python"), path.join(context.extensionPath, "..", "src")].find((dir) =>
-    fs.existsSync(path.join(dir, "luciole", "analyzer.py")),
-  );
+  const packaged = path.join(context.extensionPath, "python");
+  const source = path.join(context.extensionPath, "..", "src");
+  const order = context.extensionMode === vscode.ExtensionMode.Development ? [source, packaged] : [packaged, source];
+  return order.find((dir) => fs.existsSync(path.join(dir, "luciole", "analyzer.py")));
 }
 
 /** The configured interpreter, else the workspace's virtual environment, else python3. */
