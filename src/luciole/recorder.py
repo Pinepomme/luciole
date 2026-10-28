@@ -58,7 +58,7 @@ log = logging.getLogger(__name__)
 FRAME = 0.05  # seconds between two frames
 OWN_PACKAGE = Path(__file__).resolve().parent
 ASYNC_FLAGS = inspect.CO_COROUTINE | inspect.CO_ITERABLE_COROUTINE | inspect.CO_ASYNC_GENERATOR
-CALLER_SEARCH = 40  # frames to look through for the nearest project caller (asyncio adds ~10)
+CALLER_SEARCH = 40  # frames to look through first for the nearest project caller (asyncio adds ~10)
 ORIGIN_DEPTH = 8  # frames recorded where each coroutine object is created
 MAX_PAUSED_FRAMES = 60
 
@@ -90,6 +90,7 @@ class Recorder:
         self.send = send
         self.reply = reply  # to the view only, not to the --events file
         self.ids: dict[object, str | None] = {}  # code object -> node id, None for code outside the project
+        self.modules: dict[str, str | None] = {}  # file name -> module name, None outside the project
         self.lines: dict[str, list[tuple[int, int, str]]] = {}  # file -> (first line, last line, node id)
         self.calls: dict[str, int] = {}
         self.links: dict[str, int] = {}
@@ -115,19 +116,32 @@ class Recorder:
         except KeyError:
             pass
         node_id = None
-        if not code.co_filename.startswith("<"):
-            path = Path(code.co_filename).resolve()
-            if self.in_project(path):
-                qualname = code.co_qualname.replace(".<locals>.", ".")
-                if qualname == "<module>":
-                    node_id = module_name(path)
-                elif "<" not in qualname:  # lambdas and generator expressions have no node
-                    node_id = f"{module_name(path)}:{qualname}"
+        module = self.module_of(code.co_filename)
+        if module:
+            qualname = code.co_qualname.replace(".<locals>.", ".")
+            if qualname == "<module>":
+                node_id = module
+            elif "<" not in qualname:  # lambdas and generator expressions have no node
+                node_id = f"{module}:{qualname}"
         self.ids[code] = node_id
         if node_id:
             last = max((line for _, _, line in code.co_lines() if line), default=code.co_firstlineno)
             self.lines.setdefault(code.co_filename, []).append((code.co_firstlineno, last, node_id))
         return node_id
+
+    def module_of(self, filename: str) -> str | None:
+        """Module name of a project file, None for other files. Resolving paths touches the disk: once per file."""
+        try:
+            return self.modules[filename]
+        except KeyError:
+            pass
+        module = None
+        if not filename.startswith("<"):
+            path = Path(filename).resolve()
+            if self.in_project(path):
+                module = module_name(path)
+        self.modules[filename] = module
+        return module
 
     def in_project(self, path: Path) -> bool:
         if path.suffix != ".py" or not path.is_relative_to(self.root) or path.is_relative_to(OWN_PACKAGE):
@@ -135,15 +149,18 @@ class Recorder:
         parts = path.relative_to(self.root).parent.parts
         return not any(part.startswith(".") or part in SKIP_DIRS for part in parts)
 
-    def nearest_project(self, frame) -> str | None:
-        """Node id of the nearest project frame, starting at `frame` (in the current thread)."""
-        for _ in range(CALLER_SEARCH):
-            if frame is None:
-                return None
+    def nearest_project(self, frame, limit: int | None = CALLER_SEARCH) -> str | None:
+        """Node id of the nearest project frame, starting at `frame` (in the current thread).
+
+        Looks through `limit` frames, or the whole stack when `limit` is None.
+        """
+        depth = 0
+        while frame is not None and (limit is None or depth < limit):
             node_id = self.node_id(frame.f_code)
             if node_id:
                 return node_id
             frame = frame.f_back
+            depth += 1
         return None
 
     def locate(self, filename: str, line: int) -> str | None:
@@ -339,9 +356,10 @@ class Recorder:
         ident = threading.get_ident()
         stack = self.thread_stacks.get(ident, [])
         if caller is None and stack:
-            # Called back from deeper than CALLER_SEARCH library frames (torch tracing a model, say):
-            # the stack is kept up to date by the events, so its top is the caller.
-            caller = stack[-1]
+            # Called back from deeper than CALLER_SEARCH library frames (torch tracing a model, a test
+            # run by pytest): look through the whole stack. Guessing the top of `stack` instead is wrong
+            # when it holds a frame that left without an event.
+            caller = self.nearest_project(frame, limit=None)
         if new_call:
             self.calls[node_id] = self.calls.get(node_id, 0) + 1
             if code.co_flags & ASYNC_FLAGS:
