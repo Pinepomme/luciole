@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Luciole extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}/extension", "${workspaceFolder}"],
+      "outFiles": ["${workspaceFolder}/extension/out/**/*.js"],
+      "preLaunchTask": "extension: build"
+    }
+  ]
+}

@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Pinepomme/luciole/schema/graph.schema.json",
+  "title": "Luciole graph",
+  "description": "Static graph of a Python project: modules, classes, functions and variables, plus the calls and data flow between them. See docs/graph-format.md.",
+  "type": "object",
+  "required": ["format", "format_version", "root", "nodes", "edges"],
+  "additionalProperties": false,
+  "properties": {
+    "format": { "const": "luciole-graph" },
+    "format_version": {
+      "description": "Major version of this format. Bumped on breaking changes only.",
+      "const": 1
+    },
+    "root": {
+      "description": "Directory the analyzer was run on. Every node's `file` is relative to it.",
+      "type": "string"
+    },
+    "generator": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" }
+      },
+      "required": ["name", "version"],
+      "additionalProperties": false
+    },
+    "nodes": { "type": "array", "items": { "$ref": "#/$defs/node" } },
+    "edges": { "type": "array", "items": { "$ref": "#/$defs/edge" } }
+  },
+  "$defs": {
+    "nodeId": {
+      "description": "Stable id built from the qualified name: `pkg.mod`, `pkg.mod:Class.method`, `pkg.mod:func#var`.",
+      "type": "string",
+      "minLength": 1
+    },
+    "loc": {
+      "description": "Source span. Lines are 1-based, columns 0-based (the `ast` convention).",
+      "type": "object",
+      "required": ["line", "col", "end_line", "end_col"],
+      "additionalProperties": false,
+      "properties": {
+        "line": { "type": "integer", "minimum": 1 },
+        "col": { "type": "integer", "minimum": 0 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "end_col": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "site": {
+      "description": "One place in the source where an edge happens.",
+      "type": "object",
+      "required": ["line", "col"],
+      "additionalProperties": false,
+      "properties": {
+        "line": { "type": "integer", "minimum": 1 },
+        "col": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": ["id", "kind", "name", "parent", "file", "loc"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/nodeId" },
+        "kind": { "enum": ["module", "class", "function", "variable"] },
+        "name": { "type": "string", "minLength": 1 },
+        "parent": {
+          "description": "Id of the enclosing node; null for modules. This is the only way containment is expressed.",
+          "oneOf": [{ "$ref": "#/$defs/nodeId" }, { "type": "null" }]
+        },
+        "file": { "type": "string", "minLength": 1 },
+        "loc": { "$ref": "#/$defs/loc" },
+        "is_async": { "type": "boolean" },
+        "decorators": {
+          "description": "Decorator expressions as source text, outermost first.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "bases": {
+          "description": "Base class expressions as source text.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "role": {
+          "description": "What kind of binding a variable is.",
+          "enum": ["param", "local", "global", "class_attr", "instance_attr", "return"]
+        },
+        "param_index": {
+          "description": "Position of a parameter in the signature, counting `self`.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "module" } } },
+          "then": { "properties": { "parent": { "type": "null" } } },
+          "else": { "properties": { "parent": { "$ref": "#/$defs/nodeId" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "variable" } } },
+          "then": { "required": ["role"] },
+          "else": { "not": { "anyOf": [{ "required": ["role"] }, { "required": ["param_index"] }] } }
+        },
+        {
+          "if": { "properties": { "role": { "const": "param" } }, "required": ["role"] },
+          "then": { "required": ["param_index"] },
+          "else": { "not": { "required": ["param_index"] } }
+        },
+        {
+          "if": { "not": { "properties": { "kind": { "const": "function" } } } },
+          "then": { "not": { "required": ["is_async"] } }
+        },
+        {
+          "if": { "not": { "properties": { "kind": { "enum": ["function", "class"] } } } },
+          "then": { "not": { "required": ["decorators"] } }
+        },
+        {
+          "if": { "not": { "properties": { "kind": { "const": "class" } } } },
+          "then": { "not": { "required": ["bases"] } }
+        }
+      ]
+    },
+    "edge": {
+      "description": "Edges point in the direction control or values move. At most one edge per (kind, source, target); repeated occurrences go in `sites`.",
+      "type": "object",
+      "required": ["kind", "source", "target"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["calls", "reads", "writes", "flows_to", "passes_arg", "returns"] },
+        "source": { "$ref": "#/$defs/nodeId" },
+        "target": { "$ref": "#/$defs/nodeId" },
+        "sites": { "type": "array", "items": { "$ref": "#/$defs/site" }, "minItems": 1 },
+        "provenance": {
+          "description": "`runtime` marks edges only observed while the program ran (dynamic calls, monkey-patching). Defaults to `static`.",
+          "enum": ["static", "runtime"],
+          "default": "static"
+        }
+      }
+    }
+  }
+}

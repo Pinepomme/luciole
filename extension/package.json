@@ -1,0 +1,263 @@
+{
+  "name": "luciole",
+  "displayName": "Luciole",
+  "description": "See a Python project as a 3D brain of functions, and watch it light up as the code runs.",
+  "version": "0.0.3",
+  "publisher": "pinepomme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Pinepomme/luciole"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization",
+    "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "luciole.showGraph",
+        "title": "Show Graph (Whole Folder)",
+        "category": "Luciole",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "luciole.showFileGraph",
+        "title": "Show Graph for Current File",
+        "category": "Luciole",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "luciole.runLive",
+        "title": "Run Live",
+        "category": "Luciole",
+        "icon": "$(zap)"
+      },
+      {
+        "command": "luciole.stopLive",
+        "title": "Stop Live Run",
+        "category": "Luciole",
+        "icon": "$(debug-stop)",
+        "enablement": "luciole.liveRunning"
+      },
+      {
+        "command": "luciole.pauseLive",
+        "title": "Pause Live Run",
+        "category": "Luciole",
+        "icon": "$(debug-pause)",
+        "enablement": "luciole.liveRunning && !luciole.livePaused"
+      },
+      {
+        "command": "luciole.resumeLive",
+        "title": "Resume Live Run",
+        "category": "Luciole",
+        "icon": "$(debug-continue)",
+        "enablement": "luciole.liveRunning && luciole.livePaused"
+      },
+      {
+        "command": "luciole.stepOver",
+        "title": "Step Over",
+        "category": "Luciole",
+        "icon": "$(debug-step-over)",
+        "enablement": "luciole.livePaused"
+      },
+      {
+        "command": "luciole.stepInto",
+        "title": "Step Into",
+        "category": "Luciole",
+        "icon": "$(debug-step-into)",
+        "enablement": "luciole.livePaused"
+      },
+      {
+        "command": "luciole.stepOut",
+        "title": "Step Out",
+        "category": "Luciole",
+        "icon": "$(debug-step-out)",
+        "enablement": "luciole.livePaused"
+      },
+      {
+        "command": "luciole.revealFrame",
+        "title": "Show Frame",
+        "category": "Luciole"
+      }
+    ],
+    "configuration": {
+      "title": "Luciole",
+      "properties": {
+        "luciole.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Python interpreter that runs the analyzer (3.10+) and live mode (3.12+). When empty, Luciole uses the workspace's .venv, then python3."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "luciole",
+          "title": "Luciole",
+          "icon": "media/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "luciole": [
+        {
+          "id": "luciole.variables",
+          "name": "Variables"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "luciole.variables",
+        "contents": "Pause a live run to see the variables of every function on its call path.\n[Run Live](command:luciole.runLive)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "luciole.runLive",
+          "when": "editorLangId == python && !luciole.liveRunning",
+          "group": "navigation@1"
+        },
+        {
+          "command": "luciole.stopLive",
+          "when": "luciole.liveRunning",
+          "group": "navigation@1"
+        },
+        {
+          "command": "luciole.pauseLive",
+          "when": "luciole.liveRunning && !luciole.livePaused",
+          "group": "navigation@0"
+        },
+        {
+          "command": "luciole.resumeLive",
+          "when": "luciole.liveRunning && luciole.livePaused",
+          "group": "navigation@0"
+        },
+        {
+          "command": "luciole.showFileGraph",
+          "when": "editorLangId == python",
+          "group": "navigation@2"
+        },
+        {
+          "command": "luciole.stepOver",
+          "when": "luciole.livePaused",
+          "group": "navigation@0"
+        },
+        {
+          "command": "luciole.stepInto",
+          "when": "luciole.livePaused",
+          "group": "navigation@0"
+        },
+        {
+          "command": "luciole.stepOut",
+          "when": "luciole.livePaused",
+          "group": "navigation@0"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "luciole.showGraph",
+          "when": "resourceLangId == python"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "luciole.showGraph",
+          "when": "explorerResourceIsFolder"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "luciole.revealFrame",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "luciole.pauseLive",
+          "when": "view == luciole.variables && luciole.liveRunning && !luciole.livePaused",
+          "group": "navigation@1"
+        },
+        {
+          "command": "luciole.resumeLive",
+          "when": "view == luciole.variables && luciole.liveRunning && luciole.livePaused",
+          "group": "navigation@1"
+        },
+        {
+          "command": "luciole.stepOver",
+          "when": "view == luciole.variables && luciole.livePaused",
+          "group": "navigation@1"
+        },
+        {
+          "command": "luciole.stepInto",
+          "when": "view == luciole.variables && luciole.livePaused",
+          "group": "navigation@1"
+        },
+        {
+          "command": "luciole.stepOut",
+          "when": "view == luciole.variables && luciole.livePaused",
+          "group": "navigation@1"
+        },
+        {
+          "command": "luciole.stopLive",
+          "when": "view == luciole.variables && luciole.liveRunning",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "luciole.stepOver",
+        "key": "f10",
+        "when": "luciole.livePaused && !inDebugMode"
+      },
+      {
+        "command": "luciole.stepInto",
+        "key": "f11",
+        "when": "luciole.livePaused && !inDebugMode"
+      },
+      {
+        "command": "luciole.stepOut",
+        "key": "shift+f11",
+        "when": "luciole.livePaused && !inDebugMode"
+      },
+      {
+        "command": "luciole.resumeLive",
+        "key": "f5",
+        "when": "luciole.livePaused && !inDebugMode"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node build.mjs && node --test out/test/",
+    "screenshot": "node build.mjs && node out/dev/screenshot.js",
+    "vscode:prepublish": "node build.mjs",
+    "package": "node package.mjs",
+    "install-local": "node package.mjs && code --install-extension luciole.vsix --force"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.34",
+    "@types/three": "^0.186.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.24.0",
+    "3d-force-graph": "^1.80.1",
+    "esbuild": "^0.20.2",
+    "playwright-core": "^1.47.2",
+    "three": "^0.186.1",
+    "three-spritetext": "^1.10.0",
+    "typescript": "^5.4.5"
+  },
+  "overrides": {
+    "undici": "6.19.8"
+  }
+}
