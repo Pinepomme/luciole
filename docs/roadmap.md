@@ -72,6 +72,8 @@ caller→callee links seen at runtime are missing from the static graph (imports
   and command line) and that viewers subscribe to. The VS Code extension becomes one viewer, and
   starts the engine when none is running.
 - A protocol handshake: recorder, engine and viewers state the protocol version they speak.
+- Run Live → tests for this file: most files of a library are not meant to run on their own, so
+  find the test files that import the current module and run pytest on them.
 
 ### Phase 2: Debugging through the engine
 
