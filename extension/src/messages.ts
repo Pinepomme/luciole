@@ -83,6 +83,7 @@ export type FromWebview =
   | { type: "ready" }
   | { type: "refresh" }
   | { type: "runLive" }
+  | { type: "runLiveWith" }
   | { type: "stopLive" }
   | { type: "pauseLive"; paused: boolean }
   | { type: "step"; mode: StepMode }

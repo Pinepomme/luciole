@@ -2,7 +2,7 @@
   "name": "luciole",
   "displayName": "Luciole",
   "description": "See a Python project as a 3D brain of functions, and watch it light up as the code runs.",
-  "version": "0.0.3",
+  "version": "0.1.0",
   "publisher": "pinepomme",
   "license": "MIT",
   "repository": {
@@ -14,6 +14,7 @@
   },
   "categories": [
     "Visualization",
+    "Debuggers",
     "Programming Languages"
   ],
   "main": "./out/extension.js",
@@ -36,6 +37,12 @@
         "title": "Run Live",
         "category": "Luciole",
         "icon": "$(zap)"
+      },
+      {
+        "command": "luciole.runLiveWith",
+        "title": "Run Live…",
+        "category": "Luciole",
+        "icon": "$(run-all)"
       },
       {
         "command": "luciole.stopLive",
@@ -92,6 +99,49 @@
           "type": "string",
           "default": "",
           "description": "Python interpreter that runs the analyzer (3.10+) and live mode (3.12+). When empty, Luciole uses the workspace's .venv, then python3."
+        },
+        "luciole.runConfigurations": {
+          "type": "array",
+          "default": [],
+          "markdownDescription": "Runs offered by **Luciole: Run Live…**. Each has a `name`, and either a `program` (script, relative to the workspace folder) or a `module` (run with `python -m`), plus optional `args`, `cwd` and `env`. `${workspaceFolder}` and `${file}` are replaced.",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Name shown in the picker."
+              },
+              "program": {
+                "type": "string",
+                "description": "Script to run, relative to the workspace folder."
+              },
+              "module": {
+                "type": "string",
+                "description": "Module to run with python -m, instead of program (pytest, mypkg.train…)."
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Arguments."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory, relative to the workspace folder (default: the folder)."
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Extra environment variables."
+              }
+            }
+          }
         }
       }
     },
@@ -159,6 +209,11 @@
           "command": "luciole.stepOut",
           "when": "luciole.livePaused",
           "group": "navigation@0"
+        },
+        {
+          "command": "luciole.runLiveWith",
+          "when": "editorLangId == python && !luciole.liveRunning",
+          "group": "luciole@1"
         }
       ],
       "editor/title/context": [
@@ -259,5 +314,18 @@
   },
   "overrides": {
     "undici": "6.19.8"
+  },
+  "icon": "media/icon.png",
+  "keywords": [
+    "python",
+    "call graph",
+    "debugger",
+    "visualization",
+    "live",
+    "tracing"
+  ],
+  "homepage": "https://github.com/Pinepomme/luciole",
+  "bugs": {
+    "url": "https://github.com/Pinepomme/luciole/issues"
   }
 }

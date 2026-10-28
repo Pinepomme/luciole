@@ -225,3 +225,4 @@ extension/out/
 *.vsix
 extension/python/
 extension/LICENSE
+extension/CHANGELOG.md

@@ -229,6 +229,7 @@ def test_exit_code_and_module_mode(tmp_path):
     assert totals(frames, "calls") == {"app": 1, "app.__main__": 1}
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="no SIGINT to a child process on Windows")
 def test_ctrl_c_stops_the_program_and_its_traceback_ends_in_project_code(tmp_path):
     """What Stop in the view does: SIGINT, then the program unwinds as it would without Luciole."""
     (tmp_path / "busy.py").write_text(textwrap.dedent("""\

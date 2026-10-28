@@ -48,12 +48,19 @@ share the same session.
 
 ### Phase 0: Consolidate and ship v0.1
 
-- Commit the current work.
-- CI on GitHub Actions: pytest, the extension's unit tests and type check.
-- Run configurations: `-m module`, script arguments, pytest, environment variables.
-- First test on a real project: fix what breaks, and measure the recorder's overhead.
-- Publish `luciole` on PyPI, and the extension on the VS Code Marketplace and Open VSX (which
-  Cursor, Windsurf and VSCodium install from).
+- [x] Commit the current work.
+- [x] CI on GitHub Actions: pytest, the extension's unit tests and type check.
+- [x] Run configurations: `-m module`, script arguments, pytest, environment variables
+  (Run Live…, `luciole.runConfigurations`).
+- [x] First test on a real project (36k lines): the analyzer takes 5 s; every function that ran
+  matched a graph node; the recorder adds about 20% to a pytest run; a wrong caller after deep
+  library stacks was fixed.
+- [ ] Publish `luciole` on PyPI, and the extension on the VS Code Marketplace and Open VSX (which
+  Cursor, Windsurf and VSCodium install from). Packages are built and checked.
+
+Found on the real project, for phase 2: a 2,000-function graph is an unreadable cloud; 45% of the
+caller→callee links seen at runtime are missing from the static graph (imports, class bodies,
+`@property` getters, methods on objects of unknown type).
 
 ### Phase 1: Engine foundation
 
