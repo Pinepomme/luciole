@@ -1,9 +1,10 @@
 """Start Luciole's recorder in every Python process whose environment turns it on.
 
 This folder goes on PYTHONPATH (Luciole's switch in VS Code, or `luciole env`), so Python imports
-this file at startup, as it would the environment's own sitecustomize. With LUCIOLE_LIVE_PORT set
-and a Luciole view listening on that port, the process reports its calls to the view; when nothing
-listens, nothing is started. Turning Luciole off is removing the folder from PYTHONPATH.
+this file at startup, as it would the environment's own sitecustomize. When the Luciole engine
+runs (its port in LUCIOLE_LIVE_PORT, else in its file, see luciole/protocol.py), the process
+reports its calls to it; when no engine answers, nothing is started. Turning Luciole off is
+removing the folder from PYTHONPATH.
 
 Programs must run the same with Luciole on: Luciole's errors are swallowed, and the sitecustomize
 this file hides (Ubuntu's Python ships one, for instance) still runs.
@@ -44,21 +45,25 @@ def is_luciole_run():
 
 
 def start_luciole():
-    port = os.environ.get("LUCIOLE_LIVE_PORT")
-    if not port or sys.version_info < (3, 12) or is_luciole_run():
+    if sys.version_info < (3, 12) or is_luciole_run():
         return
     import socket
 
-    # Connect before importing the recorder: with nothing listening, starting costs nothing more.
-    try:
-        connection = socket.create_connection(("127.0.0.1", int(port)), timeout=2)
-    except (OSError, ValueError):
-        return
-    connection.settimeout(None)
-    # The luciole package around this folder: the same version as the view that set the variables.
+    # The luciole package around this folder: the same version as the view that turned it on.
     package_parent = os.path.dirname(os.path.dirname(HERE))
     sys.path.insert(0, package_parent)
     try:
+        from luciole import protocol
+
+        port = os.environ.get("LUCIOLE_LIVE_PORT") or protocol.engine_port()
+        if not port:
+            return
+        # Connect before importing the recorder: with no engine, starting costs nothing more.
+        try:
+            connection = socket.create_connection(("127.0.0.1", int(port)), timeout=2)
+        except (OSError, ValueError):
+            return
+        connection.settimeout(None)
         from luciole import recorder
     finally:
         sys.path.remove(package_parent)

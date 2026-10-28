@@ -325,7 +325,8 @@ def test_pause_shows_variables_and_expands_objects(tmp_path):
                     return message[key]
             raise AssertionError(f"no {key!r} message")
 
-        next_message("calls")  # running
+        while "app:tick" not in next_message("calls"):
+            pass  # wait for the loop: before it, LIMIT and cart may not exist yet
         send({"cmd": "pause"})
         paused = next_message("paused")
         assert paused["thread"] == "MainThread"

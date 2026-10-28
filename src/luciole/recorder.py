@@ -17,8 +17,7 @@ JSON line with what happened since the last one, and the current state:
   not simply the caller.
 - `waiting`: project coroutines suspended on an `await` right now, per function.
 The last line is {"done": true}. Node ids follow docs/graph-format.md, so they match the
-static graph. The view also gets, first, the process it is watching:
-{"process": {"pid": 4242, "argv": ["python", "-m", "pytest"]}}.
+static graph. The connection to the engine starts with the recorder's hello (see protocol.py).
 
 A session starts with `luciole run`, with luciole.start() in the program, or by itself in any
 Python process started with the auto-start folder on PYTHONPATH (see _autostart/sitecustomize.py).
@@ -57,7 +56,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from luciole import values
+from luciole import protocol, values
 from luciole.analyzer import SKIP_DIRS, module_name
 
 log = logging.getLogger(__name__)
@@ -528,7 +527,8 @@ class Session:
         sys.set_coroutine_origin_tracking_depth(ORIGIN_DEPTH)
         monitoring.set_events(tool, always)
         if self.connection:
-            self.write({"process": {"pid": os.getpid(), "argv": sys.orig_argv}}, self.view_sinks)
+            hello = protocol.hello("recorder", pid=os.getpid(), argv=sys.orig_argv, root=str(recorder.root))
+            self.write(hello, self.view_sinks)
             # After set_events above, which would undo an early pause's LINE events.
             threading.Thread(target=self.control, name="luciole-control", daemon=True).start()
 
@@ -576,7 +576,11 @@ class Session:
         try:
             for line in self.connection.makefile(encoding="utf-8"):
                 try:
-                    self.recorder.command(json.loads(line))
+                    message = json.loads(line)
+                    if "refused" in message:  # an engine of another protocol: record for nobody
+                        log.warning("the Luciole engine refused this recorder: %s", message["refused"])
+                        break
+                    self.recorder.command(message)
                 except (ValueError, AttributeError) as error:
                     log.warning("ignored a command from the view: %s (%s)", line.strip()[:200], error)
         except (OSError, ValueError):  # ValueError: the connection was closed by stop()
@@ -589,8 +593,13 @@ active: Session | None = None
 hooks_installed = False
 
 
-def connect(port: int | str, quiet: bool) -> socket.socket | None:
-    """Connection to the view listening on `port`, None when nothing listens there."""
+def connect(port: int | str | None, quiet: bool) -> socket.socket | None:
+    """Connection to the engine on `port` (default: the running engine's), None when nothing listens."""
+    port = port or protocol.engine_port()
+    if not port:
+        if not quiet:
+            log.warning("no Luciole engine is running: open the Luciole view in VS Code, or run `luciole engine`")
+        return None
     try:
         connection = socket.create_connection(("127.0.0.1", int(port)), timeout=2)
     except (OSError, ValueError) as error:
@@ -610,7 +619,7 @@ def start(root: Path | str | None = None, port: int | str | None = None, events:
         if not quiet:
             log.warning("live mode needs Python 3.12 or newer (sys.monitoring); this is %s", sys.version.split()[0])
         return False
-    port = port or os.environ.get("LUCIOLE_LIVE_PORT")
+    port = port or os.environ.get("LUCIOLE_LIVE_PORT") or protocol.engine_port()
     if connection is None and port:
         connection = connect(port, quiet)
     if connection is None and events is None:
@@ -659,7 +668,7 @@ def after_fork() -> None:
         session.uninstall()
         if session.connection:
             session.connection.close()  # the child's copy: the parent's connection stays open
-        if session.port and start(session.recorder.root, session.port, quiet=True):
+        if session.connection and start(session.recorder.root, session.port, quiet=True):
             exit_ = os._exit
             if exit_.__name__ != "luciole_exit":
                 # Forked children usually end with os._exit (multiprocessing's do), which skips
@@ -683,7 +692,8 @@ def run(target: list[str], as_module: bool, root: Path, port: int | None, events
         log.error("live mode needs Python 3.12 or newer (sys.monitoring); this is %s", sys.version.split()[0])
         return 2
     stop()  # auto-started in this interpreter: this run records it instead, with its own options
-    session = Session(root, port, connect(port, quiet=False) if port else None, events)
+    # Without --port, the running engine's, if any: then nothing to warn about when there is none.
+    session = Session(root, port, connect(port, quiet=not port), events)
     session.start()
     active = session
     install_hooks()

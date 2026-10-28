@@ -1,0 +1,128 @@
+"""The engine: handshake, routing between recorders and viewers, discovery, idle exit."""
+
+import json
+import os
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+import pytest
+
+from graphcheck import REPO
+from luciole import protocol
+from luciole.engine import Engine, serve
+
+
+@pytest.fixture
+def engine():
+    engine = Engine(idle=0)
+    thread = threading.Thread(target=engine.serve, daemon=True)
+    thread.start()
+    yield engine
+    engine.stop()
+    thread.join(timeout=5)
+
+
+class Client:
+    """A recorder or viewer speaking the protocol by hand."""
+
+    def __init__(self, port, role, **fields):
+        self.connection = socket.create_connection(("127.0.0.1", port), timeout=5)
+        self.lines = self.connection.makefile(encoding="utf-8")
+        protocol.send(self.connection, protocol.hello(role, **fields) if role else fields)
+
+    def send(self, message):
+        protocol.send(self.connection, message)
+
+    def receive(self):
+        line = self.lines.readline()
+        return json.loads(line) if line else None
+
+    def receive_until(self, check):
+        while (message := self.receive()) is not None:
+            if check(message):
+                return message
+        return None
+
+    def close(self):
+        self.lines.close()
+        self.connection.close()
+
+
+def test_the_handshake_checks_the_protocol(engine):
+    viewer = Client(engine.port, "viewer")
+    assert viewer.receive() == {"welcome": {"protocol": protocol.PROTOCOL, "version": protocol.__version__}}
+    old = Client(engine.port, None, hello={"role": "viewer", "protocol": protocol.PROTOCOL + 1})
+    assert "refused" in old.receive() and old.receive() is None  # then closed
+    rude = Client(engine.port, None, cmd="pause")
+    assert rude.receive() == {"refused": "expected a hello"}
+
+
+def test_routes_between_recorders_and_the_viewers_of_their_project(engine, tmp_path):
+    app, other = tmp_path / "app", tmp_path / "other"
+    app_viewer = Client(engine.port, "viewer", roots=[str(app)])
+    every_viewer = Client(engine.port, "viewer")
+    for viewer in (app_viewer, every_viewer):
+        viewer.receive()  # welcome
+    recorder = Client(engine.port, "recorder", pid=11, argv=["python", "app.py"], root=str(app / "src"))
+    stranger = Client(engine.port, "recorder", pid=12, argv=["python", "other.py"], root=str(other))
+    assert recorder.receive()["welcome"] and stranger.receive()["welcome"]
+
+    announced = app_viewer.receive()["process"]
+    assert announced["pid"] == 11 and announced["root"] == str(app / "src")
+    assert {every_viewer.receive()["process"]["pid"], every_viewer.receive()["process"]["pid"]} == {11, 12}
+
+    stranger.send({"t": 0.1, "calls": {"other:main": 1}})
+    recorder.send({"t": 0.1, "calls": {"app:main": 1}})
+    assert app_viewer.receive() == {"from": announced["id"], "t": 0.1, "calls": {"app:main": 1}}  # not the stranger's
+
+    app_viewer.send({"to": announced["id"], "cmd": "step", "thread": 7, "mode": "over"})
+    assert recorder.receive() == {"cmd": "step", "thread": 7, "mode": "over"}
+    app_viewer.send({"cmd": "pause"})  # to every process the viewer shows
+    assert recorder.receive() == {"cmd": "pause"}
+
+    recorder.close()
+    assert app_viewer.receive_until(lambda m: "exit" in m) == {"exit": announced["id"]}
+    # A viewer that joins later hears of the processes already connected.
+    late = Client(engine.port, "viewer", roots=[str(other)])
+    late.receive()
+    assert late.receive()["process"]["pid"] == 12
+
+    for viewer in (app_viewer, every_viewer, late):
+        viewer.close()
+    assert stranger.receive_until(lambda m: "cmd" in m) == {"cmd": "resume"}  # nobody left to resume it
+
+
+def test_registers_and_exits_when_idle():
+    engine = Engine(idle=0.3)
+    thread = threading.Thread(target=engine.serve, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while protocol.engine_port() != engine.port and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert json.loads(protocol.engine_file().read_text())["pid"] == os.getpid()
+    thread.join(timeout=10)
+    assert not thread.is_alive() and not protocol.engine_file().exists()
+
+
+def test_a_second_engine_leaves_the_running_one(engine):
+    while protocol.engine_port() != engine.port:
+        time.sleep(0.01)
+    assert serve() == 0  # returns at once
+    assert protocol.engine_port() == engine.port
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="sys.monitoring needs Python 3.12")
+def test_luciole_run_reports_to_the_running_engine(engine, tmp_path):
+    while protocol.engine_port() != engine.port:
+        time.sleep(0.01)
+    viewer = Client(engine.port, "viewer")
+    viewer.receive()
+    (tmp_path / "prog.py").write_text("def work():\n    pass\n\nwork()\n")
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    result = subprocess.run([sys.executable, "-m", "luciole", "run", "--root", str(tmp_path), "prog.py"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert viewer.receive_until(lambda m: "prog:work" in m.get("calls", {}))
+    viewer.close()

@@ -54,6 +54,10 @@ export class Processes<K> {
     this.entries.delete(key);
   }
 
+  get ids(): K[] {
+    return [...this.entries.keys()];
+  }
+
   get active(): K[] {
     return [...this.entries].filter(([, entry]) => entry.active).map(([key]) => key);
   }

@@ -9,6 +9,7 @@ const builds = [
   { ...node, entryPoints: ["test/brain.test.ts"], outfile: "out/test/brain.test.js" },
   { ...node, entryPoints: ["test/runs.test.ts"], outfile: "out/test/runs.test.js" },
   { ...node, entryPoints: ["test/processes.test.ts"], outfile: "out/test/processes.test.js" },
+  { ...node, entryPoints: ["test/engine.test.ts"], outfile: "out/test/engine.test.js" },
   { ...node, entryPoints: ["dev/screenshot.ts"], outfile: "out/dev/screenshot.js", external: ["playwright-core"] },
 ];
 
