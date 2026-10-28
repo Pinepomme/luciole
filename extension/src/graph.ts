@@ -33,6 +33,8 @@ export interface GraphEdge {
   target: string;
   sites?: { line: number; col: number }[];
   provenance?: "static" | "runtime";
+  /** `calls` resolved by method name alone: likely, not certain. */
+  by_name?: boolean;
 }
 
 export interface Graph {

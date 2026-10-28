@@ -16,6 +16,11 @@
 - Debugging: the brain follows VS Code's Python debugger (the function it stopped in glows red),
   right-click a neuron to stop on each call of its function, and with auto-start on, debugged
   programs light up too. Function nodes gain `body_line`, the first line each call runs.
+- Better call resolution: imports (which run the imported module), star imports, properties,
+  `super()`, overrides in subclasses, return types and annotations, special methods (`x[i]`,
+  `with`, `len`, f-strings…), functions held in variables, and, as a marked guess (`by_name`), the
+  project's only method of a name. On the standard library's `email` and `asyncio` packages, the
+  share of runtime calls missing from the graph went from 52% to 27%.
 - The view shows several processes at once; Pause and Stop apply to all of them.
 - The recorder uses a `sys.monitoring` tool id of its own, so `cProfile`, coverage and debuggers
   keep working with it.

@@ -247,3 +247,149 @@ def test_body_line_is_where_each_call_starts(tmp_path):
     '''})
     lines = {n["name"]: n["body_line"] for n in graph["nodes"] if n["kind"] == "function"}
     assert lines == {"plain": 3, "documented": 9, "only_docstring": 14}
+
+
+def calls(graph):
+    return edges(graph, "calls")
+
+
+def test_star_imports_and_imports_running_modules(tmp_path):
+    graph = analyze(tmp_path, {
+        "pkg/__init__.py": "from .queues import *\n",
+        "pkg/queues.py": "class Queue:\n    def get(self):\n        return 1\n\ndef _hidden():\n    pass\n",
+        "app.py": """
+            import pkg
+            from pkg import queues
+
+            def main():
+                q = pkg.Queue()
+                return q.get()
+        """,
+    })
+    found = calls(graph)
+    assert ("app:main", "pkg.queues:Queue.get") in found  # pkg.Queue comes from the star import
+    assert {("app", "pkg"), ("app", "pkg.queues"), ("pkg", "pkg.queues")} <= found  # imports run modules
+
+
+def test_properties_super_and_overrides(tmp_path):
+    graph = analyze(tmp_path, {"shapes.py": """
+        class Shape:
+            def __init__(self, name):
+                self.name = name
+
+            @property
+            def area(self):
+                return 0
+
+            @area.setter
+            def area(self, value):
+                pass
+
+            def describe(self):
+                return self.render() + str(self.area)
+
+
+        class Square(Shape):
+            def __init__(self, side):
+                super().__init__("square")
+                self.side = side
+
+            def render(self):
+                return "[]"
+
+            @property
+            def area(self):
+                return self.side ** 2
+
+
+        def report(shape: Shape):
+            return shape.area
+    """})
+    found = calls(graph)
+    assert ("shapes:Square.__init__", "shapes:Shape.__init__") in found  # super()
+    assert ("shapes:Shape.describe", "shapes:Square.render") in found  # defined in a subclass only
+    assert ("shapes:Shape.describe", "shapes:Shape.area") in found  # the getter, not the setter
+    assert {("shapes:report", "shapes:Shape.area"), ("shapes:report", "shapes:Square.area")} <= found  # and overrides
+
+
+def test_types_from_returns_annotations_and_special_methods(tmp_path):
+    graph = analyze(tmp_path, {"store.py": """
+        class Cart:
+            def __getitem__(self, key):
+                return 1
+
+            def __setitem__(self, key, value):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                pass
+
+            def __len__(self):
+                return 0
+
+            def __str__(self):
+                return "cart"
+
+            def total(self):
+                return 0
+
+
+        def make() -> Cart:
+            return Cart()
+
+
+        def build():
+            return Cart()
+
+
+        def use():
+            cart = make()
+            cart["apple"] = 2
+            with build() as other:
+                other["pear"]
+            label = f"{cart}"
+            return len(cart), build().total()
+
+
+        class Shop:
+            cart: Cart
+
+            def checkout(self):
+                return self.cart.total()
+    """})
+    found = calls(graph)
+    for method in ("__setitem__", "__enter__", "__exit__", "__getitem__", "__len__", "__str__", "total"):
+        assert ("store:use", f"store:Cart.{method}") in found, method
+    assert ("store:Shop.checkout", "store:Cart.total") in found  # class-level annotation
+
+
+def test_functions_held_in_variables_and_calls_by_name(tmp_path):
+    graph = analyze(tmp_path, {"headers.py": """
+        def parse_date(value):
+            return value
+
+
+        class DateHeader:
+            parser = staticmethod(parse_date)
+
+            def parse(self, value):
+                return self.parser(value)
+
+
+        class Message:
+            def get_content_type(self):
+                return "text/plain"
+
+
+        def walk(part):
+            part.split()  # a str method: never matched by name
+            return part.get_content_type()
+    """})
+    graph_edges = {(e["source"], e["target"]): e for e in graph["edges"] if e["kind"] == "calls"}
+    assert ("headers:DateHeader.parse", "headers:parse_date") in graph_edges
+    guess = graph_edges[("headers:walk", "headers:Message.get_content_type")]
+    assert guess["by_name"] is True
+    assert "by_name" not in graph_edges[("headers:DateHeader.parse", "headers:parse_date")]

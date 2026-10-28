@@ -90,7 +90,12 @@ caller→callee links seen at runtime are missing from the static graph (imports
   breakpoint show a red dot.
 - Several clients on one session (needed by phase 3: you and an agent on the same run): a DAP
   proxy around debugpy, owned by the engine.
-- Better call resolution with Pyright or jedi.
+- [x] Better call resolution, with the standard library only (no Pyright or jedi): imports, star
+  imports, properties, `super()`, overrides, return types and annotations, special methods,
+  functions held in variables, and the project's only method of a name (marked `by_name`). Missing
+  runtime calls on `email` + `asyncio`: 52% → 27% (`scripts/missing_calls.py`). What remains needs
+  types the code never states (unannotated parameters, `getattr` dispatch, classes built with
+  `type()`).
 - Scale: whole-folder graphs of 30k+ lines that stay readable (search, filtering, modules that
   collapse and expand).
 - Decide the future of live mode's own pause/step/Variables view.

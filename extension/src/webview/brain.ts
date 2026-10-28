@@ -37,6 +37,8 @@ export interface Synapse {
   variables: string[];
   /** Number of call sites (calls) or of variables (state). */
   count: number;
+  /** Calls the analyzer matched by method name only: likely, not certain. */
+  byName?: boolean;
 }
 
 export interface Brain {
@@ -96,8 +98,13 @@ export function buildBrain(graph: Graph): Brain {
   }
 
   for (const edge of graph.edges) {
-    if (edge.kind === "calls" && nodes.get(edge.target)?.kind === "function") {
+    // Calls to functions, and imports, which run the imported module.
+    const target = nodes.get(edge.target)?.kind;
+    if (edge.kind === "calls" && (target === "function" || target === "module")) {
       link("call", edge.source, edge.target, undefined, edge.sites?.length ?? 1);
+      if (edge.by_name) {
+        synapses.get(synapseId("call", edge.source, edge.target))!.byName = true;
+      }
     }
   }
 
