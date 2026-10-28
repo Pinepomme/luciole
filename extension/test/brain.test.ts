@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { test } from "node:test";
 import type { Graph } from "../src/graph";
-import { buildBrain, MAX_STATE_PAIRS } from "../src/webview/brain";
+import { buildBrain, MAX_STATE_PAIRS, neuronAt } from "../src/webview/brain";
 
 // out/test/brain.test.js -> repo root
 const shop: Graph = JSON.parse(readFileSync(resolve(__dirname, "../../../examples/shop.graph.json"), "utf8"));
@@ -69,4 +69,12 @@ test("very shared variables are left out", () => {
     ]).flat(),
   };
   assert.deepEqual(synapses(graph, "state"), {});
+});
+
+test("a line belongs to the innermost function around it, else to its module", () => {
+  const neurons = buildBrain(shop).neurons;
+  assert.equal(neuronAt(neurons, "shop.py", 16)?.id, "shop:Cart.add"); // in Cart.add
+  assert.equal(neuronAt(neurons, "shop.py", 7)?.id, "shop:with_tax");
+  assert.equal(neuronAt(neurons, "shop.py", 2)?.id, "shop"); // module code
+  assert.equal(neuronAt(neurons, "other.py", 7), undefined);
 });

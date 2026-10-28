@@ -74,11 +74,16 @@ share the same session.
 
 ### Phase 2: Debugging through the engine
 
-- A DAP proxy around debugpy, registered in VS Code as a debug type ("Debug Live"): breakpoints,
-  exceptions, watch, hover and the debug console come from debugpy; the recorder keeps the graph
-  lit; the graph follows wherever the debugger stops.
-- Graph-driven debugging: click a neuron to stop the next time that function runs.
-- Several clients on one session (needed by phase 3: you and an agent on the same run).
+- [x] Debugging with VS Code's own Python debugger, with the graph: breakpoints, exceptions, watch,
+  hover and the debug console are debugpy's; with auto-start on, debug launches get its variables
+  so the recorder keeps the graph lit; the graph follows wherever the debugger stops. Done with
+  VS Code's API (a debug configuration provider and a debug adapter tracker) rather than a DAP
+  proxy, which only phase 3 needs.
+- [x] Graph-driven debugging: right-click a neuron to stop the next time that function runs (a
+  VS Code breakpoint on its first body line, in the Breakpoints view); neurons holding a
+  breakpoint show a red dot.
+- Several clients on one session (needed by phase 3: you and an agent on the same run): a DAP
+  proxy around debugpy, owned by the engine.
 - Better call resolution with Pyright or jedi.
 - Scale: whole-folder graphs of 30k+ lines that stay readable (search, filtering, modules that
   collapse and expand).

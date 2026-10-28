@@ -122,6 +122,16 @@ def loc(node: ast.AST) -> dict:
     return {"line": node.lineno, "col": node.col_offset, "end_line": node.end_lineno, "end_col": node.end_col_offset}
 
 
+def body_line(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
+    """First line that runs when the function is called: its first statement after the docstring.
+
+    A breakpoint there stops on each call; one on the `def` line stops when the function is defined.
+    """
+    body = fn.body
+    has_docstring = isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str)
+    return body[1].lineno if has_docstring and len(body) > 1 else body[0].lineno
+
+
 def pos(node: ast.AST) -> tuple[int, int]:
     return (node.lineno, node.col_offset)
 
@@ -245,7 +255,7 @@ class Analyzer:
             extra["is_async"] = True
         if fn.decorator_list:
             extra["decorators"] = [ast.unparse(d) for d in fn.decorator_list]
-        fid = self.add_node("function", fn.name, scope, scope.file, loc(fn), self.child_id(scope, fn.name), **extra)
+        fid = self.add_node("function", fn.name, scope, scope.file, loc(fn), self.child_id(scope, fn.name), body_line=body_line(fn), **extra)
         scope.bindings[fn.name] = fid
         fscope = Scope(fid, "function", fn, scope, scope.file)
         self.scopes[fid] = fscope

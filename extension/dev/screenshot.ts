@@ -2,10 +2,11 @@
  * Renders the webview in headless Chromium, outside VS Code, and saves screenshots.
  * Uses the real webview bundle and Content Security Policy, with a stub of the VS Code API.
  *
- *   node out/dev/screenshot.js [path] [--events FILE] [--out dir]
+ *   node out/dev/screenshot.js [path] [--events FILE] [--breakpoint FILE:LINE] [--stopped FILE:LINE] [--out dir]
  *
  * --events replays a recording made with `luciole run --events FILE ...` and captures the
- * moment with the deepest call stack.
+ * moment with the deepest call stack. --breakpoint and --stopped (FILE relative to the graph's
+ * root) show a breakpoint and the debugger stopped there, as VS Code would send them.
  *
  * Needs a Chromium: set CHROME_PATH, or have one in the Playwright cache (~/.cache/ms-playwright).
  */
@@ -134,6 +135,20 @@ async function main(): Promise<void> {
     }
     await page.waitForTimeout(150);
     await shot("2-live");
+  }
+
+  // The debugger: a breakpoint, and where it stopped.
+  const sourceLine = (value: string | undefined) => {
+    const [file, line] = value?.split(":") ?? [];
+    return file && line ? { file, line: Number(line) } : undefined;
+  };
+  const breakpoint = sourceLine(option("--breakpoint"));
+  const stopped = sourceLine(option("--stopped"));
+  if (breakpoint || stopped) {
+    await page.evaluate((breakpoints) => window.postMessage({ type: "breakpoints", breakpoints }, "*"), breakpoint ? [breakpoint] : []);
+    await page.evaluate((at) => window.postMessage({ type: "debugStopped", at }, "*"), stopped);
+    await page.waitForTimeout(1200); // the camera flies to the stop
+    await shot("3-debugger");
   }
 
   const status = await page.textContent("#status");

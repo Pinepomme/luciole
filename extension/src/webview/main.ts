@@ -7,8 +7,8 @@ import ForceGraph3D from "3d-force-graph";
 import * as THREE from "three";
 import SpriteText from "three-spritetext";
 import type { Graph } from "../graph";
-import type { FromWebview, LiveFrame, StepMode, ThreadStack, ToWebview } from "../messages";
-import { Brain, buildBrain, Neuron, Synapse, SynapseKind, synapseId } from "./brain";
+import type { FromWebview, LiveFrame, SourceLine, StepMode, ThreadStack, ToWebview } from "../messages";
+import { Brain, buildBrain, Neuron, neuronAt, Synapse, SynapseKind, synapseId } from "./brain";
 
 declare function acquireVsCodeApi(): { postMessage(message: FromWebview): void };
 
@@ -20,7 +20,7 @@ interface NeuronNode {
   z?: number;
   /** 1 when the function just ran or is running, fading to 0. */
   heat: number;
-  parts?: { material: THREE.MeshLambertMaterial; halo: THREE.Sprite; spark: THREE.Sprite; label?: SpriteText; radius: number; base: THREE.Color };
+  parts?: { material: THREE.MeshLambertMaterial; halo: THREE.Sprite; spark: THREE.Sprite; mark: THREE.Sprite; label?: SpriteText; radius: number; base: THREE.Color };
 }
 
 interface SynapseLink {
@@ -60,6 +60,8 @@ const foreground = cssColor("--vscode-editor-foreground", "#cccccc");
 const AMBER = new THREE.Color("#ffc94d");
 /** Suspended on an await. */
 const BLUE = new THREE.Color("#5aa9ff");
+/** Where the debugger stopped, and breakpoints (VS Code's breakpoint red). */
+const RED = new THREE.Color("#f14c4c");
 const LINE_COLORS: Record<SynapseKind, THREE.Color> = {
   call: new THREE.Color("#6f8bb3"),
   state: new THREE.Color("#8a6fb3"),
@@ -67,6 +69,7 @@ const LINE_COLORS: Record<SynapseKind, THREE.Color> = {
   spawn: new THREE.Color("#4fb3a9"),
 };
 const glowTexture = makeGlowTexture();
+const dotTexture = makeDotTexture();
 
 let brain: Brain | undefined;
 let target: string | undefined;
@@ -84,6 +87,12 @@ const visited = new Set<string>();
 let pathway = new Set<SynapseLink>();
 let live = false;
 let paused = false;
+/** VS Code's breakpoints, and the functions that hold one. */
+let breakpoints: SourceLine[] = [];
+let breakpointNodes = new Set<string>();
+/** Where the debugger stopped, and the function that holds it. */
+let debugStop: SourceLine | undefined;
+let stoppedIn: string | undefined;
 let callsThisSecond: { t: number; n: number }[] = [];
 
 const graph = new ForceGraph3D(document.getElementById("brain")!)
@@ -110,7 +119,14 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
     hovered = (node as NeuronNode | null) ?? undefined;
     document.body.style.cursor = node ? "pointer" : "";
   })
-  .onNodeClick((node: object) => reveal(node as NeuronNode));
+  .onNodeClick((node: object) => reveal(node as NeuronNode))
+  .onNodeRightClick((node: object) => {
+    // A breakpoint where each call starts (not on the `def` line, which runs once, at import).
+    const { node: graphNode } = (node as NeuronNode).neuron;
+    if (graphNode.kind === "function") {
+      vscode.postMessage({ type: "toggleBreakpoint", file: graphNode.file, line: graphNode.body_line ?? graphNode.loc.line });
+    }
+  });
 
 let fitted = false;
 graph.onEngineStop(() => {
@@ -140,7 +156,12 @@ function neuronObject(node: NeuronNode): THREE.Object3D {
   );
   spark.scale.setScalar(0);
   group.add(spark);
-  node.parts = { material, halo, spark, radius, base };
+  // A red dot on functions that hold a breakpoint, as in the editor's gutter.
+  const mark = new THREE.Sprite(new THREE.SpriteMaterial({ map: dotTexture, color: RED, transparent: true, opacity: 0, depthWrite: false, depthTest: false }));
+  mark.scale.setScalar(Math.max(2.5, radius * 0.9));
+  mark.position.set(radius * 0.85, radius * 0.85, 0);
+  group.add(mark);
+  node.parts = { material, halo, spark, mark, radius, base };
   return group;
 }
 
@@ -178,6 +199,21 @@ function makeGlowTexture(): THREE.Texture {
   return new THREE.CanvasTexture(canvas);
 }
 
+/** A solid dot with a dark rim, like the editor's breakpoint glyph. */
+function makeDotTexture(): THREE.Texture {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 64;
+  const context = canvas.getContext("2d")!;
+  context.beginPath();
+  context.arc(32, 32, 28, 0, 2 * Math.PI);
+  context.fillStyle = "#ffffff";
+  context.fill();
+  context.lineWidth = 5;
+  context.strokeStyle = "rgba(0,0,0,0.6)";
+  context.stroke();
+  return new THREE.CanvasTexture(canvas);
+}
+
 function label(node: NeuronNode): SpriteText {
   const parts = node.parts!;
   if (!parts.label) {
@@ -197,7 +233,8 @@ function escape(text: string): string {
 
 function neuronTooltip(neuron: Neuron): string {
   const name = neuron.node.kind === "module" ? `module ${neuron.label}` : `${neuron.label}(${neuron.params.join(", ")})`;
-  return `<b>${escape(name)}</b><br><span class="dim">${escape(neuron.node.file)}:${neuron.node.loc.line}</span>`;
+  const hint = neuron.node.kind === "function" ? `<br><span class="dim">right-click: ${breakpointNodes.has(neuron.id) ? "remove the breakpoint" : "stop on each call"}</span>` : "";
+  return `<b>${escape(name)}</b><br><span class="dim">${escape(neuron.node.file)}:${neuron.node.loc.line}</span>${hint}`;
 }
 
 function synapseTooltip(synapse: Synapse): string {
@@ -215,14 +252,16 @@ function animate(now: number): void {
   const fade = Math.exp(-dt / FADE);
   const showAll = nodes.length <= ALWAYS_LABEL;
   for (const node of nodes) {
-    node.heat = onStack.has(node.id) ? 1 : Math.max(node.heat * fade, visited.has(node.id) ? VISITED : 0);
+    const isStopped = node.id === stoppedIn;
+    node.heat = onStack.has(node.id) || isStopped ? 1 : Math.max(node.heat * fade, visited.has(node.id) ? VISITED : 0);
     const parts = node.parts;
     if (!parts) {
       continue;
     }
+    (parts.mark.material as THREE.SpriteMaterial).opacity = breakpointNodes.has(node.id) ? 0.95 : 0;
     // Waiting on an await shows in blue, unless the function is also running or just ran.
-    const isWaiting = waiting.has(node.id) && node.heat < 0.5;
-    const glow = isWaiting ? BLUE : AMBER;
+    const isWaiting = waiting.has(node.id) && node.heat < 0.5 && !isStopped;
+    const glow = isStopped ? RED : isWaiting ? BLUE : AMBER;
     const level = isWaiting ? 0.6 : node.heat;
     parts.material.color.copy(parts.base).lerp(glow, level);
     parts.material.emissive.copy(glow);
@@ -236,7 +275,7 @@ function animate(now: number): void {
     sparkMaterial.color.copy(glow);
     sparkMaterial.opacity = spark;
     parts.spark.scale.setScalar(0.05 * spark);
-    const wantsLabel = showAll || node.heat > 0.15 || isWaiting || node === hovered;
+    const wantsLabel = showAll || node.heat > 0.15 || isWaiting || node === hovered || breakpointNodes.has(node.id);
     if (wantsLabel || parts.label) {
       label(node).visible = wantsLabel;
     }
@@ -279,6 +318,7 @@ function load(graphData: Graph, newTarget: string): void {
     fitted = false;
   }
   document.body.dataset.state = "busy";
+  placeDebugMarks();
   graph.graphData({ nodes, links });
   messageEl.hidden = nodes.length > 0;
   if (!nodes.length) {
@@ -291,6 +331,28 @@ function summary(): string {
   const calls = links.filter((l) => l.synapse.kind === "call").length;
   const state = links.length - calls;
   return `${nodes.length} functions · ${calls} call links · ${state} shared-state links`;
+}
+
+// Debugger
+
+/** Finds the functions holding the breakpoints and the debugger's stop, in the current graph. */
+function placeDebugMarks(): void {
+  const neurons = brain?.neurons ?? [];
+  breakpointNodes = new Set(breakpoints.flatMap(({ file, line }) => neuronAt(neurons, file, line)?.id ?? []));
+  stoppedIn = debugStop && neuronAt(neurons, debugStop.file, debugStop.line)?.id;
+}
+
+function onDebugStopped(at: SourceLine | undefined): void {
+  const wasStopped = stoppedIn !== undefined;
+  debugStop = at;
+  placeDebugMarks();
+  const node = stoppedIn ? nodeById.get(stoppedIn) : undefined;
+  if (node) {
+    setStatus(`debugger stopped in ${node.neuron.label}, line ${at!.line}`);
+    flyTo(node);
+  } else if (wasStopped) {
+    setStatus(live ? "live" : summary());
+  }
 }
 
 // Live mode
@@ -451,6 +513,11 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
     setStatus(`starting ${message.script}…`);
   } else if (message.type === "live") {
     onLive(message.frame);
+  } else if (message.type === "breakpoints") {
+    breakpoints = message.breakpoints;
+    placeDebugMarks();
+  } else if (message.type === "debugStopped") {
+    onDebugStopped(message.at);
   } else if (message.type === "focus") {
     const node = nodeById.get(message.node);
     if (node) {

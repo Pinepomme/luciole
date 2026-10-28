@@ -36,6 +36,11 @@ the functions light up as they run.
   `await`, a step over stops when the coroutine goes on. The other threads run during the step,
   then everything stops again. F5 resumes. What you expanded in the Variables view stays expanded
   from one step to the next.
+- **Debugging**: debug a Python program the usual way (F5, VS Code's Python debugger) and the
+  brain follows: when the debugger stops, its function glows red and the view flies to it. With
+  auto-start on, the debugged program also lights up as it runs. **Right-click a neuron** to stop
+  each time that function is called (a normal breakpoint, on its first line, listed in the
+  Breakpoints view); functions with a breakpoint have a red dot.
 - Threads and asyncio: each thread gets its own line in the bottom bar. Coroutines paused on an
   `await` glow blue, so you can tell running work (amber) from work waiting on I/O. Teal lines
   show where a thread or task was started from. Try it on `examples/workers.py`.

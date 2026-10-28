@@ -227,3 +227,23 @@ def test_cli_prints_json(capsys):
 def test_cli_rejects_missing_path(tmp_path):
     with pytest.raises(SystemExit):
         main(["graph", str(tmp_path / "nope.py")])
+
+
+def test_body_line_is_where_each_call_starts(tmp_path):
+    graph = analyze(tmp_path, {"app.py": '''
+        def plain(x):
+            return x
+
+
+        @decorated
+        def documented(x):
+            """Docstring."""
+            y = x + 1
+            return y
+
+
+        def only_docstring():
+            """Nothing else."""
+    '''})
+    lines = {n["name"]: n["body_line"] for n in graph["nodes"] if n["kind"] == "function"}
+    assert lines == {"plain": 3, "documented": 9, "only_docstring": 14}
