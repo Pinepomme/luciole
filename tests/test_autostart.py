@@ -1,0 +1,218 @@
+"""Auto-start: any Python process with the auto-start folder on PYTHONPATH lights up the view."""
+
+import json
+import os
+import socket
+import subprocess
+import sys
+import textwrap
+import threading
+
+import pytest
+
+from graphcheck import REPO
+from luciole.cli import AUTO_START_DIR, auto_start_env, env_commands
+
+pytestmark = pytest.mark.skipif(sys.version_info < (3, 12), reason="sys.monitoring needs Python 3.12")
+
+
+class View:
+    """Stands in for the extension: accepts recorders, keeps each connection's messages."""
+
+    def __init__(self):
+        self.server = socket.create_server(("127.0.0.1", 0))
+        self.port = self.server.getsockname()[1]
+        self.connections: list[list[dict]] = []
+        self.readers: list[threading.Thread] = []
+        threading.Thread(target=self.accept, daemon=True).start()
+
+    def accept(self):
+        while True:
+            try:
+                connection, _ = self.server.accept()
+            except OSError:
+                return
+            messages = []
+            self.connections.append(messages)
+            reader = threading.Thread(target=self.read, args=(connection, messages), daemon=True)
+            reader.start()
+            self.readers.append(reader)
+
+    @staticmethod
+    def read(connection, messages):
+        with connection, connection.makefile(encoding="utf-8") as lines:
+            for line in lines:
+                messages.append(json.loads(line))
+
+    def processes(self):
+        """Messages of each connection that reported calls, once every connection closed."""
+        for reader in self.readers:
+            reader.join(timeout=20)
+        self.server.close()
+        return [messages for messages in self.connections if calls(messages)]
+
+
+def calls(messages):
+    counts = {}
+    for message in messages:
+        for name, count in message.get("calls", {}).items():
+            counts[name] = counts.get(name, 0) + count
+    return counts
+
+
+def python(tmp_path, source, *args, port=None, extra_path=(), **env):
+    (tmp_path / "prog.py").write_text(textwrap.dedent(source))
+    environ = {key: value for key, value in os.environ.items() if not key.startswith("LUCIOLE_")}
+    environ["PYTHONPATH"] = os.pathsep.join([str(AUTO_START_DIR), *map(str, extra_path)])
+    environ["LUCIOLE_ROOT"] = str(tmp_path)
+    if port:
+        environ["LUCIOLE_LIVE_PORT"] = str(port)
+    environ.update(env)
+    return subprocess.run([sys.executable, *args], cwd=tmp_path, env=environ, capture_output=True, text=True, timeout=60)
+
+
+PROGRAM = """
+    import sys
+
+    def work():
+        return 42
+
+    work()
+    print("recorder loaded:", "luciole.recorder" in sys.modules)
+"""
+
+
+def test_off_without_a_port(tmp_path):
+    result = python(tmp_path, PROGRAM, "prog.py")
+    assert result.returncode == 0 and result.stderr == ""
+    assert "recorder loaded: False" in result.stdout
+
+
+def test_nothing_starts_when_nothing_listens(tmp_path):
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        closed_port = server.getsockname()[1]
+    result = python(tmp_path, PROGRAM, "prog.py", port=closed_port)
+    assert result.returncode == 0 and result.stderr == ""
+    assert "recorder loaded: False" in result.stdout
+
+
+def test_reports_to_the_view(tmp_path):
+    view = View()
+    result = python(tmp_path, PROGRAM, "prog.py", port=view.port)
+    assert result.returncode == 0 and result.stderr == ""
+    [messages] = view.processes()
+    assert messages[0]["process"]["pid"] > 0 and messages[0]["process"]["argv"][-1] == "prog.py"
+    assert calls(messages) == {"prog": 1, "prog:work": 1}
+    assert messages[-1] == {"done": True}
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="no fork")
+def test_forked_children_report_as_their_own_process(tmp_path):
+    view = View()
+    result = python(tmp_path, """
+        import os
+
+        def in_parent():
+            pass
+
+        def in_child():
+            pass
+
+        pid = os.fork()
+        if pid == 0:
+            in_child()
+            os._exit(0)
+        os.waitpid(pid, 0)
+        in_parent()
+    """, "prog.py", port=view.port)
+    assert result.returncode == 0, result.stderr
+    processes = view.processes()
+    assert len(processes) == 2
+    pids = {messages[0]["process"]["pid"] for messages in processes}
+    assert len(pids) == 2
+    by_function = {name: messages[0]["process"]["pid"] for messages in processes for name in calls(messages)}
+    assert by_function["prog:in_child"] != by_function["prog:in_parent"]
+
+
+def test_child_processes_inherit_it(tmp_path):
+    view = View()
+    (tmp_path / "child.py").write_text("def in_child():\n    pass\n\nin_child()\n")
+    result = python(tmp_path, """
+        import subprocess, sys
+
+        subprocess.run([sys.executable, "child.py"], check=True)
+    """, "prog.py", port=view.port)
+    assert result.returncode == 0, result.stderr
+    assert any("child:in_child" in calls(messages) for messages in view.processes())
+
+
+def test_the_hidden_sitecustomize_still_runs(tmp_path):
+    own = tmp_path / "own"
+    own.mkdir()
+    (own / "sitecustomize.py").write_text("import builtins\nbuiltins.OWN_SITECUSTOMIZE = True\n")
+    view = View()
+    result = python(tmp_path, "print('own:', OWN_SITECUSTOMIZE)\n", "prog.py", port=view.port, extra_path=[own])
+    assert result.returncode == 0, result.stderr
+    assert "own: True" in result.stdout
+
+
+def test_an_empty_pythonpath_does_not_add_the_working_directory(tmp_path):
+    # VS Code's switch prepends "<folder><separator>": on an empty PYTHONPATH, Python would read
+    # the trailing empty entry as the working directory.
+    script = "import os, sys; print(os.getcwd() in sys.path, os.environ['PYTHONPATH'])"
+    result = python(tmp_path, "", "-c", script, PYTHONPATH=str(AUTO_START_DIR) + os.pathsep)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["False", str(AUTO_START_DIR)]
+
+
+def test_profilers_keep_working(tmp_path):
+    view = View()
+    result = python(tmp_path, PROGRAM, "-m", "cProfile", "prog.py", port=view.port)
+    assert result.returncode == 0, result.stderr
+    assert "function calls" in result.stdout
+    assert any("prog:work" in calls(messages) for messages in view.processes())
+
+
+def test_luciole_run_takes_over(tmp_path):
+    view = View()
+    env = {"PYTHONPATH": os.pathsep.join([str(AUTO_START_DIR), str(REPO / "src")])}
+    result = python(tmp_path, PROGRAM, "-m", "luciole", "run", "--root", str(tmp_path), "--port", str(view.port), "prog.py", port=view.port, **env)
+    assert result.returncode == 0, result.stderr
+    [messages] = view.processes()  # the auto-started session stopped before reporting anything
+    assert calls(messages) == {"prog": 1, "prog:work": 1}
+
+
+def test_start_and_stop_from_code(tmp_path):
+    events = tmp_path / "events.jsonl"
+    result = python(tmp_path, f"""
+        import luciole
+
+        def recorded():
+            pass
+
+        def not_recorded():
+            pass
+
+        print("started:", luciole.start(events={str(events)!r}))
+        recorded()
+        luciole.stop()
+        not_recorded()
+        print("without a view:", luciole.start(port=1))
+    """, "prog.py", PYTHONPATH=str(REPO / "src"))
+    assert result.returncode == 0, result.stderr
+    assert "started: True" in result.stdout and "without a view: False" in result.stdout
+    messages = [json.loads(line) for line in events.read_text().splitlines()]
+    assert "prog:recorded" in calls(messages) and "prog:not_recorded" not in calls(messages)
+    assert messages[-1] == {"done": True}
+
+
+def test_env_commands(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", "/somewhere")
+    on = auto_start_env(5000, tmp_path, off=False)
+    assert on["PYTHONPATH"] == os.pathsep.join([str(AUTO_START_DIR), "/somewhere"])
+    assert on["LUCIOLE_LIVE_PORT"] == "5000" and on["LUCIOLE_ROOT"] == str(tmp_path.resolve())
+    monkeypatch.setenv("PYTHONPATH", on["PYTHONPATH"])
+    off = auto_start_env(None, None, off=True)
+    assert off == {"PYTHONPATH": "/somewhere", "LUCIOLE_LIVE_PORT": None, "LUCIOLE_ROOT": None}
+    assert env_commands(off, "sh") == "export PYTHONPATH=/somewhere\nunset LUCIOLE_LIVE_PORT\nunset LUCIOLE_ROOT"
+    assert env_commands({"A": "it's"}, "powershell") == "$env:A = 'it''s'"

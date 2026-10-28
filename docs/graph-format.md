@@ -203,7 +203,27 @@ Every 50 ms the recorder sends one JSON line, to the port and/or the file:
 - `waiting`: project coroutines suspended on an `await` right now, per function. A coroutine
   awaiting another one counts too (`main` waiting on `crawl` waiting on `download`).
 
-A line is only sent when something changed. The last line is `{"done": true}`.
+A line is only sent when something changed. The last line is `{"done": true}`. The view also
+gets, first, the process it is watching (not the `--events` file):
+`{"process": {"pid": 4242, "argv": ["python", "-m", "pytest"]}}`.
+
+### Starting the recorder
+
+- `luciole run`, as above.
+- `luciole.start(root=None, port=None, events=None)` and `luciole.stop()`, from the program
+  itself (a server, a notebook). `root` defaults to `LUCIOLE_ROOT`, else the working directory, and
+  `port` to `LUCIOLE_LIVE_PORT`. Nothing is recorded, and `start` returns `False`, when nothing
+  would see the events: no view listens and there is no events file.
+- Auto-start: with the folder `luciole/_autostart` on `PYTHONPATH`, its `sitecustomize.py` starts
+  the recorder in any Python process whose `LUCIOLE_LIVE_PORT` reaches a listening view, and does
+  nothing otherwise (not even importing the recorder). Child processes inherit the environment;
+  forked children connect again as processes of their own. The VS Code switch ("Luciole: on" in
+  the status bar, setting `luciole.autoStart`) sets these variables in new terminals;
+  `luciole env --port PORT` prints them for a shell (`--off` to undo). The `sitecustomize` it
+  hides still runs, and `luciole run` processes are left to their own recorder.
+
+Every connection is one process; the view lights up all of them at once. The recorder uses
+`sys.monitoring` tool id 4 (or 3): the debugger, coverage and profiler ids stay free.
 
 The recorder sends aggregates rather than one event per call. That keeps the stream small however
 fast the program runs (pytest makes about 30,000 calls per second through it), which is all the
@@ -247,5 +267,8 @@ A step resumes every thread. The stepping thread stops at:
 
 Then every thread stops again, and new `paused` messages come.
 
-Not covered yet: other processes (`multiprocessing`, Python subprocesses), and event loops in
-threads other than the main one (their tasks still show as calls, without their spawn origin).
+With several processes connected, `pause` and `resume` go to all of them, and a step resumes only
+the stepping thread's process.
+
+Not covered yet: event loops in threads other than the main one (their tasks still show as
+calls, without their spawn origin).
