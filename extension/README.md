@@ -12,6 +12,11 @@ the functions light up as they run.
   pulses travel along the lines as calls happen. The bar at the bottom shows what is running now.
   Functions that ran stay softly lit afterwards. Calls the static analysis missed appear as
   orange lines.
+- **Auto-start** (**Luciole: off** / **on** in the status bar): when on, every Python program
+  you start in a new VS Code terminal lights up the brain, run the way you always run it: a
+  script, `pytest`, a server, and the processes they start. Nothing changes in how programs run,
+  and with the switch off nothing is set at all. Terminals opened before the switch keep their old
+  setting: open a new one.
 - **Stop** (in the panel's toolbar, or ⏹ in the title bar in place of ⚡ while a run is going)
   interrupts the program like Ctrl+C: it gets a `KeyboardInterrupt`, its `finally` blocks run, and
   the traceback in the terminal shows where it was. If it keeps running (it catches the interrupt,
@@ -22,7 +27,7 @@ the functions light up as they run.
   and dicts to look inside, click a function to see its line and its neuron. The lines where
   threads stopped are highlighted in the editor. Also in the title bar (⏸ / ▶) and the command
   palette. A thread busy in a library or in C code (a sleep, a long torch call) stops when it
-  gets back to your code. Processes the program started keep running.
+  gets back to your code. With several processes lit up, Pause and Stop apply to all of them.
 - **Step over / into / out** (F10 / F11 / Shift+F11 while paused, or the buttons) run the thread
   you are looking at to its next line in the same function (calls on that line run without
   stopping), to its very next line (inside calls too), or until its function returns. On an

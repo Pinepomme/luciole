@@ -3,6 +3,7 @@
     luciole graph <path> [--json] [-o FILE]       static graph of a file or project
     luciole run [options] script.py [args...]     run a program and stream live events
     luciole run [options] -m module [args...]
+    luciole env [--port PORT] [--root DIR] [--off]  shell commands that turn auto-start on or off
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import argparse
 import json
 import logging
 import os
+import shlex
 import sys
 from collections import Counter
 from pathlib import Path
@@ -33,9 +35,24 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd.add_argument("--events", type=Path, help="also write events to this JSON Lines file")
     run_cmd.add_argument("-m", dest="as_module", action="store_true", help="run a module, like python -m")
     run_cmd.add_argument("target", nargs=argparse.REMAINDER, help="script (or module) and its arguments")
+    env_cmd = commands.add_parser(
+        "env",
+        help="print shell commands that make every Python process started from this shell light up the view",
+        description='Turn on: eval "$(luciole env --port PORT)". Turn off: eval "$(luciole env --off)". '
+        "PowerShell: luciole env --port PORT | Invoke-Expression.",
+    )
+    env_cmd.add_argument("--port", type=int, default=os.environ.get("LUCIOLE_LIVE_PORT"), help="port of the Luciole view")
+    env_cmd.add_argument("--root", type=Path, help="project directory: only code inside it is reported (default: each process's working directory)")
+    env_cmd.add_argument("--off", action="store_true", help="print the commands that turn it off")
+    env_cmd.add_argument("--shell", choices=["sh", "powershell", "cmd"], default="powershell" if os.name == "nt" else "sh")
     args = parser.parse_args(argv)
 
     logging.basicConfig(format="luciole: %(message)s", level=logging.WARNING)
+    if args.command == "env":
+        if not args.off and not args.port:
+            parser.error("env: give the --port of the Luciole view")
+        print(env_commands(auto_start_env(args.port, args.root, args.off), args.shell))
+        return 0
     if args.command == "run":
         if not args.target:
             parser.error("run: give a script or -m module to run")
@@ -56,6 +73,34 @@ def main(argv: list[str] | None = None) -> int:
         print("nodes: " + ", ".join(f"{count} {kind}" for kind, count in nodes.items()), file=sys.stderr)
         print("edges: " + ", ".join(f"{count} {kind}" for kind, count in edges.items()), file=sys.stderr)
     return 0
+
+
+AUTO_START_DIR = Path(__file__).resolve().parent / "_autostart"
+
+
+def auto_start_env(port: int | None, root: Path | None, off: bool) -> dict[str, str | None]:
+    """Variables that turn auto-start on (or off), from the current PYTHONPATH. None unsets."""
+    entries = [entry for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep) if entry and Path(entry).resolve() != AUTO_START_DIR]
+    if off:
+        return {"PYTHONPATH": os.pathsep.join(entries) or None, "LUCIOLE_LIVE_PORT": None, "LUCIOLE_ROOT": None}
+    return {
+        "PYTHONPATH": os.pathsep.join([str(AUTO_START_DIR), *entries]),
+        "LUCIOLE_LIVE_PORT": str(port),
+        "LUCIOLE_ROOT": str(root.resolve()) if root else None,
+    }
+
+
+def env_commands(variables: dict[str, str | None], shell: str) -> str:
+    lines = []
+    for name, value in variables.items():
+        if shell == "powershell":
+            quoted = "'" + (value or "").replace("'", "''") + "'"
+            lines.append(f"$env:{name} = {quoted}" if value is not None else f"Remove-Item Env:{name} -ErrorAction SilentlyContinue")
+        elif shell == "cmd":
+            lines.append(f"set {name}={value or ''}")
+        else:
+            lines.append(f"export {name}={shlex.quote(value)}" if value is not None else f"unset {name}")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

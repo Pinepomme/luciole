@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Auto-start: with the **Luciole: on** switch (status bar, setting `luciole.autoStart`), every
+  Python program started in a new VS Code terminal lights up the view, child processes included
+  (forked ones too). Nothing is started when the view is not listening. `luciole env` does the
+  same for any shell, and `luciole.start()` / `luciole.stop()` from inside a program.
+- The view shows several processes at once; Pause and Stop apply to all of them.
+- The recorder uses a `sys.monitoring` tool id of its own, so `cProfile`, coverage and debuggers
+  keep working with it.
+
 ## 0.1.0
 
 First release.

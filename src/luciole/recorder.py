@@ -17,7 +17,12 @@ JSON line with what happened since the last one, and the current state:
   not simply the caller.
 - `waiting`: project coroutines suspended on an `await` right now, per function.
 The last line is {"done": true}. Node ids follow docs/graph-format.md, so they match the
-static graph.
+static graph. The view also gets, first, the process it is watching:
+{"process": {"pid": 4242, "argv": ["python", "-m", "pytest"]}}.
+
+A session starts with `luciole run`, with luciole.start() in the program, or by itself in any
+Python process started with the auto-start folder on PYTHONPATH (see _autostart/sitecustomize.py).
+Forked children connect again as processes of their own.
 
 The view can pause the program to look at its variables, with JSON lines sent back on the
 socket: {"cmd": "pause"}, {"cmd": "resume"}, {"cmd": "expand", "ref": 7},
@@ -37,10 +42,12 @@ without fake_mode, missing lifted constants).
 
 from __future__ import annotations
 
+import atexit
 import inspect
 import json
 import itertools
 import logging
+import os
 import queue
 import runpy
 import socket
@@ -454,82 +461,232 @@ def hide_recorder_frames(error: BaseException) -> None:
         previous, tb = tb, tb.tb_next
 
 
-def run(target: list[str], as_module: bool, root: Path, port: int | None, events: Path | None) -> int:
-    """Run a script (or module, with `as_module`) under the recorder. Returns its exit code."""
-    if sys.version_info < (3, 12):
-        log.error("live mode needs Python 3.12 or newer (sys.monitoring); this is %s", sys.version.split()[0])
-        return 2
-    connection = None
-    sinks = []
-    if port:
-        try:
-            connection = socket.create_connection(("127.0.0.1", port))
-            sinks.append(lambda line: connection.sendall(line.encode()))
-        except OSError as error:
-            log.warning("could not reach the Luciole view on port %s: %s", port, error)
-    if events:
-        file = events.open("w", encoding="utf-8")
-        sinks.append(lambda line: (file.write(line), file.flush()))
-    view_sinks = sinks[:1] if connection else []
-    write_lock = threading.Lock()  # the pump and paused threads all write
+class Session:
+    """The recorder installed in this interpreter: its monitoring callbacks, the pump thread that
+    sends a frame every FRAME seconds, and the control thread that reads the view's commands."""
 
-    def write(frame: dict, targets: list) -> None:
+    def __init__(self, root: Path, port: int | None, connection: socket.socket | None, events: Path | None):
+        self.port = port  # to connect again from a forked child
+        self.connection = connection
+        self.file = events.open("w", encoding="utf-8") if events else None
+        self.sinks: list[Callable[[str], None]] = []
+        if connection:
+            self.sinks.append(lambda line: connection.sendall(line.encode()))
+        if self.file:
+            self.sinks.append(lambda line: (self.file.write(line), self.file.flush()))
+        self.view_sinks = self.sinks[:1] if connection else []
+        self.write_lock = threading.Lock()  # the pump and paused threads all write
+        self.recorder = Recorder(root, self.send, lambda message: self.write(message, self.view_sinks))
+        self.stopping = threading.Event()
+        self.tool: int | None = None
+        self.thread_start = threading.Thread.start
+        self.origin_depth = 0
+
+    def write(self, frame: dict, targets: list) -> None:
         line = json.dumps(frame, separators=(",", ":")) + "\n"
-        with write_lock:
+        with self.write_lock:
             for sink in list(targets):
                 try:
                     sink(line)
                 except OSError:
                     targets.remove(sink)  # the view went away; keep running the program
 
-    def send(frame: dict) -> None:
-        write(frame, sinks)
+    def send(self, frame: dict) -> None:
+        self.write(frame, self.sinks)
 
-    recorder = Recorder(root, send, lambda message: write(message, view_sinks))
-    stop = threading.Event()
+    def start(self) -> None:
+        """Install the callbacks. Raises ValueError when every free monitoring tool id is taken."""
+        monitoring = sys.monitoring
+        # Ids 3 and 4 have no reserved role: the debugger (debugpy), coverage and profiler (cProfile)
+        # ids stay free for those tools, which must keep working with Luciole on.
+        tool = next((tool for tool in (4, 3) if monitoring.get_tool(tool) is None), None)
+        if tool is None:
+            raise ValueError("no free sys.monitoring tool id")
+        recorder = self.recorder
+        events = monitoring.events
+        callbacks = {
+            events.PY_START: recorder.on_start,
+            events.PY_RESUME: recorder.on_resume,
+            events.PY_THROW: recorder.on_throw,
+            events.PY_YIELD: recorder.on_yield,
+            events.PY_RETURN: recorder.on_return,
+            events.PY_UNWIND: recorder.on_unwind,
+            events.LINE: recorder.on_line,
+        }
+        always = sum(callbacks) - events.LINE
+        monitoring.use_tool_id(tool, "luciole")
+        self.tool = tool
+        self.events = list(callbacks)
+        for event, callback in callbacks.items():
+            monitoring.register_callback(tool, event, callback)
+        recorder.line_events = lambda on: monitoring.set_events(tool, always | (events.LINE if on else 0))
+        self.pump_thread = threading.Thread(target=self.pump, name="luciole-recorder", daemon=True)
+        self.pump_thread.start()
+        self.thread_start = threading.Thread.start
+        threading.Thread.start = recorder.thread_start_hook(self.thread_start)
+        self.origin_depth = sys.get_coroutine_origin_tracking_depth()
+        sys.set_coroutine_origin_tracking_depth(ORIGIN_DEPTH)
+        monitoring.set_events(tool, always)
+        if self.connection:
+            self.write({"process": {"pid": os.getpid(), "argv": sys.orig_argv}}, self.view_sinks)
+            # After set_events above, which would undo an early pause's LINE events.
+            threading.Thread(target=self.control, name="luciole-control", daemon=True).start()
 
-    def control() -> None:
+    def stop(self, close: bool) -> None:
+        """Remove the callbacks, send the last frame and {"done": true}; `close` the connection too.
+
+        `luciole run` keeps it open: the view knows the run is over when the process exits.
+        """
+        self.recorder.line_events = lambda on: None
+        self.recorder.resume_all()  # threads paused while the main code ended
+        self.uninstall()
+        self.stopping.set()
+        self.pump_thread.join()
+        self.recorder.flush()
+        self.send({"done": True})
+        if close:
+            self.close()
+
+    def uninstall(self) -> None:
+        monitoring = sys.monitoring
+        monitoring.set_events(self.tool, 0)
+        for event in self.events:
+            monitoring.register_callback(self.tool, event, None)
+        monitoring.free_tool_id(self.tool)
+        if getattr(threading.Thread.start, "__name__", "") == "luciole_start":
+            threading.Thread.start = self.thread_start
+        sys.set_coroutine_origin_tracking_depth(self.origin_depth)
+
+    def close(self) -> None:
+        if self.connection:
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)  # wakes the control thread
+            except OSError:
+                pass
+            self.connection.close()
+        if self.file:
+            self.file.close()
+
+    def pump(self) -> None:
+        while not self.stopping.wait(FRAME):
+            self.recorder.flush()
+
+    def control(self) -> None:
         """Commands from the view, one JSON object per line."""
         try:
-            for line in connection.makefile(encoding="utf-8"):
+            for line in self.connection.makefile(encoding="utf-8"):
                 try:
-                    recorder.command(json.loads(line))
+                    self.recorder.command(json.loads(line))
                 except (ValueError, AttributeError) as error:
                     log.warning("ignored a command from the view: %s (%s)", line.strip()[:200], error)
-        except OSError:
+        except (OSError, ValueError):  # ValueError: the connection was closed by stop()
             pass
-        recorder.resume_all()  # never leave the program paused without a view
+        self.recorder.resume_all()  # never leave the program paused without a view
 
-    def pump() -> None:
-        while not stop.wait(FRAME):
-            recorder.flush()
 
-    monitoring = sys.monitoring
-    tool = monitoring.PROFILER_ID
-    events_ = monitoring.events
-    callbacks = {
-        events_.PY_START: recorder.on_start,
-        events_.PY_RESUME: recorder.on_resume,
-        events_.PY_THROW: recorder.on_throw,
-        events_.PY_YIELD: recorder.on_yield,
-        events_.PY_RETURN: recorder.on_return,
-        events_.PY_UNWIND: recorder.on_unwind,
-    }
-    always = sum(callbacks)
-    monitoring.use_tool_id(tool, "luciole")
-    for event, callback in callbacks.items():
-        monitoring.register_callback(tool, event, callback)
-    monitoring.register_callback(tool, events_.LINE, recorder.on_line)
-    recorder.line_events = lambda on: monitoring.set_events(tool, always | (events_.LINE if on else 0))
-    pump_thread = threading.Thread(target=pump, name="luciole-recorder", daemon=True)
-    pump_thread.start()
-    thread_start = threading.Thread.start
-    threading.Thread.start = recorder.thread_start_hook(thread_start)
-    origin_depth = sys.get_coroutine_origin_tracking_depth()
-    sys.set_coroutine_origin_tracking_depth(ORIGIN_DEPTH)
-    monitoring.set_events(tool, always)
-    if connection:  # after set_events above, which would undo an early pause's LINE events
-        threading.Thread(target=control, name="luciole-control", daemon=True).start()
+# The session of this interpreter, started by `luciole run`, luciole.start() or auto-start.
+active: Session | None = None
+hooks_installed = False
+
+
+def connect(port: int | str, quiet: bool) -> socket.socket | None:
+    """Connection to the view listening on `port`, None when nothing listens there."""
+    try:
+        connection = socket.create_connection(("127.0.0.1", int(port)), timeout=2)
+    except (OSError, ValueError) as error:
+        if not quiet:
+            log.warning("could not reach the Luciole view on port %s: %s", port, error)
+        return None
+    connection.settimeout(None)
+    return connection
+
+
+def start(root: Path | str | None = None, port: int | str | None = None, events: Path | str | None = None, quiet: bool = False, connection: socket.socket | None = None) -> bool:
+    """Start recording this process, until stop() or the process exits. See luciole.start()."""
+    global active
+    if active is not None:
+        return True
+    if sys.version_info < (3, 12):
+        if not quiet:
+            log.warning("live mode needs Python 3.12 or newer (sys.monitoring); this is %s", sys.version.split()[0])
+        return False
+    port = port or os.environ.get("LUCIOLE_LIVE_PORT")
+    if connection is None and port:
+        connection = connect(port, quiet)
+    if connection is None and events is None:
+        return False  # nothing would see the events: record nothing
+    root = Path(root or os.environ.get("LUCIOLE_ROOT") or Path.cwd())
+    session = Session(root, int(port) if port else None, connection, Path(events) if events else None)
+    try:
+        session.start()
+    except ValueError as error:
+        if not quiet:
+            log.warning("could not start the recorder: %s", error)
+        session.close()
+        return False
+    active = session
+    install_hooks()
+    return True
+
+
+def stop() -> None:
+    """Stop recording this process. See luciole.stop()."""
+    global active
+    session, active = active, None
+    if session is not None:
+        session.stop(close=True)
+
+
+def install_hooks() -> None:
+    """Once per process: stop at exit, and start again in forked children."""
+    global hooks_installed
+    if hooks_installed:
+        return
+    hooks_installed = True
+    atexit.register(stop)
+    if hasattr(os, "register_at_fork"):
+        os.register_at_fork(after_in_child=after_fork)
+
+
+def after_fork() -> None:
+    """In a forked child: drop the parent's session (its threads did not survive the fork, its
+    connection is the parent's) and connect again as a process of its own."""
+    global active
+    session, active = active, None
+    if session is None:
+        return
+    try:
+        session.uninstall()
+        if session.connection:
+            session.connection.close()  # the child's copy: the parent's connection stays open
+        if session.port and start(session.recorder.root, session.port, quiet=True):
+            exit_ = os._exit
+            if exit_.__name__ != "luciole_exit":
+                # Forked children usually end with os._exit (multiprocessing's do), which skips
+                # atexit: send the last frame first.
+                def luciole_exit(code: int) -> None:
+                    try:
+                        stop()
+                    except Exception:
+                        pass
+                    exit_(code)
+
+                os._exit = luciole_exit
+    except Exception:  # never break the child
+        pass
+
+
+def run(target: list[str], as_module: bool, root: Path, port: int | None, events: Path | None) -> int:
+    """Run a script (or module, with `as_module`) under the recorder. Returns its exit code."""
+    global active
+    if sys.version_info < (3, 12):
+        log.error("live mode needs Python 3.12 or newer (sys.monitoring); this is %s", sys.version.split()[0])
+        return 2
+    stop()  # auto-started in this interpreter: this run records it instead, with its own options
+    session = Session(root, port, connect(port, quiet=False) if port else None, events)
+    session.start()
+    active = session
+    install_hooks()
     sys.argv = list(target)
     try:
         if as_module:
@@ -547,15 +704,6 @@ def run(target: list[str], as_module: bool, root: Path, port: int | None, events
         hide_recorder_frames(interrupt)
         raise
     finally:
-        recorder.line_events = lambda on: None
-        recorder.resume_all()  # threads paused while the main code ended
-        monitoring.set_events(tool, 0)
-        for event in [*callbacks, events_.LINE]:
-            monitoring.register_callback(tool, event, None)
-        monitoring.free_tool_id(tool)
-        threading.Thread.start = thread_start
-        sys.set_coroutine_origin_tracking_depth(origin_depth)
-        stop.set()
-        pump_thread.join()
-        recorder.flush()
-        send({"done": True})
+        if active is session:
+            active = None
+            session.stop(close=False)
