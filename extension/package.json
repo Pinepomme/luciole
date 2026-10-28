@@ -4,6 +4,7 @@
   "description": "See a Python project as a 3D brain of functions, and watch it light up as the code runs.",
   "version": "0.1.0",
   "publisher": "pinepomme",
+  "preview": true,
   "license": "MIT",
   "repository": {
     "type": "git",

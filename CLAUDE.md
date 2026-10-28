@@ -57,10 +57,7 @@ Spec: `docs/graph-format.md`. JSON Schema: `schema/graph.schema.json`. Example: 
 - `src/` layout, version in `src/luciole/__init__.py` (`__version__`), read dynamically by hatchling.
 - Tests with `pytest` (`uv run pytest`).
 - CI: `.github/workflows/ci.yml` (pytest on 3.10–3.14 and on macOS/Windows with 3.12; extension typecheck, tests, packaging).
-- Release (one version for both halves: `src/luciole/__init__.py` and `extension/package.json`, plus `CHANGELOG.md`):
-  1. `uv build && uv publish` (PyPI token).
-  2. `cd extension && npm run package`, then `npx vsce publish --packagePath luciole.vsix` (Marketplace publisher `pinepomme`, Azure DevOps token) and `npx ovsx publish luciole.vsix -p <token>` (Open VSX, namespace `pinepomme`).
-  3. Tag `vX.Y.Z` and push the tag.
+- Release (one version for both halves): set it in `src/luciole/__init__.py` and `extension/package.json`, add a `## X.Y.Z` section to `CHANGELOG.md`, merge, then tag `vX.Y.Z` on `main` and push the tag. `.github/workflows/release.yml` checks the versions, runs the tests, builds once and publishes to PyPI (trusted publishing, environment `pypi`), the VS Code Marketplace (publisher `pinepomme`, secret `VSCE_PAT`, an Azure DevOps token that expires within a year) and Open VSX (namespace `pinepomme`, secret `OVSX_PAT`), both in environment `release`, then creates the GitHub release. A failed publish job can be re-run on its own. The extension is marked `"preview": true` until 1.0.
 - Extension (`extension/`, npm): `npm install`, `npm run build`, `npm test` (view-model unit tests), `npx tsc --noEmit`.
   `npm run install-local` packages `luciole.vsix` (with a copy of the analyzer in `extension/python/`) and installs it in VS Code; reload the window afterwards. Re-run it after changing the extension or the analyzer.
   Or press F5 ("Run Luciole extension") to open a separate dev window on this repo, which uses `../src` live.
@@ -102,7 +99,7 @@ Open question: phases 2 and 3 could swap (MCP graph and run tools are cheap once
 ### Decisions and conventions
 
 - Personal project of the user (not tied to their employer), MIT. Their work email must never appear in commits: commit as `Pinepomme <45495853+Pinepomme@users.noreply.github.com>` (set in this repo's git config). History was rewritten once to remove it.
-- Git pushes go through the SSH alias `github-luciole` (Pinepomme). The `gh` CLI has two accounts: the active one is the user's work account `alexandresuescun`, which must not be used for this repo. For PRs: `gh auth switch --hostname github.com --user Pinepomme`, then switch back with `--user alexandresuescun`.
+- Git pushes go to `origin` (`git@github.com:Pinepomme/luciole.git`), whose SSH key is Pinepomme's on this WSL setup (an SSH alias `github-luciole` may exist on other machines). The `gh` CLI has two accounts: the active one is the user's work account `alexandresuescun`, which must not be used for this repo. For PRs: `gh auth switch --hostname github.com --user Pinepomme`, then switch back with `--user alexandresuescun`.
 - Work on a branch and open a PR into `main`; CI runs on PRs and pushes to `main`.
 - Delivery rules: the Python core stays standard-library only (debugpy is the one exception, for debugging); one version number for both halves; the extension bundles the analyzer; no telemetry; everything stays on the user's machine.
 - Branding is postponed.
