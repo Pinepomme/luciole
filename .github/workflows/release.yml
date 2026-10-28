@@ -1,0 +1,107 @@
+name: Release
+
+# Pushing a tag vX.Y.Z publishes that version: the Python package on PyPI, the extension on the
+# VS Code Marketplace and Open VSX, and a GitHub release with the built files.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      # One version for both halves, and it must be the tag's.
+      - name: Check versions
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          python=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/luciole/__init__.py)
+          extension=$(node -p "require('./extension/package.json').version")
+          echo "tag $tag, python $python, extension $extension"
+          [ "$tag" = "$python" ] && [ "$tag" = "$extension" ]
+          grep -q "^## $tag\$" CHANGELOG.md || { echo "CHANGELOG.md has no '## $tag' section"; exit 1; }
+
+      - run: uv sync
+      - run: uv run pytest -q
+      - run: uv build
+
+      - run: npm ci
+        working-directory: extension
+      - run: npm run typecheck
+        working-directory: extension
+      - run: npm test
+        working-directory: extension
+      - run: npm run package
+        working-directory: extension
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python
+          path: dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extension
+          path: extension/luciole.vsix
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # trusted publishing: PyPI trusts this workflow, no token
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  vscode:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: extension
+      - run: npx --yes @vscode/vsce@2.24.0 publish --packagePath luciole.vsix
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+  openvsx:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: extension
+      - run: npx --yes ovsx@0.10 publish luciole.vsix
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+
+  github:
+    needs: [pypi, vscode, openvsx]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+      - name: Create the GitHub release
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          awk -v v="$tag" '/^## / { on = ($2 == v); next } on' CHANGELOG.md > notes.md
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md \
+            artifacts/python/* artifacts/extension/luciole.vsix
+        env:
+          GH_TOKEN: ${{ github.token }}
