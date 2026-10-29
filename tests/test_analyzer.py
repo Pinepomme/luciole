@@ -520,6 +520,38 @@ def test_type_checking_imports_do_not_run(tmp_path):
     assert "by_name" not in graph_edges[("pkg.app:use", "pkg.models:Model.save")]  # the type still resolves
 
 
+def test_f_string_conversions(tmp_path):
+    graph = analyze(tmp_path, {"m.py": """
+        class P:
+            def __repr__(self):
+                return "P()"
+
+            def __str__(self):
+                return "p"
+
+            def __format__(self, spec):
+                return "p"
+
+
+        def r(p: P):
+            return f"{p!r}"
+
+
+        def a(p: P):
+            return f"{p!a}"
+
+
+        def s(p: P):
+            return f"{p!s}"
+
+
+        def plain(p: P):
+            return f"{p}"
+    """})
+    found = {(source.rpartition(":")[2], target.rpartition(".")[2]) for source, target in calls(graph)}
+    assert found == {("r", "__repr__"), ("a", "__repr__"), ("s", "__str__"), ("plain", "__format__")}
+
+
 def test_star_import_cycles_are_fast(tmp_path):
     names = ["a", "b", "c", "d"]
     files = {"pkg/__init__.py": ""}

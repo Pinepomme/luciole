@@ -36,6 +36,7 @@ BUILTIN_METHOD_NAMES = {
     name for kind in (object, str, bytes, bytearray, int, float, list, tuple, dict, set, frozenset, io.TextIOWrapper, io.BytesIO) for name in dir(kind)
 }
 BUILTIN_DUNDERS = {"len": "__len__", "str": "__str__", "repr": "__repr__", "iter": "__iter__", "next": "__next__", "bool": "__bool__", "hash": "__hash__", "format": "__format__", "abs": "__abs__"}
+CONVERSION_DUNDERS = {ord("r"): "__repr__", ord("a"): "__repr__", ord("s"): "__str__"}  # f"{x!r}", ascii() calls repr()
 
 
 @dataclass(frozen=True)
@@ -867,6 +868,8 @@ class FlowVisitor:
                     self.dunder(left, COMPARE_DUNDERS[type(op)], node)
         elif isinstance(node, ast.BinOp) and type(node.op) in BINARY_DUNDERS:
             self.dunder(node.left, BINARY_DUNDERS[type(node.op)], node)
+        elif isinstance(node, ast.FormattedValue) and node.conversion in CONVERSION_DUNDERS:  # f"{x!r}"
+            self.dunder(node.value, CONVERSION_DUNDERS[node.conversion], node)
         elif isinstance(node, ast.FormattedValue):
             cls = self.an.value_class(self.scope, node.value)
             self.dunder(node.value, "__format__" if cls and self.an.class_member(cls, "__format__") else "__str__", node)
