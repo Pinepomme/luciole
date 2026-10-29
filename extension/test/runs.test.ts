@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { resolveRun, splitArgs } from "../src/runs";
+import { fileRunKind, pytestRun, resolveRun, splitArgs } from "../src/runs";
 
 const folder = "/work/app";
 
@@ -33,4 +33,21 @@ test("a module runs with -m from the workspace folder", () => {
 test("a configuration needs exactly one of program and module", () => {
   assert.match((resolveRun({ name: "x" }, { workspaceFolder: folder }) as { error: string }).error, /either/);
   assert.match((resolveRun({ name: "x", program: "a.py", module: "b" }, { workspaceFolder: folder }) as { error: string }).error, /either/);
+});
+
+test("Run Live picks how to run a file", () => {
+  assert.equal(fileRunKind("/app/tests/test_cart.py", "def test_x(): pass"), "test");
+  assert.equal(fileRunKind("/app/cart_test.py", ""), "test");
+  assert.equal(fileRunKind("/app/train.py", "def main(): ...\n\nif __name__ == '__main__':\n    main()\n"), "script");
+  assert.equal(fileRunKind("/app/serve.py", 'if __name__ == "__main__":\n    run()'), "script");
+  assert.equal(fileRunKind("/app/cart.py", "class Cart:\n    pass\n"), "module");
+  assert.equal(fileRunKind("/app/cart.py", "    if __name__ == '__main__':  # nested, not the module's own\n"), "module");
+});
+
+test("tests run with pytest from the folder their paths are relative to", () => {
+  const config = pytestRun("tests for cart.py", ["/work/app/tests/test_cart.py"], folder);
+  assert.deepEqual(config, { name: "tests for cart.py", module: "pytest", args: ["tests/test_cart.py"], folder });
+  // Whatever folder is active when it runs (or runs again), it runs from that folder.
+  const run = resolveRun(config, { workspaceFolder: config.folder! });
+  assert.deepEqual(run, { label: "tests for cart.py", target: ["-m", "pytest", "tests/test_cart.py"], cwd: folder, env: {} });
 });

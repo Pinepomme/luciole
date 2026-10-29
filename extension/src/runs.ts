@@ -16,6 +16,12 @@ export interface RunConfiguration {
   /** Working directory, relative to the workspace folder (default: the folder). */
   cwd?: string;
   env?: Record<string, string>;
+  /**
+   * Not a setting: the folder (absolute) the run's relative paths are from, and its default
+   * working directory. Set for runs Luciole makes up (tests of a file) and kept with the last run,
+   * so running it again does not depend on which editor or folder is active.
+   */
+  folder?: string;
 }
 
 export interface ResolvedRun {
@@ -54,6 +60,24 @@ export function resolveRun(config: RunConfiguration, variables: RunVariables): R
   }
   const script = path.resolve(variables.workspaceFolder, substitute(config.program!));
   return { label: config.name, target: [script, ...args], cwd, env, script };
+}
+
+/**
+ * How ⚡ Run Live runs a file: a test file with pytest, a script (it has an
+ * `if __name__ == "__main__":` block) as itself, and any other module, a library file that is
+ * not meant to run on its own, through the tests that import it.
+ */
+export function fileRunKind(file: string, source: string): "test" | "script" | "module" {
+  const name = path.basename(file);
+  if (/^test_.*\.py$/.test(name) || /_test\.py$/.test(name)) {
+    return "test";
+  }
+  return /^if\s+__name__\s*==\s*(['"])__main__\1\s*:/m.test(source) ? "script" : "module";
+}
+
+/** pytest on `tests` (absolute paths), run from `folder` with the paths relative to it. */
+export function pytestRun(name: string, tests: string[], folder: string): RunConfiguration {
+  return { name, module: "pytest", args: tests.map((test) => path.relative(folder, test) || test), folder };
 }
 
 /** `${workspaceFolder}` and `${file}`, as in VS Code's launch.json. */

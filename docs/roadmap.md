@@ -71,21 +71,31 @@ caller→callee links seen at runtime are missing from the static graph (imports
   `LUCIOLE_*` set, so terminal runs, test runners and child processes light up unchanged.
   `os.register_at_fork` covers forked children. This is also the multi-process support. Turned on
   and off by a status bar switch in VS Code (new terminals) or `luciole env` in a shell.
-- `luciole engine`: a local process that recorders connect to (each labelled with its process id
-  and command line) and that viewers subscribe to. The VS Code extension becomes one viewer, and
+- [x] `luciole engine`: a local process that recorders connect to (each labelled with its process
+  id and command line) and that viewers subscribe to. The VS Code extension becomes one viewer, and
   starts the engine when none is running.
-- A protocol handshake: recorder, engine and viewers state the protocol version they speak.
-- Run Live → tests for this file: most files of a library are not meant to run on their own, so
-  find the test files that import the current module and run pytest on them.
+- [x] A protocol handshake: recorder, engine and viewers state the protocol version they speak.
+- [x] Run Live → tests for this file: most files of a library are not meant to run on their own, so
+  find the test files that import the current module and run pytest on them (`luciole tests`).
 
 ### Phase 2: Debugging through the engine
 
-- A DAP proxy around debugpy, registered in VS Code as a debug type ("Debug Live"): breakpoints,
-  exceptions, watch, hover and the debug console come from debugpy; the recorder keeps the graph
-  lit; the graph follows wherever the debugger stops.
-- Graph-driven debugging: click a neuron to stop the next time that function runs.
-- Several clients on one session (needed by phase 3: you and an agent on the same run).
-- Better call resolution with Pyright or jedi.
+- [x] Debugging with VS Code's own Python debugger, with the graph: breakpoints, exceptions, watch,
+  hover and the debug console are debugpy's; with auto-start on, debug launches get its variables
+  so the recorder keeps the graph lit; the graph follows wherever the debugger stops. Done with
+  VS Code's API (a debug configuration provider and a debug adapter tracker) rather than a DAP
+  proxy, which only phase 3 needs.
+- [x] Graph-driven debugging: right-click a neuron to stop the next time that function runs (a
+  VS Code breakpoint on its first body line, in the Breakpoints view); neurons holding a
+  breakpoint show a red dot.
+- Several clients on one session (needed by phase 3: you and an agent on the same run): a DAP
+  proxy around debugpy, owned by the engine.
+- [x] Better call resolution, with the standard library only (no Pyright or jedi): imports, star
+  imports, properties, `super()`, overrides, return types and annotations, special methods,
+  functions held in variables, and the project's only method of a name (marked `by_name`). Missing
+  runtime calls on `email` + `asyncio`: 52% → 27% (`scripts/missing_calls.py`). What remains needs
+  types the code never states (unannotated parameters, `getattr` dispatch, classes built with
+  `type()`).
 - Scale: whole-folder graphs of 30k+ lines that stay readable (search, filtering, modules that
   collapse and expand).
 - Decide the future of live mode's own pause/step/Variables view.

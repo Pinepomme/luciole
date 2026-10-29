@@ -1,14 +1,16 @@
 /**
- * Live mode: a local socket that recorders connect to, one connection per Python process. Run
- * Live starts one under `luciole run` in a VS Code terminal (so its output and input stay usable);
- * with auto-start on, any Python program started in a terminal connects by itself, and so do the
- * children of either. The same sockets carry commands back to the recorders: pause, resume, step,
- * and expand a value of the paused program.
+ * Live mode: this window as a viewer of the Luciole engine, which every recording Python process
+ * connects to. Run Live starts one under `luciole run` in a VS Code terminal (so its output and
+ * input stay usable); with auto-start on, any Python program started in a terminal connects by
+ * itself, and so do the children of either. The engine passes on each process's frames, numbered,
+ * and this window's commands back to them: pause, resume, step, and expand a value of the paused
+ * program. Only processes of this window's folders are shown.
  */
 
 import * as net from "net";
 import * as path from "path";
 import * as vscode from "vscode";
+import { PROTOCOL, ensureEngine, parseEngineLine, viewerRoots } from "./engine";
 import type { LiveFrame, LiveState, PausedThread, RecorderReply, StepMode, Variable } from "./messages";
 import { Handles, ProcessInfo, Processes, processLabel } from "./processes";
 import type { ResolvedRun } from "./runs";
@@ -22,59 +24,115 @@ export interface LiveListener {
   started(label: string): void;
 }
 
+export interface EngineOptions {
+  python: () => string;
+  analyzerDir: () => string | undefined;
+  version: string;
+}
+
 const IDLE: LiveState = { running: false, paused: false, held: 0, stepping: false, stopping: false };
 
-type Message = LiveFrame & RecorderReply & { process?: ProcessInfo };
+/** What the engine sends: its handshake, processes coming and going, and their messages. */
+type EngineMessage = LiveFrame &
+  RecorderReply & {
+    welcome?: { protocol: number; version: string };
+    refused?: string;
+    process?: ProcessInfo & { id: number; root?: string };
+    exit?: number;
+    from?: number;
+  };
 
 export class LiveSession implements vscode.Disposable {
-  private port: Promise<number> | undefined;
-  private server: net.Server | undefined;
+  private engine: Promise<{ port: number; socket: net.Socket }> | undefined;
   private terminal: vscode.Terminal | undefined;
   /** Run Live's process, from its start until it connects (or its terminal closes). */
   private launching: { pid: Promise<number | undefined> } | undefined;
-  private readonly processes = new Processes<net.Socket>();
+  private readonly processes = new Processes<number>();
   /** Thread idents and value refs of all processes, as numbers unique across them. */
-  private readonly threads = new Handles<net.Socket>();
-  private readonly refs = new Handles<net.Socket>();
+  private readonly threads = new Handles<number>();
+  private readonly refs = new Handles<number>();
   private state: LiveState = IDLE;
   /** Pending "expand" requests, by ref handle. */
   private readonly expanding = new Map<number, (vars: Variable[]) => void>();
-  private readonly subscription: vscode.Disposable;
+  private readonly subscriptions: vscode.Disposable[];
+  private disposed = false;
 
   constructor(
     private readonly listener: LiveListener,
     private readonly log: vscode.OutputChannel,
+    private readonly options: EngineOptions,
   ) {
-    this.subscription = vscode.window.onDidCloseTerminal((terminal) => {
-      if (terminal === this.terminal) {
-        this.terminal = undefined;
-        this.launching = undefined;
-        this.update();
-      }
-    });
+    this.subscriptions = [
+      vscode.window.onDidCloseTerminal((terminal) => {
+        if (terminal === this.terminal) {
+          this.terminal = undefined;
+          this.launching = undefined;
+          this.update();
+        }
+      }),
+      vscode.workspace.onDidChangeWorkspaceFolders(() => this.resubscribe()),
+    ];
   }
 
   get current(): LiveState {
     return this.state;
   }
 
-  /** Port the recorders connect to; the view listens from the first call on. */
-  listen(): Promise<number> {
-    if (!this.port) {
-      this.port = new Promise((resolve, reject) => {
-        this.server = net.createServer((socket) => this.accept(socket));
-        this.server.on("error", reject);
-        this.server.listen(0, "127.0.0.1", () => resolve((this.server!.address() as net.AddressInfo).port));
-      });
+  /** Port of the engine this window watches; finds or starts the engine and subscribes on the first call. */
+  async connect(): Promise<number> {
+    if (!this.engine) {
+      this.engine = this.subscribe();
+      this.engine.catch(() => (this.engine = undefined)); // try again next time
     }
-    return this.port;
+    return (await this.engine).port;
+  }
+
+  private async subscribe(): Promise<{ port: number; socket: net.Socket }> {
+    const dir = this.options.analyzerDir();
+    if (!dir) {
+      throw new Error("the analyzer is missing from the extension");
+    }
+    const port = await ensureEngine(this.options.python(), dir, (line) => this.log.appendLine(line));
+    const socket = await new Promise<net.Socket>((resolve, reject) => {
+      const socket: net.Socket = net.connect(port, "127.0.0.1", () => resolve(socket));
+      socket.on("error", reject);
+    });
+    const roots = viewerRoots((vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath));
+    socket.write(JSON.stringify({ hello: { role: "viewer", protocol: PROTOCOL, version: this.options.version, name: "vscode", roots } }) + "\n");
+    this.read(socket);
+    this.log.appendLine(`watching the Luciole engine on port ${port}`);
+    return { port, socket };
+  }
+
+  /**
+   * Folders were added to or removed from the workspace: the engine takes a viewer's roots only in
+   * its hello, so subscribe again with the new ones. The engine announces its processes to the new
+   * subscription, and their next frames light the view up again.
+   */
+  private resubscribe(): void {
+    const socket = this.subscribed;
+    if (!socket) {
+      return; // not subscribed (yet): the next subscription sends the current folders
+    }
+    this.log.appendLine("workspace folders changed; subscribing to the Luciole engine again");
+    this.subscribed = undefined;
+    this.engine = undefined;
+    socket.destroy();
+    this.forgetProcesses();
+    void this.connect().catch((error) => this.log.appendLine(`${error}`));
   }
 
   /** Starts `run` in a fresh terminal, closing the previous Run Live terminal. */
   async run(run: ResolvedRun, root: string, python: string, analyzerDir: string): Promise<void> {
-    const port = await this.listen();
-    this.terminal?.dispose(); // its process exits, and its connection with it
-    const args = ["-m", "luciole", "run", "--root", root, ...run.target];
+    let port: number;
+    try {
+      port = await this.connect();
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Luciole: ${error instanceof Error ? error.message : error}`);
+      return;
+    }
+    this.terminal?.dispose(); // its process exits, and leaves the engine with it
+    const args = ["-m", "luciole", "run", "--root", root, "--port", String(port), ...run.target];
     // Python is the terminal's process, with no shell: other extensions (venv auto-activation)
     // type into new shells, and their Ctrl+C would kill the run.
     this.terminal = vscode.window.createTerminal({
@@ -84,7 +142,6 @@ export class LiveSession implements vscode.Disposable {
       shellArgs: args,
       env: {
         ...run.env,
-        LUCIOLE_LIVE_PORT: String(port),
         PYTHONPATH: [analyzerDir, run.env.PYTHONPATH ?? process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
       },
     });
@@ -98,7 +155,7 @@ export class LiveSession implements vscode.Disposable {
   }
 
   /**
-   * Puts every connected process on hold, or resumes them. Each thread stops at its next line of
+   * Puts every running process on hold, or resumes them. Each thread stops at its next line of
    * project code and sends its variables; a thread busy in library or C code (a sleep, a long
    * torch call) stops when it gets back to project code.
    */
@@ -154,7 +211,7 @@ export class LiveSession implements vscode.Disposable {
     if (this.state.paused) {
       this.pause(false); // paused threads would keep the process alive
     }
-    const pids = new Set(this.processes.active.map((socket) => this.processes.info(socket)?.pid));
+    const pids = new Set(this.processes.active.map((id) => this.processes.info(id)?.pid));
     pids.add(await this.launching?.pid);
     pids.delete(undefined);
     const signal = this.state.stopping ? "SIGKILL" : "SIGINT";
@@ -167,18 +224,21 @@ export class LiveSession implements vscode.Disposable {
     }
   }
 
-  /** Sends `command` to `socket`, or to every running process. False when none got it. */
-  private command(command: object, socket?: net.Socket): boolean {
-    const line = JSON.stringify(command) + "\n";
-    let sent = false;
-    for (const target of socket ? [socket] : this.processes.active) {
-      if (!target.destroyed) {
-        target.write(line);
-        sent = true;
-      }
+  /** Sends `command` to process `id` through the engine, or to every running process. False when none got it. */
+  private command(command: object, id?: number): boolean {
+    const socket = this.subscribed;
+    const targets = id === undefined ? this.processes.active : [id];
+    if (!socket || socket.destroyed || !targets.length) {
+      return false;
     }
-    return sent;
+    for (const to of targets) {
+      socket.write(JSON.stringify({ ...command, to }) + "\n");
+    }
+    return true;
   }
+
+  /** The connection to the engine, once subscribed. */
+  private subscribed: net.Socket | undefined;
 
   private resolveExpanding(): void {
     for (const resolve of this.expanding.values()) {
@@ -201,8 +261,9 @@ export class LiveSession implements vscode.Disposable {
   }
 
   dispose(): void {
-    this.subscription.dispose();
-    this.server?.close();
+    this.disposed = true;
+    this.subscriptions.forEach((subscription) => subscription.dispose());
+    this.subscribed?.destroy();
     this.terminal?.dispose();
   }
 
@@ -225,36 +286,59 @@ export class LiveSession implements vscode.Disposable {
     this.listener.state(state);
   }
 
-  private async receive(socket: net.Socket, message: Message): Promise<void> {
+  private async receive(message: EngineMessage): Promise<void> {
+    if (message.welcome) {
+      return;
+    }
+    if (message.refused) {
+      this.log.appendLine(`the Luciole engine refused this window: ${message.refused}`);
+      void vscode.window.showErrorMessage(`Luciole: the engine refused this window: ${message.refused}`);
+      return;
+    }
     if (message.process) {
-      this.processes.identify(socket, message.process);
-      this.log.appendLine(`connected: ${message.process.argv.join(" ")} (pid ${message.process.pid})`);
-      if (this.launching && message.process.pid === (await this.launching.pid)) {
+      const { id, ...info } = message.process;
+      this.processes.add(id);
+      this.processes.identify(id, info);
+      this.log.appendLine(`connected: ${info.argv.join(" ")} (pid ${info.pid})`);
+      if (this.launching && info.pid === (await this.launching.pid)) {
         this.launching = undefined; // Run Live's process: running until it exits, project code or not
-        this.processes.activate(socket);
+        this.processes.activate(id);
         this.update();
       }
-    } else if (message.paused) {
+      return;
+    }
+    if (message.exit !== undefined) {
+      this.processes.remove(message.exit);
+      this.threads.clear(message.exit);
+      this.update();
+      return;
+    }
+    const id = message.from;
+    if (id === undefined) {
+      return;
+    }
+    if (message.paused) {
       if (this.state.paused) {
         this.setState({ ...this.state, held: this.state.held + 1, stepping: false });
         const thread = message.paused;
-        const label = this.processes.active.length > 1 ? `${processLabel(this.processes.info(socket))} · ` : "";
+        const label = this.processes.active.length > 1 ? `${processLabel(this.processes.info(id))} · ` : "";
         this.listener.paused({
           thread: label + thread.thread,
-          id: this.threads.handle(socket, thread.id),
-          frames: thread.frames.map((frame) => ({ ...frame, vars: this.mapRefs(socket, frame.vars) })),
+          id: this.threads.handle(id, thread.id),
+          frames: thread.frames.map((frame) => ({ ...frame, vars: this.mapRefs(id, frame.vars) })),
         });
       }
     } else if (message.children) {
-      const ref = this.refs.handle(socket, message.children.ref);
-      this.expanding.get(ref)?.(this.mapRefs(socket, message.children.vars));
+      const ref = this.refs.handle(id, message.children.ref);
+      this.expanding.get(ref)?.(this.mapRefs(id, message.children.vars));
       this.expanding.delete(ref);
     } else {
-      const wasActive = this.processes.isActive(socket);
-      const frame = this.processes.merge(socket, message);
+      const { t, stacks, calls, links, spawns, waiting, done } = message;
+      const wasActive = this.processes.isActive(id);
+      const frame = this.processes.merge(id, { t, stacks, calls, links, spawns, waiting, done });
       if (frame) {
         if (!wasActive) {
-          this.listener.started(processLabel(this.processes.info(socket)));
+          this.listener.started(processLabel(this.processes.info(id)));
           this.update();
         }
         this.listener.frame(frame);
@@ -262,39 +346,56 @@ export class LiveSession implements vscode.Disposable {
     }
   }
 
-  private mapRefs(socket: net.Socket, vars: Variable[]): Variable[] {
-    return vars.map((v) => (v.ref === undefined ? v : { ...v, ref: this.refs.handle(socket, v.ref) }));
+  /** No engine to hear from: no process runs as far as this window knows. */
+  private forgetProcesses(): void {
+    for (const id of this.processes.ids) {
+      this.processes.remove(id);
+    }
+    this.threads.clear();
+    this.update();
   }
 
-  /** One connection per process; one JSON object per line. */
-  private accept(socket: net.Socket): void {
-    this.processes.add(socket);
+  private mapRefs(id: number, vars: Variable[]): Variable[] {
+    return vars.map((v) => (v.ref === undefined ? v : { ...v, ref: this.refs.handle(id, v.ref) }));
+  }
+
+  /** The engine's messages, one JSON object per line, handled in order. */
+  private read(socket: net.Socket): void {
+    this.subscribed = socket;
     socket.setEncoding("utf8");
     let buffer = "";
-    // Messages are handled in order, though identifying Run Live's process waits for its pid.
+    // In order, though identifying Run Live's process waits for its terminal's pid.
     let handled = Promise.resolve();
     socket.on("data", (chunk: string) => {
       buffer += chunk;
       for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
-        let message: Message;
-        try {
-          message = JSON.parse(line) as Message;
-        } catch {
-          this.log.appendLine(`ignored a malformed live event: ${line.slice(0, 200)}`);
+        const parsed = parseEngineLine(line);
+        if (!parsed || parsed.recovered) {
+          this.log.appendLine(`${parsed ? "kept the end of" : "ignored"} a malformed live event: ${line.slice(0, 200)}`);
+        }
+        if (!parsed) {
           continue;
         }
-        handled = handled.then(() => this.receive(socket, message)).catch((error) => this.log.appendLine(`live event failed: ${error}`));
+        const message = parsed.message as EngineMessage;
+        handled = handled.then(() => this.receive(message)).catch((error) => this.log.appendLine(`live event failed: ${error}`));
       }
     });
-    // The recorder sends {"done": true} when the program's main code ends, but threads can keep
-    // the process alive after that: a process is over when it exits and its socket closes.
+    // The engine went away (it crashed, or was killed): forget its processes, find or start an
+    // engine again.
     socket.on("close", () => {
       void handled.then(() => {
-        this.processes.remove(socket);
-        this.threads.clear(socket);
-        this.update();
+        if (this.subscribed !== socket) {
+          return;
+        }
+        this.subscribed = undefined;
+        this.engine = undefined;
+        this.forgetProcesses();
+        if (!this.disposed) {
+          this.log.appendLine("lost the Luciole engine; reconnecting");
+          setTimeout(() => void this.connect().catch((error) => this.log.appendLine(`${error}`)), 2000);
+        }
       });
     });
     socket.on("error", () => undefined);

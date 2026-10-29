@@ -8,7 +8,9 @@ the functions light up as they run.
 ## Use
 
 - **Run Live** (⚡ in the title bar of a Python editor) runs the file in a terminal and lights up
-  the brain: functions on the current call path glow, functions that just ran flash and fade,
+  the brain. A test file runs with pytest; a script (it has `if __name__ == "__main__":`) runs as
+  itself; any other module, which is not meant to run on its own, runs through the test files that
+  import it. In the brain: functions on the current call path glow, functions that just ran flash and fade,
   pulses travel along the lines as calls happen. The bar at the bottom shows what is running now.
   Functions that ran stay softly lit afterwards. Calls the static analysis missed appear as
   orange lines.
@@ -34,6 +36,12 @@ the functions light up as they run.
   `await`, a step over stops when the coroutine goes on. The other threads run during the step,
   then everything stops again. F5 resumes. What you expanded in the Variables view stays expanded
   from one step to the next.
+- **Debugging**: debug a Python program the usual way (F5, VS Code's Python debugger) and the
+  brain follows: when the debugger stops, its function glows red and the view flies to it. With
+  auto-start on, the debugged program also lights up as it runs. **Right-click a neuron** to stop
+  each time that function is called (a normal breakpoint, on its first line, listed in the
+  Breakpoints view); functions with a breakpoint on any of their lines have a red dot, and
+  right-clicking them again removes those breakpoints.
 - Threads and asyncio: each thread gets its own line in the bottom bar. Coroutines paused on an
   `await` glow blue, so you can tell running work (amber) from work waiting on I/O. Teal lines
   show where a thread or task was started from. Try it on `examples/workers.py`.
@@ -46,7 +54,8 @@ the functions light up as they run.
 The graph refreshes when you save a Python file.
 
 To run something other than the current file, use **Luciole: Run Live…** (the panel's **Run…**
-button, or the editor title bar's menu): the current file with arguments, a module such as
+button, or the editor title bar's menu): the current file as a script or with arguments, the tests
+for the current file, a module such as
 `pytest -x tests`, or one of your run configurations. The panel's **Run live** button repeats the
 last run. Run configurations go in `settings.json`:
 

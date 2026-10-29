@@ -17,8 +17,7 @@ JSON line with what happened since the last one, and the current state:
   not simply the caller.
 - `waiting`: project coroutines suspended on an `await` right now, per function.
 The last line is {"done": true}. Node ids follow docs/graph-format.md, so they match the
-static graph. The view also gets, first, the process it is watching:
-{"process": {"pid": 4242, "argv": ["python", "-m", "pytest"]}}.
+static graph. The connection to the engine starts with the recorder's hello (see protocol.py).
 
 A session starts with `luciole run`, with luciole.start() in the program, or by itself in any
 Python process started with the auto-start folder on PYTHONPATH (see _autostart/sitecustomize.py).
@@ -42,6 +41,7 @@ without fake_mode, missing lifted constants).
 
 from __future__ import annotations
 
+import _thread
 import atexit
 import inspect
 import json
@@ -50,6 +50,7 @@ import logging
 import os
 import queue
 import runpy
+import signal
 import socket
 import sys
 import threading
@@ -57,7 +58,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from luciole import values
+from luciole import protocol, values
 from luciole.analyzer import SKIP_DIRS, module_name
 
 log = logging.getLogger(__name__)
@@ -71,6 +72,15 @@ MAX_PAUSED_FRAMES = 60
 
 
 STEP_MODES = ("over", "into", "out")
+
+
+def own_thread(target, name: str) -> threading.Thread:
+    """A thread of the recorder's own. Marked the way debugpy marks its threads, so that VS Code's
+    debugger neither lists nor pauses it: the view stays live while the debugger is stopped."""
+    thread = threading.Thread(target=target, name=name, daemon=True)
+    thread.is_pydev_daemon_thread = True
+    thread.pydev_do_not_trace = True
+    return thread
 
 
 class Step:
@@ -105,7 +115,7 @@ class Recorder:
         self.waiting: dict[str, int] = {}
         self.started = time.perf_counter()
         self.thread_stacks: dict[int, list[str]] = {}  # thread ident -> project stack, replaced (never mutated)
-        self.last_state: tuple = ()
+        self.last_state: tuple = ([], {})  # nothing runs yet: no frame until something does
         # Pausing: set from the control thread; each paused thread waits on its own queue.
         self.line_events: Callable[[bool], None] = lambda on: None
         self.pausing = False
@@ -475,7 +485,8 @@ class Session:
         if self.file:
             self.sinks.append(lambda line: (self.file.write(line), self.file.flush()))
         self.view_sinks = self.sinks[:1] if connection else []
-        self.write_lock = threading.Lock()  # the pump and paused threads all write
+        # The pump and paused threads all write; reentrant for on_sigterm, which may interrupt a write.
+        self.write_lock = threading.RLock()
         self.recorder = Recorder(root, self.send, lambda message: self.write(message, self.view_sinks))
         self.stopping = threading.Event()
         self.tool: int | None = None
@@ -503,6 +514,11 @@ class Session:
         if tool is None:
             raise ValueError("no free sys.monitoring tool id")
         recorder = self.recorder
+        if self.connection:
+            # Before the pump thread starts: the engine refuses a connection that does not start
+            # with a hello.
+            hello = protocol.hello("recorder", pid=os.getpid(), argv=sys.orig_argv, root=str(recorder.root))
+            self.write(hello, self.view_sinks)
         events = monitoring.events
         callbacks = {
             events.PY_START: recorder.on_start,
@@ -520,7 +536,7 @@ class Session:
         for event, callback in callbacks.items():
             monitoring.register_callback(tool, event, callback)
         recorder.line_events = lambda on: monitoring.set_events(tool, always | (events.LINE if on else 0))
-        self.pump_thread = threading.Thread(target=self.pump, name="luciole-recorder", daemon=True)
+        self.pump_thread = own_thread(self.pump, "luciole-recorder")
         self.pump_thread.start()
         self.thread_start = threading.Thread.start
         threading.Thread.start = recorder.thread_start_hook(self.thread_start)
@@ -528,9 +544,8 @@ class Session:
         sys.set_coroutine_origin_tracking_depth(ORIGIN_DEPTH)
         monitoring.set_events(tool, always)
         if self.connection:
-            self.write({"process": {"pid": os.getpid(), "argv": sys.orig_argv}}, self.view_sinks)
             # After set_events above, which would undo an early pause's LINE events.
-            threading.Thread(target=self.control, name="luciole-control", daemon=True).start()
+            own_thread(self.control, "luciole-control").start()
 
     def stop(self, close: bool) -> None:
         """Remove the callbacks, send the last frame and {"done": true}; `close` the connection too.
@@ -546,6 +561,13 @@ class Session:
         self.send({"done": True})
         if close:
             self.close()
+
+    def terminate(self) -> None:
+        """On SIGTERM, just before the process dies: send the last frame and {"done": true}."""
+        self.stopping.set()
+        self.pump_thread.join(timeout=4 * FRAME)  # in vain if this thread holds the write lock
+        self.recorder.flush()
+        self.send({"done": True})
 
     def uninstall(self) -> None:
         monitoring = sys.monitoring
@@ -576,7 +598,11 @@ class Session:
         try:
             for line in self.connection.makefile(encoding="utf-8"):
                 try:
-                    self.recorder.command(json.loads(line))
+                    message = json.loads(line)
+                    if "refused" in message:  # an engine of another protocol: record for nobody
+                        log.warning("the Luciole engine refused this recorder: %s", message["refused"])
+                        break
+                    self.recorder.command(message)
                 except (ValueError, AttributeError) as error:
                     log.warning("ignored a command from the view: %s (%s)", line.strip()[:200], error)
         except (OSError, ValueError):  # ValueError: the connection was closed by stop()
@@ -586,11 +612,18 @@ class Session:
 
 # The session of this interpreter, started by `luciole run`, luciole.start() or auto-start.
 active: Session | None = None
+ending: Session | None = None  # the session stop() is ending, which on_sigterm lets finish
+terminated = False  # SIGTERM came while stop() was sending the last frame
 hooks_installed = False
 
 
-def connect(port: int | str, quiet: bool) -> socket.socket | None:
-    """Connection to the view listening on `port`, None when nothing listens there."""
+def connect(port: int | str | None, quiet: bool) -> socket.socket | None:
+    """Connection to the engine on `port` (default: the running engine's), None when nothing listens."""
+    port = port or protocol.engine_port()
+    if not port:
+        if not quiet:
+            log.warning("no Luciole engine is running: open the Luciole view in VS Code, or run `luciole engine`")
+        return None
     try:
         connection = socket.create_connection(("127.0.0.1", int(port)), timeout=2)
     except (OSError, ValueError) as error:
@@ -610,7 +643,9 @@ def start(root: Path | str | None = None, port: int | str | None = None, events:
         if not quiet:
             log.warning("live mode needs Python 3.12 or newer (sys.monitoring); this is %s", sys.version.split()[0])
         return False
-    port = port or os.environ.get("LUCIOLE_LIVE_PORT")
+    if events is None and "luciole" in map(sys.monitoring.get_tool, (3, 4)):
+        return True  # another copy of luciole (auto-start's, see import_bundled) already reports it
+    port = port or os.environ.get("LUCIOLE_LIVE_PORT") or protocol.engine_port()
     if connection is None and port:
         connection = connect(port, quiet)
     if connection is None and events is None:
@@ -626,6 +661,7 @@ def start(root: Path | str | None = None, port: int | str | None = None, events:
         return False
     active = session
     install_hooks()
+    install_sigterm()
     return True
 
 
@@ -634,7 +670,19 @@ def stop() -> None:
     global active
     session, active = active, None
     if session is not None:
-        session.stop(close=True)
+        end(session, close=True)
+
+
+def end(session: Session, close: bool) -> None:
+    """Stop `session`; a SIGTERM received meanwhile ends the process once its last frame is sent."""
+    global ending
+    ending = session
+    try:
+        session.stop(close)
+    finally:
+        ending = None
+        if terminated:
+            os.kill(os.getpid(), signal.SIGTERM)  # on_sigterm restored the default action
 
 
 def install_hooks() -> None:
@@ -648,6 +696,56 @@ def install_hooks() -> None:
         os.register_at_fork(after_in_child=after_fork)
 
 
+def install_sigterm() -> None:
+    """Send the last calls when SIGTERM ends the process (multiprocessing's Pool terminates its
+    workers): only when the program has no handler of its own, and the process then dies as it
+    would have. Forked children inherit the handler, and report through their own session."""
+    if os.name == "nt" or threading.current_thread() is not threading.main_thread():
+        return  # Windows terminates processes without a signal handler; only the main thread can set one
+    try:
+        if signal.getsignal(signal.SIGTERM) is signal.SIG_DFL:
+            signal.signal(signal.SIGTERM, on_sigterm)
+    except (ValueError, OSError):
+        pass
+
+
+def on_sigterm(signum: int, frame) -> None:
+    global active, terminated
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    if ending is not None:
+        # A multiprocessing worker is often stopping already (os._exit after its last task) when
+        # its pool terminates it, maybe interrupted halfway through its last frame: let it finish
+        # (end() then kills the process), within a second.
+        terminated = True
+        _thread.start_new_thread(kill_later, (1,))
+        return
+    session, active = active, None
+    if session is not None:
+        # In a thread of its own, given a second at most: the main thread, interrupted by this
+        # handler, may hold a lock it needs. The process must die whatever happens.
+        done = _thread.allocate_lock()
+        done.acquire()
+
+        def terminate() -> None:
+            try:
+                session.terminate()
+            except Exception:
+                pass
+            done.release()
+
+        try:
+            _thread.start_new_thread(terminate, ())  # not threading's: its lock may be held too
+            done.acquire(timeout=1)
+        except Exception:
+            pass
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def kill_later(seconds: float) -> None:
+    time.sleep(seconds)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
 def after_fork() -> None:
     """In a forked child: drop the parent's session (its threads did not survive the fork, its
     connection is the parent's) and connect again as a process of its own."""
@@ -659,7 +757,7 @@ def after_fork() -> None:
         session.uninstall()
         if session.connection:
             session.connection.close()  # the child's copy: the parent's connection stays open
-        if session.port and start(session.recorder.root, session.port, quiet=True):
+        if session.connection and start(session.recorder.root, session.port, quiet=True):
             exit_ = os._exit
             if exit_.__name__ != "luciole_exit":
                 # Forked children usually end with os._exit (multiprocessing's do), which skips
@@ -683,10 +781,12 @@ def run(target: list[str], as_module: bool, root: Path, port: int | None, events
         log.error("live mode needs Python 3.12 or newer (sys.monitoring); this is %s", sys.version.split()[0])
         return 2
     stop()  # auto-started in this interpreter: this run records it instead, with its own options
-    session = Session(root, port, connect(port, quiet=False) if port else None, events)
+    # Without --port, the running engine's, if any: then nothing to warn about when there is none.
+    session = Session(root, port, connect(port, quiet=not port), events)
     session.start()
     active = session
     install_hooks()
+    install_sigterm()
     sys.argv = list(target)
     try:
         if as_module:
@@ -706,4 +806,4 @@ def run(target: list[str], as_module: bool, root: Path, port: int | None, events
     finally:
         if active is session:
             active = None
-            session.stop(close=False)
+            end(session, close=False)

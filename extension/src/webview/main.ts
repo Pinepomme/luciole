@@ -7,8 +7,8 @@ import ForceGraph3D from "3d-force-graph";
 import * as THREE from "three";
 import SpriteText from "three-spritetext";
 import type { Graph } from "../graph";
-import type { FromWebview, LiveFrame, StepMode, ThreadStack, ToWebview } from "../messages";
-import { Brain, buildBrain, Neuron, Synapse, SynapseKind, synapseId } from "./brain";
+import type { FromWebview, LiveFrame, LiveState, SourceLine, StepMode, ThreadStack, ToWebview } from "../messages";
+import { Brain, breakpointAction, breakpointHint, buildBrain, Neuron, neuronAt, Synapse, SynapseKind, synapseId } from "./brain";
 
 declare function acquireVsCodeApi(): { postMessage(message: FromWebview): void };
 
@@ -20,7 +20,7 @@ interface NeuronNode {
   z?: number;
   /** 1 when the function just ran or is running, fading to 0. */
   heat: number;
-  parts?: { material: THREE.MeshLambertMaterial; halo: THREE.Sprite; spark: THREE.Sprite; label?: SpriteText; radius: number; base: THREE.Color };
+  parts?: { material: THREE.MeshLambertMaterial; halo: THREE.Sprite; spark: THREE.Sprite; mark: THREE.Sprite; label?: SpriteText; radius: number; base: THREE.Color };
 }
 
 interface SynapseLink {
@@ -41,6 +41,8 @@ const VISITED = 0.12;
 const MAX_PULSES_PER_LINK = 3;
 /** Lines of the bottom bar: one per thread, then what is waiting. */
 const MAX_PATH_LINES = 5;
+/** Above this many shown labels, overlapping ones are not hidden (it costs pairs of labels). */
+const MAX_DECLUTTERED = 300;
 
 const vscode = acquireVsCodeApi();
 const statusEl = document.getElementById("status")!;
@@ -56,10 +58,14 @@ const css = getComputedStyle(document.body);
 const cssColor = (name: string, fallback: string) => css.getPropertyValue(name).trim() || fallback;
 const background = cssColor("--vscode-editor-background", "#1e1e1e");
 const foreground = cssColor("--vscode-editor-foreground", "#cccccc");
+/** Behind labels, so they read over spheres and lines. */
+const labelBackground = `#${new THREE.Color(background).getHexString()}b3`;
 /** Running. */
 const AMBER = new THREE.Color("#ffc94d");
 /** Suspended on an await. */
 const BLUE = new THREE.Color("#5aa9ff");
+/** Where the debugger stopped, and breakpoints (VS Code's breakpoint red). */
+const RED = new THREE.Color("#f14c4c");
 const LINE_COLORS: Record<SynapseKind, THREE.Color> = {
   call: new THREE.Color("#6f8bb3"),
   state: new THREE.Color("#8a6fb3"),
@@ -67,6 +73,7 @@ const LINE_COLORS: Record<SynapseKind, THREE.Color> = {
   spawn: new THREE.Color("#4fb3a9"),
 };
 const glowTexture = makeGlowTexture();
+const dotTexture = makeDotTexture();
 
 let brain: Brain | undefined;
 let target: string | undefined;
@@ -84,6 +91,12 @@ const visited = new Set<string>();
 let pathway = new Set<SynapseLink>();
 let live = false;
 let paused = false;
+/** VS Code's breakpoints, and the functions that hold one. */
+let breakpoints: SourceLine[] = [];
+let breakpointNodes = new Set<string>();
+/** Where the debugger stopped, and the function that holds it. */
+let debugStop: SourceLine | undefined;
+let stoppedIn: string | undefined;
 let callsThisSecond: { t: number; n: number }[] = [];
 
 const graph = new ForceGraph3D(document.getElementById("brain")!)
@@ -110,7 +123,16 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
     hovered = (node as NeuronNode | null) ?? undefined;
     document.body.style.cursor = node ? "pointer" : "";
   })
-  .onNodeClick((node: object) => reveal(node as NeuronNode));
+  .onNodeClick((node: object) => reveal(node as NeuronNode))
+  .onNodeRightClick((node: object) => {
+    const { neuron } = node as NeuronNode;
+    const action = breakpointAction(brain?.neurons ?? [], neuron, breakpoints);
+    if (action && "add" in action) {
+      vscode.postMessage({ type: "addBreakpoint", file: neuron.node.file, line: action.add });
+    } else if (action) {
+      vscode.postMessage({ type: "removeBreakpoints", file: neuron.node.file, lines: action.remove });
+    }
+  });
 
 let fitted = false;
 graph.onEngineStop(() => {
@@ -140,7 +162,13 @@ function neuronObject(node: NeuronNode): THREE.Object3D {
   );
   spark.scale.setScalar(0);
   group.add(spark);
-  node.parts = { material, halo, spark, radius, base };
+  // A red dot on functions that hold a breakpoint, as in the editor's gutter.
+  const mark = new THREE.Sprite(new THREE.SpriteMaterial({ map: dotTexture, color: RED, transparent: true, opacity: 0, depthWrite: false, depthTest: false }));
+  mark.scale.setScalar(Math.max(2.5, radius * 0.9));
+  mark.position.set(radius * 0.85, radius * 0.85, 0);
+  mark.renderOrder = 2; // over labels
+  group.add(mark);
+  node.parts = { material, halo, spark, mark, radius, base };
   return group;
 }
 
@@ -178,15 +206,85 @@ function makeGlowTexture(): THREE.Texture {
   return new THREE.CanvasTexture(canvas);
 }
 
+/** A solid dot with a dark rim, like the editor's breakpoint glyph. */
+function makeDotTexture(): THREE.Texture {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 64;
+  const context = canvas.getContext("2d")!;
+  context.beginPath();
+  context.arc(32, 32, 28, 0, 2 * Math.PI);
+  context.fillStyle = "#ffffff";
+  context.fill();
+  context.lineWidth = 5;
+  context.strokeStyle = "rgba(0,0,0,0.6)";
+  context.stroke();
+  return new THREE.CanvasTexture(canvas);
+}
+
 function label(node: NeuronNode): SpriteText {
   const parts = node.parts!;
   if (!parts.label) {
-    parts.label = new SpriteText(node.neuron.label, 3.2, foreground);
-    parts.label.fontFace = css.getPropertyValue("--vscode-editor-font-family").trim() || "monospace";
-    parts.label.position.y = parts.radius + 4;
-    parts.halo.parent!.add(parts.label);
+    const text = new SpriteText(node.neuron.label, 3.2, foreground);
+    text.fontFace = css.getPropertyValue("--vscode-editor-font-family").trim() || "monospace";
+    text.backgroundColor = labelBackground;
+    text.padding = [0.8, 0.3];
+    text.borderRadius = 1;
+    // Drawn over the spheres: a neighbour in front no longer hides it (declutterLabels hides
+    // labels that overlap a more important one instead).
+    text.material.depthTest = false;
+    text.material.depthWrite = false;
+    text.renderOrder = 1;
+    // Just above the sphere and its breakpoint dot, whatever their size.
+    text.position.y = Math.max(parts.radius, parts.mark.position.y + parts.mark.scale.y / 2) + 1.5 + text.scale.y / 2;
+    parts.halo.parent!.add(text);
+    parts.label = text;
   }
   return parts.label;
+}
+
+/** Which label stays when two overlap on screen: the hovered one, where the debugger stopped, what runs. */
+function labelPriority(node: NeuronNode): number {
+  const rank =
+    node === hovered ? 5 : node.id === stoppedIn ? 4 : onStack.has(node.id) ? 3 : node.heat > 0.15 || waiting.has(node.id) ? 2 : breakpointNodes.has(node.id) ? 1 : 0;
+  return rank * 1000 + node.parts!.radius; // then bigger (more connected) neurons first
+}
+
+const corner = new THREE.Vector3();
+const cameraRight = new THREE.Vector3();
+const cameraUp = new THREE.Vector3();
+
+/** Hides labels that overlap a more important one on screen, so the ones left can be read. */
+function declutterLabels(): void {
+  const shown = nodes.filter((node) => node.parts?.label?.visible);
+  if (shown.length < 2 || shown.length > MAX_DECLUTTERED) {
+    return;
+  }
+  const camera = graph.camera();
+  const element = document.getElementById("brain")!;
+  const [width, height] = [element.clientWidth, element.clientHeight];
+  cameraRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+  cameraUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  const toScreen = (dx: number, dy: number, from: THREE.Vector3) => {
+    corner.copy(from).addScaledVector(cameraRight, dx).addScaledVector(cameraUp, dy).project(camera);
+    return { x: ((corner.x + 1) / 2) * width, y: ((1 - corner.y) / 2) * height, z: corner.z };
+  };
+  const placed: { left: number; right: number; top: number; bottom: number }[] = [];
+  const center = new THREE.Vector3();
+  for (const node of shown.sort((a, b) => labelPriority(b) - labelPriority(a))) {
+    const text = node.parts!.label!;
+    text.getWorldPosition(center);
+    const a = toScreen(-text.scale.x / 2, text.scale.y / 2, center);
+    const b = toScreen(text.scale.x / 2, -text.scale.y / 2, center);
+    if (a.z > 1 || b.z > 1) {
+      continue; // behind the camera
+    }
+    const box = { left: Math.min(a.x, b.x), right: Math.max(a.x, b.x), top: Math.min(a.y, b.y), bottom: Math.max(a.y, b.y) };
+    if (placed.some((p) => box.left < p.right && p.left < box.right && box.top < p.bottom && p.top < box.bottom)) {
+      text.visible = false;
+    } else {
+      placed.push(box);
+    }
+  }
 }
 
 // Tooltips (text only: names come from the analyzed code)
@@ -197,11 +295,18 @@ function escape(text: string): string {
 
 function neuronTooltip(neuron: Neuron): string {
   const name = neuron.node.kind === "module" ? `module ${neuron.label}` : `${neuron.label}(${neuron.params.join(", ")})`;
-  return `<b>${escape(name)}</b><br><span class="dim">${escape(neuron.node.file)}:${neuron.node.loc.line}</span>`;
+  const action = breakpointAction(brain?.neurons ?? [], neuron, breakpoints);
+  const hint = action ? `<br><span class="dim">right-click: ${escape(breakpointHint(neuron, action))}</span>` : "";
+  return `<b>${escape(name)}</b><br><span class="dim">${escape(neuron.node.file)}:${neuron.node.loc.line}</span>${hint}`;
 }
 
 function synapseTooltip(synapse: Synapse): string {
-  const title = { call: "calls", state: "shared state", runtime: "call seen at runtime", spawn: "starts a thread or task" }[synapse.kind];
+  const callTitle = synapse.byName
+    ? "probably calls (matched by method name)"
+    : synapse.callback
+      ? "passes it to be called later (callback, thread, task)"
+      : "calls";
+  const title = { call: callTitle, state: "shared state", runtime: "call seen at runtime", spawn: "starts a thread or task" }[synapse.kind];
   const variables = synapse.variables.map((v) => escape(v)).join("<br>");
   return `<span class="dim">${title}</span>${variables ? `<br>${variables}` : ""}`;
 }
@@ -215,14 +320,16 @@ function animate(now: number): void {
   const fade = Math.exp(-dt / FADE);
   const showAll = nodes.length <= ALWAYS_LABEL;
   for (const node of nodes) {
-    node.heat = onStack.has(node.id) ? 1 : Math.max(node.heat * fade, visited.has(node.id) ? VISITED : 0);
+    const isStopped = node.id === stoppedIn;
+    node.heat = onStack.has(node.id) || isStopped ? 1 : Math.max(node.heat * fade, visited.has(node.id) ? VISITED : 0);
     const parts = node.parts;
     if (!parts) {
       continue;
     }
+    (parts.mark.material as THREE.SpriteMaterial).opacity = breakpointNodes.has(node.id) ? 0.95 : 0;
     // Waiting on an await shows in blue, unless the function is also running or just ran.
-    const isWaiting = waiting.has(node.id) && node.heat < 0.5;
-    const glow = isWaiting ? BLUE : AMBER;
+    const isWaiting = waiting.has(node.id) && node.heat < 0.5 && !isStopped;
+    const glow = isStopped ? RED : isWaiting ? BLUE : AMBER;
     const level = isWaiting ? 0.6 : node.heat;
     parts.material.color.copy(parts.base).lerp(glow, level);
     parts.material.emissive.copy(glow);
@@ -236,11 +343,12 @@ function animate(now: number): void {
     sparkMaterial.color.copy(glow);
     sparkMaterial.opacity = spark;
     parts.spark.scale.setScalar(0.05 * spark);
-    const wantsLabel = showAll || node.heat > 0.15 || isWaiting || node === hovered;
+    const wantsLabel = showAll || node.heat > 0.15 || isWaiting || node === hovered || breakpointNodes.has(node.id);
     if (wantsLabel || parts.label) {
       label(node).visible = wantsLabel;
     }
   }
+  declutterLabels();
   for (const link of links) {
     link.heat = pathway.has(link) ? 1 : Math.max(link.heat * fade, visited.has(link.id) ? VISITED : 0);
     if (link.line) {
@@ -279,6 +387,7 @@ function load(graphData: Graph, newTarget: string): void {
     fitted = false;
   }
   document.body.dataset.state = "busy";
+  placeDebugMarks();
   graph.graphData({ nodes, links });
   messageEl.hidden = nodes.length > 0;
   if (!nodes.length) {
@@ -291,6 +400,28 @@ function summary(): string {
   const calls = links.filter((l) => l.synapse.kind === "call").length;
   const state = links.length - calls;
   return `${nodes.length} functions · ${calls} call links · ${state} shared-state links`;
+}
+
+// Debugger
+
+/** Finds the functions holding the breakpoints and the debugger's stop, in the current graph. */
+function placeDebugMarks(): void {
+  const neurons = brain?.neurons ?? [];
+  breakpointNodes = new Set(breakpoints.flatMap(({ file, line }) => neuronAt(neurons, file, line)?.id ?? []));
+  stoppedIn = debugStop && neuronAt(neurons, debugStop.file, debugStop.line)?.id;
+}
+
+function onDebugStopped(at: SourceLine | undefined): void {
+  const wasStopped = stoppedIn !== undefined;
+  debugStop = at;
+  placeDebugMarks();
+  const node = stoppedIn ? nodeById.get(stoppedIn) : undefined;
+  if (node) {
+    setStatus(`debugger stopped in ${node.neuron.label}, line ${at!.line}`);
+    flyTo(node);
+  } else if (wasStopped) {
+    setStatus(live ? "live" : summary());
+  }
 }
 
 // Live mode
@@ -427,6 +558,22 @@ function resize(): void {
 }
 new ResizeObserver(resize).observe(document.getElementById("brain")!);
 
+/** Under VS Code's debugger, its toolbar pauses and steps: the panel's own buttons hide. */
+let debugging = false;
+let liveState: LiveState | undefined;
+
+function showLiveButtons(): void {
+  const { running, stopping, held, stepping } = liveState ?? { running: false, stopping: false, held: 0, stepping: false };
+  const shown = running && !debugging;
+  stopButton.hidden = !shown;
+  stopButton.textContent = stopping ? "Force stop" : "Stop";
+  pauseButton.hidden = !shown || stopping;
+  pauseButton.textContent = paused ? "Resume" : "Pause";
+  pauseButton.classList.toggle("primary", paused);
+  steppingEl.hidden = !shown || stopping || !paused;
+  stepButtons.forEach((button) => (button.disabled = !held || stepping));
+}
+
 liveButton.addEventListener("click", () => vscode.postMessage({ type: "runLive" }));
 document.getElementById("runWith")!.addEventListener("click", () => vscode.postMessage({ type: "runLiveWith" }));
 stopButton.addEventListener("click", () => vscode.postMessage({ type: "stopLive" }));
@@ -451,21 +598,24 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
     setStatus(`starting ${message.script}…`);
   } else if (message.type === "live") {
     onLive(message.frame);
+  } else if (message.type === "breakpoints") {
+    breakpoints = message.breakpoints;
+    placeDebugMarks();
+  } else if (message.type === "debugStopped") {
+    onDebugStopped(message.at);
   } else if (message.type === "focus") {
     const node = nodeById.get(message.node);
     if (node) {
       flyTo(node);
     }
+  } else if (message.type === "debugging") {
+    debugging = message.on;
+    showLiveButtons();
   } else if (message.type === "liveState") {
+    liveState = message.state;
     const { running, stopping, held, stepping } = message.state;
     paused = message.state.paused;
-    stopButton.hidden = !running;
-    stopButton.textContent = stopping ? "Force stop" : "Stop";
-    pauseButton.hidden = !running || stopping;
-    pauseButton.textContent = paused ? "Resume" : "Pause";
-    pauseButton.classList.toggle("primary", paused);
-    steppingEl.hidden = !running || stopping || !paused;
-    stepButtons.forEach((button) => (button.disabled = !held || stepping));
+    showLiveButtons();
     if (stopping) {
       setStatus("stopping…");
     } else if (stepping) {
