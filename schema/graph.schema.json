@@ -144,6 +144,10 @@
         "by_name": {
           "description": "`calls` only: resolved by method name alone (the receiver's type is unknown, and one project class has a method of that name). Likely, not certain.",
           "const": true
+        },
+        "callback": {
+          "description": "`calls` only: the function is passed, not called, as an argument (`Thread(target=f)`, `pool.submit(f)`, `sorted(key=f)`): what receives it calls it later.",
+          "const": true
         }
       }
     }

@@ -107,8 +107,13 @@ test("imports and calls matched by name become call synapses", () => {
       ...shop.edges,
       { kind: "calls", source: "other", target: "shop", sites: [{ line: 1, col: 0 }] },
       { kind: "calls", source: "other", target: "shop:with_tax", sites: [{ line: 2, col: 0 }], by_name: true },
+      { kind: "calls", source: "other", target: "shop:main", sites: [{ line: 3, col: 0 }], callback: true },
     ],
   };
   const calls = buildBrain(graph).synapses.filter((s) => s.kind === "call" && s.source === "other");
-  assert.deepEqual(calls.map((s) => [s.target, Boolean(s.byName)]).sort(), [["shop", false], ["shop:with_tax", true]]);
+  assert.deepEqual(calls.map((s) => [s.target, Boolean(s.byName), Boolean(s.callback)]).sort(), [
+    ["shop", false, false],
+    ["shop:main", false, true],
+    ["shop:with_tax", true, false],
+  ]);
 });

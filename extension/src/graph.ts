@@ -35,6 +35,8 @@ export interface GraphEdge {
   provenance?: "static" | "runtime";
   /** `calls` resolved by method name alone: likely, not certain. */
   by_name?: boolean;
+  /** `calls` to a function passed as an argument, called later by what receives it. */
+  callback?: boolean;
 }
 
 export interface Graph {

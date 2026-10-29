@@ -21,6 +21,9 @@
   `with`, `len`, f-strings…), functions held in variables, and, as a marked guess (`by_name`), the
   project's only method of a name. On the standard library's `email` and `asyncio` packages, the
   share of runtime calls missing from the graph went from 52% to 27%.
+- Callbacks: a function passed, not called, as an argument (`Thread(target=crunch)`,
+  `pool.submit(work)`, `sorted(key=rank)`, `button.bind(self.on_click)`) is linked to the function
+  passing it (`calls` edges with `"callback": true`), so threads and handlers no longer float apart.
 - The view shows several processes at once; Pause and Stop apply to all of them.
 - The graph and `luciole tests` skip the folders the project's `.gitignore` lists (data, runs,
   outputs), and `luciole tests` also finds tests that reach a module through other modules.
