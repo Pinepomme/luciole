@@ -9,7 +9,7 @@ import SpriteText from "three-spritetext";
 import type { Graph } from "../graph";
 import type { FromWebview, LiveFrame, LiveState, SourceLine, StepMode, ThreadStack, ToWebview } from "../messages";
 import { Brain, breakpointAction, breakpointHint, buildBrain, Neuron, neuronAt, Synapse, SynapseKind, synapseId } from "./brain";
-import { bundle, Layout, layoutBrain, NEURON_GAP, neuronRadius, Region, regionHue, route, Vec3 } from "./layout";
+import { bundle, labelAnchor, Layout, layoutBrain, NEURON_GAP, neuronRadius, Region, regionHue, regionMembers, route, Vec3 } from "./layout";
 
 declare function acquireVsCodeApi(): { postMessage(message: FromWebview): void };
 
@@ -256,6 +256,7 @@ function makeRegionLabels(): void {
   regionLabels.clear();
   regionGlows.children.forEach((glow) => ((glow as THREE.Sprite).material.dispose()));
   regionGlows.clear();
+  const members = layout ? regionMembers(layout) : new Map<string, string[]>();
   for (const region of layout?.regions.values() ?? []) {
     // A region holding the whole brain (a single file) needs neither: it is the brain.
     const whole = region.size === layout!.regions.get("")!.size;
@@ -282,7 +283,7 @@ function makeRegionLabels(): void {
     text.material.depthWrite = false;
     text.material.opacity = region.kind === "class" ? 0.7 : 0.9;
     text.renderOrder = 1;
-    text.userData = { region };
+    text.userData = { region, members: members.get(region.id) ?? [] };
     regionLabels.add(text);
   }
 }
@@ -381,9 +382,15 @@ function declutterLabels(): void {
   for (const child of regionLabels.children) {
     const text = child as SpriteText;
     const region = text.userData.region as Region;
-    const { x, y, z } = region.center;
-    // Modules and classes are named at their centre, packages above them (their modules fill the middle).
-    text.position.set(x, y, z).addScaledVector(cameraUp, region.kind === "package" ? region.radius + text.scale.y * 0.6 : 0);
+    if (region.kind === "package") {
+      // Above the package's neurons (its modules fill the middle), wherever they are in its disc.
+      const points = (text.userData.members as string[]).map((id) => nodeById.get(id)!).filter(Boolean).map((n) => ({ x: n.x ?? 0, y: n.y ?? 0, z: n.z ?? 0 }));
+      const { x, y, z } = labelAnchor(points, cameraRight, cameraUp, NEURON_GAP + text.scale.y * 0.6);
+      text.position.set(x, y, z);
+    } else {
+      // Modules and classes are named at their centre.
+      text.position.set(region.center.x, region.center.y, region.center.z);
+    }
     const box = boxOf(text);
     const size = box ? box.bottom - box.top : 0;
     text.visible = size >= REGION_LABEL_MIN && size <= REGION_LABEL_MAX;

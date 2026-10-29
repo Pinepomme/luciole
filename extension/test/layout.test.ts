@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { test } from "node:test";
 import type { Graph, GraphEdge, GraphNode } from "../src/graph";
 import { buildBrain } from "../src/webview/brain";
-import { bundle, buildRegions, hash, layoutBrain, length, neuronRadius, packItems, regionHue, route, seedPoint, Vec3 } from "../src/webview/layout";
+import { bundle, buildRegions, hash, labelAnchor, layoutBrain, length, neuronRadius, packItems, regionHue, regionMembers, route, seedPoint, Vec3 } from "../src/webview/layout";
 
 // out/test/layout.test.js -> repo root
 const shop: Graph = JSON.parse(readFileSync(resolve(__dirname, "../../../examples/shop.graph.json"), "utf8"));
@@ -208,4 +208,21 @@ test("colors: top-level regions apart, a single file's module doesn't count", ()
   const single = layout(shop);
   // In a single file, the class gets its own hue rather than the module's.
   assert.notEqual(regionHue(single, "shop:Cart.add"), regionHue(single, "shop:main"));
+});
+
+test("a region's name goes just above its neurons, not above its packed sphere", () => {
+  const map = layout(app);
+  const members = regionMembers(map);
+  assert.deepEqual(members.get("mod:src.app.core.store")!.sort(), ["src.app.core.store:Store.get", "src.app.core.store:Store.put", "src.app.core.store:load"]);
+  assert.equal(members.get("")!.length, buildBrain(app).neurons.length);
+  // Seen from the front (right = x, up = y): across, the middle of the points; up, the highest plus the gap.
+  const points = [
+    { x: 100, y: -50, z: 4 },
+    { x: 140, y: -20, z: -4 },
+    { x: 120, y: -80, z: 0 },
+  ];
+  assert.deepEqual(labelAnchor(points, { x: 1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, 5), { x: 120, y: -15, z: 0 });
+  // Turned: the camera's up is the world's x.
+  const turned = labelAnchor(points, { x: 0, y: -1, z: 0 }, { x: 1, y: 0, z: 0 }, 5);
+  assert.ok(Math.abs(turned.x - 145) < 1e-9 && Math.abs(turned.y + 50) < 1e-9 && Math.abs(turned.z) < 1e-9);
 });

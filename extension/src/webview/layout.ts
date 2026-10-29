@@ -395,6 +395,54 @@ export function regionHue(layout: Layout, id: string): number {
   return chain[1] === undefined ? base : (base + (hash(chain[1]) % 90) - 45 + 360) % 360;
 }
 
+/** The neurons inside each region, at any depth. */
+export function regionMembers(layout: Layout): Map<string, string[]> {
+  const members = new Map<string, string[]>();
+  for (const [neuron, chain] of layout.chains) {
+    for (const region of chain) {
+      const list = members.get(region);
+      if (list) {
+        list.push(neuron);
+      } else {
+        members.set(region, [neuron]);
+      }
+    }
+  }
+  return members;
+}
+
+/**
+ * Where a name goes just above some points (a region's neurons), seen with the camera's `right`
+ * and `up` axes: in the middle across, `gap` above the highest one, at their middle depth. A
+ * region's packed sphere can be much bigger than where its neurons are (a few small modules
+ * around a big one), so names go by the neurons.
+ */
+export function labelAnchor(points: Vec3[], right: Vec3, up: Vec3, gap = 0): Vec3 {
+  const dot = (a: Vec3, b: Vec3) => a.x * b.x + a.y * b.y + a.z * b.z;
+  const forward = { x: right.y * up.z - right.z * up.y, y: right.z * up.x - right.x * up.z, z: right.x * up.y - right.y * up.x };
+  let [left, rightmost, top, near, far] = [Infinity, -Infinity, -Infinity, Infinity, -Infinity];
+  for (const p of points) {
+    const across = dot(p, right);
+    const depth = dot(p, forward);
+    left = Math.min(left, across);
+    rightmost = Math.max(rightmost, across);
+    top = Math.max(top, dot(p, up));
+    near = Math.min(near, depth);
+    far = Math.max(far, depth);
+  }
+  if (!points.length) {
+    return origin();
+  }
+  const across = (left + rightmost) / 2;
+  const depth = (near + far) / 2;
+  const height = top + gap;
+  return {
+    x: right.x * across + up.x * height + forward.x * depth,
+    y: right.y * across + up.y * height + forward.y * depth,
+    z: right.z * across + up.z * height + forward.z * depth,
+  };
+}
+
 /** Region ids from the root to `id`. */
 export function regionChain(layout: Layout, id: string): string[] {
   const chain: string[] = [];
