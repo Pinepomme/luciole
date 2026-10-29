@@ -5,45 +5,29 @@ import { randomBytes } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { addBreakpoint, DEBUGGER_COMMANDS, pythonDebugSession, registerDebugging, removeBreakpoints, sourceBreakpoints } from "./debugging";
+import { addBreakpoint, hasPythonDebugger, pythonDebugSession, registerDebugging, removeBreakpoints, sourceBreakpoints } from "./debugging";
 import type { Graph } from "./graph";
 import { webviewHtml } from "./html";
 import { LiveSession } from "./live";
-import type { FromWebview, PausedFrame, PausedThread, StepMode, ToWebview } from "./messages";
-import { RunConfiguration, fileRunKind, pytestRun, resolveRun, splitArgs } from "./runs";
-import { VariablesView } from "./variables";
+import type { FromWebview, ToWebview } from "./messages";
+import { RunConfiguration, debugConfiguration, fileRunKind, pytestRun, resolveRun, splitArgs } from "./runs";
 
 let panel: GraphPanel | undefined;
 let output: vscode.OutputChannel;
 let live: LiveSession;
-let variables: VariablesView;
 let autoStartItem: vscode.StatusBarItem;
 
 /** The last run started, to run it again from the panel. */
 const LAST_RUN = "luciole.lastRun";
+/** Set once the user was told Run Live works better with the Python debugger installed. */
+const DEBUGGER_HINT = "luciole.debuggerHintShown";
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("Luciole");
   live = new LiveSession(
     {
       frame: (frame) => panel?.post({ type: "live", frame }),
-      state: (state) => {
-        if (!state.paused) {
-          variables.clear();
-        } else if (state.stepping) {
-          variables.markStale(); // fresh snapshots come when the threads stop again
-        }
-        panel?.post({ type: "liveState", state });
-      },
-      paused: (thread) => {
-        const first = variables.isEmpty;
-        variables.add(thread);
-        // After a step, the stepped thread stops first: show where it went.
-        if (first && thread.frames[0]) {
-          void vscode.commands.executeCommand("luciole.variables.focus");
-          void revealFrame(thread.frames[0], thread);
-        }
-      },
+      state: (state) => panel?.post({ type: "liveState", state }),
       started: (label) => {
         // A program started in a terminal with auto-start on: show the project it lights up.
         if (!panel && vscode.workspace.workspaceFolders?.length) {
@@ -64,21 +48,12 @@ export function activate(context: vscode.ExtensionContext): void {
   autoStartItem = vscode.window.createStatusBarItem("luciole.autoStart", vscode.StatusBarAlignment.Left);
   autoStartItem.name = "Luciole Auto-Start";
   autoStartItem.command = "luciole.toggleAutoStart";
-  variables = new VariablesView((ref) => live.expand(ref));
   context.subscriptions.push(
     output,
     live,
-    variables,
-    vscode.commands.registerCommand("luciole.revealFrame", (frame: PausedFrame, thread: PausedThread) => revealFrame(frame, thread)),
-    // Under VS Code's Python debugger, pausing and stepping are the debugger's: one pause, not two.
-    vscode.commands.registerCommand("luciole.stepOver", () => viaDebugger("over") || step("over")),
-    vscode.commands.registerCommand("luciole.stepInto", () => viaDebugger("into") || step("into")),
-    vscode.commands.registerCommand("luciole.stepOut", () => viaDebugger("out") || step("out")),
     vscode.commands.registerCommand("luciole.runLive", () => runFile(context, fileTarget())),
     vscode.commands.registerCommand("luciole.runLiveWith", () => pickRun(context)),
-    vscode.commands.registerCommand("luciole.stopLive", () => viaDebugger("stop") || live.stop()),
-    vscode.commands.registerCommand("luciole.pauseLive", () => viaDebugger("pause") || live.pause(true)),
-    vscode.commands.registerCommand("luciole.resumeLive", () => viaDebugger("resume") || live.pause(false)),
+    vscode.commands.registerCommand("luciole.stopLive", () => live.stop(pythonDebugSession())),
     vscode.commands.registerCommand("luciole.showGraph", () => showGraph(context, workspaceTarget(), false)),
     vscode.commands.registerCommand("luciole.showFileGraph", () => showGraph(context, fileTarget(), true)),
     autoStartItem,
@@ -113,7 +88,6 @@ export function activate(context: vscode.ExtensionContext): void {
       log: (line) => output.appendLine(line),
     }),
     vscode.debug.onDidChangeBreakpoints(() => panel?.postBreakpoints()),
-    vscode.debug.onDidChangeActiveDebugSession(() => panel?.post({ type: "debugging", on: Boolean(pythonDebugSession()) })),
     // A file graph follows the editor: switching to another Python file shows that file's graph.
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       const document = editor?.document;
@@ -319,7 +293,10 @@ async function pickRun(context: vscode.ExtensionContext): Promise<void> {
   }
 }
 
-/** Show the brain the run will light up, then start the run under the recorder in a terminal. */
+/**
+ * Show the brain the run will light up, then start the run under VS Code's Python debugger with
+ * the recorder (auto-start), or, without the Python debugger, under `luciole run` in a terminal.
+ */
 async function startRun(context: vscode.ExtensionContext, config: RunConfiguration): Promise<void> {
   const dir = analyzerDir(context);
   if (!dir) {
@@ -356,40 +333,28 @@ async function startRun(context: vscode.ExtensionContext, config: RunConfigurati
   }
   void context.workspaceState.update(LAST_RUN, { ...config, folder }); // runs again from the same folder
   panel?.post({ type: "liveStarted", script: run.label });
-  await live.run(run, folder, pythonPath(folder), dir);
+  if (!hasPythonDebugger()) {
+    if (!context.globalState.get<boolean>(DEBUGGER_HINT)) {
+      void context.globalState.update(DEBUGGER_HINT, true);
+      void vscode.window.showInformationMessage(
+        "Luciole: install the Python Debugger extension (ms-python.debugpy) and Run Live runs under it: breakpoints, stepping and variables while the brain lights up. Until then, it runs in a terminal.",
+      );
+    }
+    await live.run(run, folder, pythonPath(folder), dir);
+    return;
+  }
+  const launch = debugConfiguration(run, {
+    autoStartDir: path.join(dir, "luciole", "_autostart"),
+    root: folder,
+    python: configuredPython(folder),
+    pythonPath: process.env.PYTHONPATH,
+  });
+  await live.debug(launch, vscode.workspace.getWorkspaceFolder(vscode.Uri.file(folder)));
 }
 
 function activePythonFile(): string | undefined {
   const document = vscode.window.activeTextEditor?.document;
   return document?.languageId === "python" && document.uri.scheme === "file" ? document.uri.fsPath : undefined;
-}
-
-/** Runs VS Code's debugger command for `action` when a Python debug session runs; false otherwise. */
-function viaDebugger(action: keyof typeof DEBUGGER_COMMANDS): boolean {
-  if (!pythonDebugSession()) {
-    return false;
-  }
-  void vscode.commands.executeCommand(DEBUGGER_COMMANDS[action]);
-  return true;
-}
-
-function step(mode: StepMode): void {
-  const thread = variables.current;
-  if (thread) {
-    live.step(thread.id, mode);
-  }
-}
-
-/** Show where a paused frame is: its line in the editor, its neuron in the brain. */
-async function revealFrame(frame: PausedFrame, thread: PausedThread): Promise<void> {
-  variables.focus(thread);
-  const position = new vscode.Position(frame.line - 1, 0);
-  await vscode.window.showTextDocument(vscode.Uri.file(frame.file), {
-    viewColumn: vscode.ViewColumn.One,
-    preserveFocus: true,
-    selection: new vscode.Range(position, position),
-  });
-  panel?.post({ type: "focus", node: frame.node });
 }
 
 function showGraph(context: vscode.ExtensionContext, target: string | undefined, followEditor: boolean): void {
@@ -498,7 +463,6 @@ class GraphPanel {
   private onMessage(message: FromWebview): void {
     if (message.type === "ready") {
       this.ready = true;
-      this.post({ type: "debugging", on: Boolean(pythonDebugSession()) });
       this.post({ type: "liveState", state: live.current });
       this.analyze();
     } else if (message.type === "refresh") {
@@ -508,11 +472,7 @@ class GraphPanel {
     } else if (message.type === "runLiveWith") {
       void pickRun(this.context);
     } else if (message.type === "stopLive") {
-      viaDebugger("stop") || void live.stop();
-    } else if (message.type === "pauseLive") {
-      viaDebugger(message.paused ? "pause" : "resume") || live.pause(message.paused);
-    } else if (message.type === "step") {
-      viaDebugger(message.mode) || step(message.mode);
+      void live.stop(pythonDebugSession());
     } else if (message.type === "addBreakpoint" && this.root) {
       addBreakpoint(path.resolve(this.root, message.file), message.line);
     } else if (message.type === "removeBreakpoints" && this.root) {
@@ -602,6 +562,11 @@ function analyzerDir(context: vscode.ExtensionContext): string | undefined {
 
 /** The configured interpreter, else the workspace's virtual environment, else python3. */
 function pythonPath(target: string): string {
+  return configuredPython(target) ?? (process.platform === "win32" ? "python" : "python3");
+}
+
+/** The configured interpreter, else the workspace's virtual environment; undefined when neither is there. */
+function configuredPython(target: string): string | undefined {
   const configured = vscode.workspace.getConfiguration("luciole").get<string>("pythonPath");
   if (configured) {
     return configured;
@@ -614,5 +579,5 @@ function pythonPath(target: string): string {
       return candidate;
     }
   }
-  return windows ? "python" : "python3";
+  return undefined;
 }

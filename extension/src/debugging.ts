@@ -3,7 +3,8 @@
  * the debug console stay the debugger's; Luciole adds three things.
  *
  * - With auto-start on, a launched program gets the auto-start variables, so it lights up the
- *   brain while you debug it.
+ *   brain while you debug it. ⚡ Run Live launches its programs under this debugger with these
+ *   variables already set, switch or not (see `debugConfiguration` in runs.ts).
  * - The brain follows the debugger: when it stops, the function it stopped in is shown.
  * - Breakpoints set from the brain (right-click on a neuron) are ordinary VS Code breakpoints,
  *   in the Breakpoints view like any other; the brain marks the functions that have one.
@@ -26,26 +27,22 @@ export interface DebugHooks {
   log(line: string): void;
 }
 
-/** The running Python debug session, if any: Luciole's pause and step commands then drive it. */
+/** The running Python debug session, if any: Luciole's Stop then stops it. */
 export function pythonDebugSession(): vscode.DebugSession | undefined {
   const session = vscode.debug.activeDebugSession;
   return session && PYTHON_DEBUG_TYPES.includes(session.type) ? session : undefined;
 }
 
-/** VS Code's debugger command doing what a Luciole live command does. */
-export const DEBUGGER_COMMANDS = {
-  pause: "workbench.action.debug.pause",
-  resume: "workbench.action.debug.continue",
-  over: "workbench.action.debug.stepOver",
-  into: "workbench.action.debug.stepInto",
-  out: "workbench.action.debug.stepOut",
-  stop: "workbench.action.debug.stop",
-} as const;
+/** True when the Python debugger (the ms-python.debugpy extension) is installed, for Run Live. */
+export function hasPythonDebugger(): boolean {
+  return vscode.extensions.getExtension("ms-python.debugpy") !== undefined;
+}
 
 export function registerDebugging(hooks: DebugHooks): vscode.Disposable[] {
   const provider: vscode.DebugConfigurationProvider = {
     async resolveDebugConfigurationWithSubstitutedVariables(folder, config) {
-      const env = config.request === "launch" ? await hooks.autoStartEnv(folder) : undefined;
+      // Run Live's own launches carry the variables already.
+      const env = config.request === "launch" && !config.__luciole ? await hooks.autoStartEnv(folder) : undefined;
       if (env) {
         const own: Record<string, string> = config.env ?? {};
         const pythonPath = [env.PYTHONPATH, own.PYTHONPATH ?? process.env.PYTHONPATH].filter(Boolean).join(path.delimiter);
