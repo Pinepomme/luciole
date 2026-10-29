@@ -88,12 +88,14 @@ const BACKGROUND = new THREE.Color(background);
 const FOREGROUND = new THREE.Color(foreground);
 /** A grey between the background and the text: 0 is the background, 1 the text. */
 const grey = (share: number) => BACKGROUND.clone().lerp(FOREGROUND, share);
+/** Light themes: thin grey strokes and text fade into white, so they need a darker grey. */
+const LIGHT_THEME = BACKGROUND.getHSL({ h: 0, s: 0, l: 0 }).l > 0.5;
 /** Text that names things, quieter than the code. */
-const SECONDARY = `#${grey(0.62).getHexString()}`;
+const SECONDARY = `#${grey(LIGHT_THEME ? 0.75 : 0.62).getHexString()}`;
 const PRIMARY = `#${grey(0.92).getHexString()}`;
 /** Neurons at rest, and lines. */
-const NEUTRAL = grey(0.4);
-const LINE = grey(0.55);
+const NEUTRAL = grey(LIGHT_THEME ? 0.45 : 0.4);
+const LINE = grey(LIGHT_THEME ? 0.8 : 0.55);
 /** Activity (running, a call, the call path, waiting): the theme's accent. */
 const ACCENT = new THREE.Color(themeAccent());
 /** Where the debugger stopped, and breakpoints (VS Code's breakpoint red). */
