@@ -1,5 +1,6 @@
 """Traces: run small programs under `luciole run --trace` and check what the file holds."""
 
+import contextlib
 import json
 import os
 import re
@@ -47,7 +48,7 @@ def traced(tmp_path, source, *args, level=1, env=None):
 
 
 def rows(path, query, *params):
-    with sqlite3.connect(path) as db:
+    with contextlib.closing(sqlite3.connect(path)) as db:  # closed now: Windows cannot replace an open file
         return db.execute(query, params).fetchall()
 
 

@@ -127,6 +127,14 @@ class Trace:
         self.db = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
         self.db.row_factory = sqlite3.Row
         try:
+            self._check()
+        except TraceError:
+            self.db.close()  # not left open until garbage collection: Windows locks open files
+            raise
+        self._snapshots: dict[int, dict] = {}
+
+    def _check(self) -> None:
+        try:
             meta = dict(self.db.execute("SELECT key, value FROM meta").fetchall())
         except sqlite3.DatabaseError as error:
             raise TraceError(f"not a Luciole trace: {self.path} ({error})") from None
@@ -134,7 +142,6 @@ class Trace:
             raise TraceError(f"not a Luciole trace: {self.path}")
         if int(meta.get("schema_version", 0)) > SCHEMA_VERSION:
             raise TraceError(f"{self.path} has trace schema {meta['schema_version']}; this Luciole reads {SCHEMA_VERSION} at most")
-        self._snapshots: dict[int, dict] = {}
 
     def __enter__(self) -> Trace:
         return self
