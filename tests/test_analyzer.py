@@ -396,6 +396,61 @@ def test_functions_held_in_variables_and_calls_by_name(tmp_path):
     assert "by_name" not in graph_edges[("headers:DateHeader.parse", "headers:parse_date")]
 
 
+def test_no_calls_by_name_through_modules(tmp_path):
+    graph = analyze(tmp_path, {"tools.py": """
+        import functools
+        import json
+        import os
+        import struct
+        import subprocess
+        import sys
+        from os import path
+        from third_party import client
+
+
+        class Runner:
+            def run(self):
+                pass
+
+            def dumps(self):
+                pass
+
+            def isdir(self):
+                pass
+
+            def pack(self):
+                pass
+
+            def partial(self):
+                pass
+
+            def fetch(self):
+                pass
+
+            @property
+            def maxsize(self):
+                return 0
+
+
+        def main(x):
+            subprocess.run(["ls"])
+            json.dumps(x)
+            os.path.isdir(x)
+            path.isdir(x)
+            struct.pack("i", 1)
+            functools.partial(main)
+            client.fetch()
+            return sys.maxsize
+
+
+        def other(obj):
+            return obj.run()
+    """})
+    found = calls(graph)
+    assert not {target for source, target in found if source == "tools:main"}
+    assert ("tools:other", "tools:Runner.run") in found  # an unknown object, not a module
+
+
 def test_star_import_cycles_are_fast(tmp_path):
     names = ["a", "b", "c", "d"]
     files = {"pkg/__init__.py": ""}
