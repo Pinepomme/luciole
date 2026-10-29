@@ -114,6 +114,27 @@ def test_a_second_engine_leaves_the_running_one(engine):
     assert protocol.engine_port() == engine.port
 
 
+def test_malformed_hellos_and_commands_are_refused(engine):
+    for role, fields in [("viewer", {"roots": [1]}), ("viewer", {"roots": "/work"}), ("recorder", {"root": 5}), ("viewer", {"roots": ["a\0b"]})]:
+        client = Client(engine.port, role, **fields)
+        assert "refused" in client.receive() and client.receive() is None
+        client.close()
+    viewer = Client(engine.port, "viewer")
+    recorder = Client(engine.port, "recorder", pid=11, argv=[])
+    viewer.receive(), recorder.receive()
+    number = viewer.receive()["process"]["id"]
+    viewer.send({"to": [number], "cmd": "pause"})  # ignored
+    viewer.send({"to": number, "cmd": "pause"})
+    assert recorder.receive() == {"cmd": "pause"}
+    recorder.close()
+    assert viewer.receive() == {"exit": number}
+    viewer.close()
+    deadline = time.monotonic() + 5
+    while engine.peers and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert engine.peers == 0 and not engine.viewers and not engine.recorders
+
+
 def test_engines_started_together_leave_one_running():
     engines = [Engine(idle=0) for _ in range(4)]
     barrier = threading.Barrier(len(engines))

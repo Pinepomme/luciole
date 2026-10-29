@@ -151,17 +151,25 @@ class Engine:
         if protocol != PROTOCOL or role not in ("recorder", "viewer"):
             peer.send({"refused": f"this engine speaks protocol {PROTOCOL} (Luciole {__version__}), not {protocol}"})
             return False
+        roots = [hello.get("root")] if role == "recorder" else hello.get("roots", [])
+        try:
+            if role == "recorder" and roots == [None]:
+                roots = []
+            if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
+                raise TypeError
+            peer.roots = [real_path(root) for root in roots]
+        except (TypeError, ValueError):  # ValueError: a null character
+            peer.send({"refused": "expected a root path (recorder) or a list of root paths (viewer)"})
+            return False
         peer.role = role
         peer.send({"welcome": {"protocol": PROTOCOL, "version": __version__}})
         with self.lock:
             if role == "recorder":
                 peer.id = next(self.ids)
                 peer.info = {"id": peer.id, "pid": hello.get("pid"), "argv": hello.get("argv", []), "root": hello.get("root")}
-                peer.roots = [real_path(hello["root"])] if hello.get("root") else []
                 self.recorders[peer.id] = peer
                 viewers = [viewer for viewer in self.viewers if self.shows(viewer, peer)]
             else:
-                peer.roots = [real_path(root) for root in hello.get("roots", [])]
                 self.viewers.append(peer)
                 recorders = [recorder for recorder in self.recorders.values() if self.shows(peer, recorder)]
         if role == "recorder":
@@ -192,6 +200,8 @@ class Engine:
                 target = command.pop("to", None)
             except (ValueError, AttributeError):
                 continue
+            if target is not None and type(target) is not int:
+                continue
             with self.lock:
                 if target is None:
                     recorders = [recorder for recorder in self.recorders.values() if self.shows(peer, recorder)]
@@ -205,11 +215,10 @@ class Engine:
             self.peers -= 1
             if not self.peers:
                 self.quiet_since = time.monotonic()
-            if peer.role == "recorder":
-                self.recorders.pop(peer.id, None)
+            if peer.role == "recorder" and self.recorders.pop(peer.id, None) is peer:
                 viewers = [viewer for viewer in self.viewers if self.shows(viewer, peer)]
                 orphans = []
-            elif peer.role == "viewer":
+            elif peer.role == "viewer" and peer in self.viewers:
                 self.viewers.remove(peer)
                 viewers = []
                 # Paused programs that no viewer shows any more (one may have paused it with "to").
