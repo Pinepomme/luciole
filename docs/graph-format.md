@@ -285,7 +285,9 @@ paused program would stay frozen otherwise).
   `sys.modules`, and `luciole.start()` from another copy leaves the process to it.
 
 The recorder uses `sys.monitoring` tool id 4 (or 3): the debugger, coverage and profiler ids stay
-free.
+free. A process ended by SIGTERM (multiprocessing's `Pool` terminates its workers) still sends
+its last frame: unless the program has a SIGTERM handler of its own, the recorder installs one that
+sends it, then lets the signal end the process as before (not on Windows).
 
 The recorder sends aggregates rather than one event per call. That keeps the stream small however
 fast the program runs (pytest makes about 30,000 calls per second through it), which is all the

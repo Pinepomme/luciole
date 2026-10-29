@@ -41,6 +41,7 @@ without fake_mode, missing lifted constants).
 
 from __future__ import annotations
 
+import _thread
 import atexit
 import inspect
 import json
@@ -49,6 +50,7 @@ import logging
 import os
 import queue
 import runpy
+import signal
 import socket
 import sys
 import threading
@@ -474,7 +476,8 @@ class Session:
         if self.file:
             self.sinks.append(lambda line: (self.file.write(line), self.file.flush()))
         self.view_sinks = self.sinks[:1] if connection else []
-        self.write_lock = threading.Lock()  # the pump and paused threads all write
+        # The pump and paused threads all write; reentrant for on_sigterm, which may interrupt a write.
+        self.write_lock = threading.RLock()
         self.recorder = Recorder(root, self.send, lambda message: self.write(message, self.view_sinks))
         self.stopping = threading.Event()
         self.tool: int | None = None
@@ -550,6 +553,13 @@ class Session:
         if close:
             self.close()
 
+    def terminate(self) -> None:
+        """On SIGTERM, just before the process dies: send the last frame and {"done": true}."""
+        self.stopping.set()
+        self.pump_thread.join(timeout=4 * FRAME)  # in vain if this thread holds the write lock
+        self.recorder.flush()
+        self.send({"done": True})
+
     def uninstall(self) -> None:
         monitoring = sys.monitoring
         monitoring.set_events(self.tool, 0)
@@ -593,6 +603,8 @@ class Session:
 
 # The session of this interpreter, started by `luciole run`, luciole.start() or auto-start.
 active: Session | None = None
+ending: Session | None = None  # the session stop() is ending, which on_sigterm lets finish
+terminated = False  # SIGTERM came while stop() was sending the last frame
 hooks_installed = False
 
 
@@ -640,6 +652,7 @@ def start(root: Path | str | None = None, port: int | str | None = None, events:
         return False
     active = session
     install_hooks()
+    install_sigterm()
     return True
 
 
@@ -648,7 +661,19 @@ def stop() -> None:
     global active
     session, active = active, None
     if session is not None:
-        session.stop(close=True)
+        end(session, close=True)
+
+
+def end(session: Session, close: bool) -> None:
+    """Stop `session`; a SIGTERM received meanwhile ends the process once its last frame is sent."""
+    global ending
+    ending = session
+    try:
+        session.stop(close)
+    finally:
+        ending = None
+        if terminated:
+            os.kill(os.getpid(), signal.SIGTERM)  # on_sigterm restored the default action
 
 
 def install_hooks() -> None:
@@ -660,6 +685,56 @@ def install_hooks() -> None:
     atexit.register(stop)
     if hasattr(os, "register_at_fork"):
         os.register_at_fork(after_in_child=after_fork)
+
+
+def install_sigterm() -> None:
+    """Send the last calls when SIGTERM ends the process (multiprocessing's Pool terminates its
+    workers): only when the program has no handler of its own, and the process then dies as it
+    would have. Forked children inherit the handler, and report through their own session."""
+    if os.name == "nt" or threading.current_thread() is not threading.main_thread():
+        return  # Windows terminates processes without a signal handler; only the main thread can set one
+    try:
+        if signal.getsignal(signal.SIGTERM) is signal.SIG_DFL:
+            signal.signal(signal.SIGTERM, on_sigterm)
+    except (ValueError, OSError):
+        pass
+
+
+def on_sigterm(signum: int, frame) -> None:
+    global active, terminated
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    if ending is not None:
+        # A multiprocessing worker is often stopping already (os._exit after its last task) when
+        # its pool terminates it, maybe interrupted halfway through its last frame: let it finish
+        # (end() then kills the process), within a second.
+        terminated = True
+        _thread.start_new_thread(kill_later, (1,))
+        return
+    session, active = active, None
+    if session is not None:
+        # In a thread of its own, given a second at most: the main thread, interrupted by this
+        # handler, may hold a lock it needs. The process must die whatever happens.
+        done = _thread.allocate_lock()
+        done.acquire()
+
+        def terminate() -> None:
+            try:
+                session.terminate()
+            except Exception:
+                pass
+            done.release()
+
+        try:
+            _thread.start_new_thread(terminate, ())  # not threading's: its lock may be held too
+            done.acquire(timeout=1)
+        except Exception:
+            pass
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def kill_later(seconds: float) -> None:
+    time.sleep(seconds)
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 def after_fork() -> None:
@@ -702,6 +777,7 @@ def run(target: list[str], as_module: bool, root: Path, port: int | None, events
     session.start()
     active = session
     install_hooks()
+    install_sigterm()
     sys.argv = list(target)
     try:
         if as_module:
@@ -721,4 +797,4 @@ def run(target: list[str], as_module: bool, root: Path, port: int | None, events
     finally:
         if active is session:
             active = None
-            session.stop(close=False)
+            end(session, close=False)

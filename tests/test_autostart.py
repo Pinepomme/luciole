@@ -291,3 +291,42 @@ def test_luciole_start_leaves_auto_start_reporting(tmp_path):
     assert "started: True" in result.stdout
     [process] = view.processes()  # one recorder, not one per copy of luciole
     assert calls(process["messages"])["prog:work"] == 1
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="no fork")
+def test_processes_ended_by_sigterm_send_their_last_calls(tmp_path):
+    view = View()
+    result = python(tmp_path, """
+        import multiprocessing
+
+        def square(x):
+            return x * x
+
+        if __name__ == "__main__":
+            with multiprocessing.get_context("fork").Pool(2) as pool:  # its exit terminates the workers
+                print(sum(pool.map(square, range(20))))
+    """, "prog.py", port=view.port)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "2470"
+
+    def squares():
+        return sum(calls(messages).get("prog:square", 0) for messages in list(view.messages.values()))
+
+    deadline = time.monotonic() + 10  # the workers' connections may still be on their way
+    while squares() < 20 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    view.processes()
+    assert squares() == 20
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="no fork")
+def test_a_program_s_own_sigterm_handler_is_left_alone(tmp_path):
+    view = View()
+    result = python(tmp_path, """
+        import os, signal
+
+        signal.signal(signal.SIGTERM, lambda signum, frame: print("own handler"))
+        os.kill(os.getpid(), signal.SIGTERM)
+    """, "prog.py", port=view.port)
+    assert result.returncode == 0 and "own handler" in result.stdout
+    view.processes()
