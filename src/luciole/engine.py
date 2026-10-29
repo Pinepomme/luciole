@@ -156,10 +156,10 @@ class Engine:
         try:
             if role == "recorder" and roots == [None]:
                 roots = []
-            if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
-                raise TypeError
+            if not isinstance(roots, list) or not all(isinstance(root, str) and "\0" not in root for root in roots):
+                raise TypeError  # a null character: realpath raises on POSIX only
             peer.roots = [real_path(root) for root in roots]
-        except (TypeError, ValueError):  # ValueError: a null character
+        except (TypeError, ValueError):
             peer.send({"refused": "expected a root path (recorder) or a list of root paths (viewer)"})
             return False
         peer.role = role
