@@ -250,8 +250,8 @@ Every connection starts with a hello, answered before anything else
 
 `protocol` changes when a message changes meaning; the engine's file is per protocol, so engines
 of two protocols can run side by side. The engine numbers each recorder and tells the viewers that
-show its project (one's root contains the other's; a viewer without roots shows all) about it, then
-passes on everything it sends with its number:
+show its project (one's root contains the other's, symbolic links resolved; a viewer without roots
+shows all) about it, then passes on everything it sends with its number:
 
 ```json
 {"process": {"id": 3, "pid": 4242, "argv": ["python", "-m", "pytest"], "root": "/work/app"}}

@@ -126,3 +126,26 @@ def test_luciole_run_reports_to_the_running_engine(engine, tmp_path):
     assert result.returncode == 0, result.stderr
     assert viewer.receive_until(lambda m: "prog:work" in m.get("calls", {}))
     viewer.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+def test_roots_reached_through_a_symlink_match(engine, tmp_path):
+    real = tmp_path / "real"
+    (real / "src").mkdir(parents=True)
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("cannot create symlinks here")
+    viewer = Client(engine.port, "viewer", roots=[str(link)])  # the workspace, opened through the link
+    viewer.receive()
+    recorder = Client(engine.port, "recorder", pid=11, argv=[], root=str(real / "src"))  # resolved
+    recorder.receive()
+    assert viewer.receive()["process"]["pid"] == 11
+    other = Client(engine.port, "viewer", roots=[str(real / "missing")])  # need not exist
+    other.receive()
+    linked = Client(engine.port, "recorder", pid=12, argv=[], root=str(link / "missing" / "deeper"))
+    linked.receive()
+    assert other.receive()["process"]["pid"] == 12
+    for client in (viewer, recorder, other, linked):
+        client.close()

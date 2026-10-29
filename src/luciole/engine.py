@@ -13,8 +13,8 @@ show its project, with the recorder's number:
 
 and passes viewers' commands on to the recorders: {"to": 3, "cmd": "step", ...} to one, a
 command without "to" to every recorder the viewer shows. A viewer shows a recorder when one's
-root contains the other's (a viewer without roots shows them all), so two VS Code windows on two
-projects each see their own programs. When the last viewer leaves, paused programs resume.
+root contains the other's, symbolic links resolved (a viewer without roots shows them all), so
+two VS Code windows on two projects each see their own programs. When the last viewer leaves, paused programs resume.
 
 The engine writes its port to ~/.luciole/engine-v<protocol>.json for the others to find it, and
 exits after `idle` seconds with nobody connected. Standard library only, one thread per
@@ -44,7 +44,7 @@ class Peer:
         self.role = ""
         self.id = 0
         self.info: dict = {}
-        self.roots: list[Path] = []
+        self.roots: list[Path] = []  # a viewer's, a recorder's own: resolved (see real_path)
         self.lock = threading.Lock()  # lines from several threads must not interleave
 
     def send_line(self, line: str) -> bool:
@@ -138,10 +138,11 @@ class Engine:
             if role == "recorder":
                 peer.id = next(self.ids)
                 peer.info = {"id": peer.id, "pid": hello.get("pid"), "argv": hello.get("argv", []), "root": hello.get("root")}
+                peer.roots = [real_path(hello["root"])] if hello.get("root") else []
                 self.recorders[peer.id] = peer
                 viewers = [viewer for viewer in self.viewers if self.shows(viewer, peer)]
             else:
-                peer.roots = [Path(root) for root in hello.get("roots", [])]
+                peer.roots = [real_path(root) for root in hello.get("roots", [])]
                 self.viewers.append(peer)
                 recorders = [recorder for recorder in self.recorders.values() if self.shows(peer, recorder)]
         if role == "recorder":
@@ -200,11 +201,16 @@ class Engine:
 
     @staticmethod
     def shows(viewer: Peer, recorder: Peer) -> bool:
-        root = recorder.info.get("root")
-        if not viewer.roots or not root:
+        if not viewer.roots or not recorder.roots:
             return True
-        root = Path(root)
+        [root] = recorder.roots
         return any(root.is_relative_to(shown) or shown.is_relative_to(root) for shown in viewer.roots)
+
+
+def real_path(path: str) -> Path:
+    """`path` with symbolic links resolved, so that a workspace opened through a link shows the
+    programs running in its target (recorders resolve their root). Paths need not exist."""
+    return Path(os.path.realpath(path))
 
 
 def serve(port: int = 0, idle: float = 600) -> int:
