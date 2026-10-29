@@ -113,6 +113,7 @@ export function activate(context: vscode.ExtensionContext): void {
       log: (line) => output.appendLine(line),
     }),
     vscode.debug.onDidChangeBreakpoints(() => panel?.postBreakpoints()),
+    vscode.debug.onDidChangeActiveDebugSession(() => panel?.post({ type: "debugging", on: Boolean(pythonDebugSession()) })),
     // A file graph follows the editor: switching to another Python file shows that file's graph.
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       const document = editor?.document;
@@ -497,6 +498,7 @@ class GraphPanel {
   private onMessage(message: FromWebview): void {
     if (message.type === "ready") {
       this.ready = true;
+      this.post({ type: "debugging", on: Boolean(pythonDebugSession()) });
       this.post({ type: "liveState", state: live.current });
       this.analyze();
     } else if (message.type === "refresh") {
@@ -506,11 +508,11 @@ class GraphPanel {
     } else if (message.type === "runLiveWith") {
       void pickRun(this.context);
     } else if (message.type === "stopLive") {
-      void live.stop();
+      viaDebugger("stop") || void live.stop();
     } else if (message.type === "pauseLive") {
-      live.pause(message.paused);
+      viaDebugger(message.paused ? "pause" : "resume") || live.pause(message.paused);
     } else if (message.type === "step") {
-      step(message.mode);
+      viaDebugger(message.mode) || step(message.mode);
     } else if (message.type === "addBreakpoint" && this.root) {
       addBreakpoint(path.resolve(this.root, message.file), message.line);
     } else if (message.type === "removeBreakpoints" && this.root) {
