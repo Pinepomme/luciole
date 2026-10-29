@@ -96,6 +96,7 @@ To see the webview without VS Code (renders it in headless Chromium and saves PN
 cd extension
 npm run screenshot -- ../examples                         # a static graph
 npm run screenshot -- ../examples --events ../run.jsonl   # replay a recording
+npm run screenshot -- ../examples --events ../run.jsonl --frames 8   # and 8 shots of it moving
 npm run screenshot -- ../examples --fps                   # also print frames per second
 node out/dev/layout-stats.js graph.json                   # how the region layout turns out
 ```
