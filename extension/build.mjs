@@ -8,6 +8,7 @@ const builds = [
   { ...common, entryPoints: ["src/webview/main.ts"], outfile: "out/webview.js", platform: "browser", format: "iife", target: "es2020" },
   { ...node, entryPoints: ["test/brain.test.ts"], outfile: "out/test/brain.test.js" },
   { ...node, entryPoints: ["test/layout.test.ts"], outfile: "out/test/layout.test.js" },
+  { ...node, entryPoints: ["test/flow.test.ts"], outfile: "out/test/flow.test.js" },
   { ...node, entryPoints: ["test/runs.test.ts"], outfile: "out/test/runs.test.js" },
   { ...node, entryPoints: ["test/processes.test.ts"], outfile: "out/test/processes.test.js" },
   { ...node, entryPoints: ["test/engine.test.ts"], outfile: "out/test/engine.test.js" },

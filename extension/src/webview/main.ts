@@ -1,6 +1,6 @@
 /**
  * Webview entry point: the 3D brain. Neurons are functions, synapses the variables flowing
- * between them. In live mode, functions light up as they run and pulses travel along synapses.
+ * between them. In live mode, functions light up as they run and waves of light flow along synapses.
  */
 
 import ForceGraph3D from "3d-force-graph";
@@ -9,7 +9,9 @@ import SpriteText from "three-spritetext";
 import type { Graph } from "../graph";
 import type { FromWebview, LiveFrame, LiveState, SourceLine, StepMode, ThreadStack, ToWebview } from "../messages";
 import { Brain, breakpointAction, breakpointHint, buildBrain, Neuron, neuronAt, Synapse, SynapseKind, synapseId } from "./brain";
+import { addCalls, alongPolyline, crowdGain, lineGlow, prune, tailLength, Wave, waveState } from "./flow";
 import { bundle, labelAnchor, Layout, layoutBrain, NEURON_GAP, neuronRadius, Region, regionHue, regionMembers, route, Vec3 } from "./layout";
+import { disposeRibbon, lightRibbon, makeRibbon, placeRibbon, Ribbon, RIBBON_WIDTH, ribbonShared } from "./ribbon";
 
 declare function acquireVsCodeApi(): { postMessage(message: FromWebview): void };
 
@@ -35,23 +37,11 @@ interface SynapseLink {
   /** Centres of the regions the line bends through (none inside a region: a straight line). */
   via: Vec3[];
   line?: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
-  /** Set by three-forcegraph, which moves pulses along it: ours, for bundled lines. */
-  __curve?: THREE.Curve<THREE.Vector3> | null;
-}
-
-/** A polyline as a three.js curve, so pulses follow bundled lines. */
-class PathCurve extends THREE.Curve<THREE.Vector3> {
-  constructor(private points: Vec3[]) {
-    super();
-  }
-
-  override getPoint(t: number, target = new THREE.Vector3()): THREE.Vector3 {
-    const at = Math.min(Math.max(t, 0), 1) * (this.points.length - 1);
-    const i = Math.min(Math.floor(at), this.points.length - 2);
-    const [a, b] = [this.points[i], this.points[i + 1]];
-    const k = at - i;
-    return target.set(a.x + (b.x - a.x) * k, a.y + (b.y - a.y) * k, a.z + (b.z - a.z) * k);
-  }
+  /** Where the line runs, as last drawn: points, their positions along it (0 to 1), its length. */
+  path?: { points: Vec3[]; along: number[]; length: number };
+  /** Waves of light flowing along it (live mode), and the ribbon that shows them. */
+  waves: Wave[];
+  ribbon?: Ribbon;
 }
 
 /** Labels are always shown below this many neurons; above, only on lit or hovered ones. */
@@ -60,7 +50,6 @@ const ALWAYS_LABEL = 60;
 const FADE = 0.7;
 /** Glow kept by functions that ran during the current live session, once their flash fades. */
 const VISITED = 0.12;
-const MAX_PULSES_PER_LINK = 3;
 /** Share of their usual opacity kept by lines between regions. */
 const INTER_REGION_OPACITY = 0.25;
 /** Lines of the bottom bar: one per thread, then what is waiting. */
@@ -101,11 +90,20 @@ const LINE_COLORS: Record<SynapseKind, THREE.Color> = {
   runtime: new THREE.Color("#d18616"),
   spawn: new THREE.Color("#4fb3a9"),
 };
+/** The light flowing along each kind of synapse: bioluminescent cyan for calls, sea green for calls seen only at runtime, blue for spawns. */
+const FLOW_COLORS: Record<SynapseKind, THREE.Color> = {
+  call: new THREE.Color("#4fe3ff"),
+  state: new THREE.Color("#9f8cff"),
+  runtime: new THREE.Color("#5dffb4"),
+  spawn: new THREE.Color("#6f9dff"),
+};
 const glowTexture = makeGlowTexture();
 const dotTexture = makeDotTexture();
 
 let brain: Brain | undefined;
 let layout: Layout | undefined;
+/** The ribbons of light along synapses with waves on them. */
+const flows = new THREE.Group();
 /** Package, module and class names, above their regions. */
 const regionLabels = new THREE.Group();
 /** A faint glow of its color behind each top-level region, like an area on a map. */
@@ -114,7 +112,7 @@ let target: string | undefined;
 let nodes: NeuronNode[] = [];
 let links: SynapseLink[] = [];
 const nodeById = new Map<string, NeuronNode>();
-/** Synapses that carry the pulses of live calls (call or runtime) and spawns, by `a>b`. */
+/** Synapses that carry the waves of live calls (call or runtime) and spawns, by `a>b`. */
 const callLinks = new Map<string, SynapseLink>();
 const spawnLinks = new Map<string, SynapseLink>();
 let hovered: NeuronNode | undefined;
@@ -123,6 +121,8 @@ let waiting = new Set<string>();
 /** Functions and synapses used since the live session started. */
 const visited = new Set<string>();
 let pathway = new Set<SynapseLink>();
+/** Synapses with waves of light on them. */
+const flowing = new Set<SynapseLink>();
 let live = false;
 let paused = false;
 /** VS Code's breakpoints, and the functions that hold one. */
@@ -141,19 +141,19 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
   .nodeLabel((node: object) => neuronTooltip((node as NeuronNode).neuron))
   .linkThreeObject((link: object) => synapseObject(link as SynapseLink))
   .linkPositionUpdate((object, { start, end }, link) => {
-    const { via } = link as SynapseLink;
-    const points = bundle(start, via, end);
+    const synapseLink = link as SynapseLink;
+    const points = bundle(start, synapseLink.via, end);
     const positions = (object as THREE.Line).geometry.getAttribute("position") as THREE.BufferAttribute;
     points.forEach((p, i) => positions.setXYZ(i, p.x, p.y, p.z));
     positions.needsUpdate = true;
     (object as THREE.Line).geometry.computeBoundingSphere();
-    (link as SynapseLink).__curve = via.length ? new PathCurve(points) : null;
+    synapseLink.path = { points, ...alongPolyline(points) };
+    if (synapseLink.ribbon) {
+      placeRibbon(synapseLink.ribbon, points, synapseLink.path.along);
+    }
     return true;
   })
   .linkLabel((link: object) => synapseTooltip((link as SynapseLink).synapse))
-  .linkDirectionalParticleColor(() => "#ffc94d")
-  .linkDirectionalParticleWidth(2.5)
-  .linkDirectionalParticleSpeed(0.025)
   .cooldownTicks(120)
   .d3Force("charge", null)
   .d3Force("center", null)
@@ -173,7 +173,7 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
     }
   });
 
-graph.scene().add(regionLabels, regionGlows);
+graph.scene().add(regionLabels, regionGlows, flows);
 // The map places neurons: links keep their force only to join their ends to the nodes.
 (graph.d3Force("link") as unknown as { strength(k: number): void }).strength(0);
 
@@ -492,13 +492,49 @@ function animate(now: number): void {
   }
   declutterLabels();
   for (const link of links) {
-    link.heat = pathway.has(link) ? 1 : Math.max(link.heat * fade, visited.has(link.id) ? VISITED : 0);
+    const onPath = pathway.has(link);
+    link.heat = onPath ? 1 : Math.max(link.heat * fade, visited.has(link.id) ? VISITED : 0);
     if (link.line) {
-      link.line.material.color.copy(LINE_COLORS[link.synapse.kind]).lerp(AMBER, link.heat);
-      link.line.material.opacity = baseOpacity(link) + (1 - baseOpacity(link)) * link.heat;
+      // The call path in amber, like its functions; lines that just carried a call in their light's color.
+      link.line.material.color.copy(LINE_COLORS[link.synapse.kind]).lerp(onPath ? AMBER : FLOW_COLORS[link.synapse.kind], link.heat);
+      // Lines that carry light stay faint: the light is in their ribbon.
+      const lit = onPath ? link.heat : 0.25 * link.heat;
+      link.line.material.opacity = baseOpacity(link) + (1 - baseOpacity(link)) * lit;
     }
   }
+  flow(now / 1000);
   requestAnimationFrame(animate);
+}
+
+/** Moves the waves of light along their synapses, and gives a ribbon to the lines that have some. */
+function flow(seconds: number): void {
+  graph.renderer().getDrawingBufferSize(ribbonShared.resolution.value);
+  ribbonShared.width.value = RIBBON_WIDTH * graph.renderer().getPixelRatio();
+  ribbonShared.gain.value = crowdGain(flowing.size);
+  for (const link of flowing) {
+    link.waves = prune(link.waves, seconds);
+    if (!link.waves.length || !link.path) {
+      if (link.ribbon) {
+        disposeRibbon(link.ribbon);
+        link.ribbon = undefined;
+      }
+      if (!link.waves.length) {
+        flowing.delete(link);
+      }
+      continue;
+    }
+    const { points, along, length } = link.path;
+    if (link.ribbon && link.ribbon.count !== points.length) {
+      disposeRibbon(link.ribbon);
+      link.ribbon = undefined;
+    }
+    if (!link.ribbon) {
+      link.ribbon = makeRibbon(points, along, FLOW_COLORS[link.synapse.kind]);
+      flows.add(link.ribbon.mesh);
+    }
+    const tail = tailLength(length);
+    lightRibbon(link.ribbon, waveState(link.waves, seconds, tail), tail, lineGlow(link.waves, seconds));
+  }
 }
 requestAnimationFrame(animate);
 
@@ -521,7 +557,13 @@ function load(graphData: Graph, newTarget: string): void {
   });
   nodeById.clear();
   nodes.forEach((n) => nodeById.set(n.id, n));
-  links = brain.synapses.map((synapse) => ({ id: synapse.id, source: synapse.source, target: synapse.target, synapse, heat: 0, via: [] }));
+  for (const link of flowing) {
+    if (link.ribbon) {
+      disposeRibbon(link.ribbon);
+    }
+  }
+  flowing.clear();
+  links = brain.synapses.map((synapse) => ({ id: synapse.id, source: synapse.source, target: synapse.target, synapse, heat: 0, via: [], waves: [] }));
   callLinks.clear();
   spawnLinks.clear();
   for (const link of links) {
@@ -610,7 +652,7 @@ function onLive(frame: LiveFrame): void {
       calls += count;
     }
   }
-  const pulses: [SynapseLink, number][] = [];
+  const seconds = performance.now() / 1000;
   let added = false;
   const use = (counts: Record<string, number> | undefined, known: Map<string, SynapseLink>, kind: SynapseKind) => {
     for (const [key, count] of Object.entries(counts ?? {})) {
@@ -622,7 +664,7 @@ function onLive(frame: LiveFrame): void {
         }
         // Not in the static graph (a call it missed, or a spawn): add a synapse from now on.
         const synapse: Synapse = { id: synapseId(kind, source, target), kind, source, target, variables: [], count: 0 };
-        link = { id: synapse.id, source, target, synapse, heat: 1, via: [] };
+        link = { id: synapse.id, source, target, synapse, heat: 1, via: [], waves: [] };
         links.push(link);
         known.set(key, link);
         added = true;
@@ -630,19 +672,15 @@ function onLive(frame: LiveFrame): void {
       link.heat = 1;
       visited.add(link.id);
       link.synapse.count += count;
-      pulses.push([link, count]);
+      // A new synapse has no path yet: its first wave takes a medium length.
+      addCalls(link.waves, count, seconds, link.path?.length ?? 150);
+      flowing.add(link);
     }
   };
   use(frame.links, callLinks, "runtime");
   use(frame.spawns, spawnLinks, "spawn");
   if (added) {
-    graph.graphData({ nodes, links }); // new link objects: pulses start with the next frame
-  } else {
-    for (const [link, count] of pulses) {
-      for (let i = 0; i < Math.min(count, MAX_PULSES_PER_LINK); i++) {
-        graph.emitParticle(link);
-      }
-    }
+    graph.graphData({ nodes, links }); // their lines, and their waves' ribbons, appear with the next frame
   }
   const now = performance.now();
   callsThisSecond = callsThisSecond.filter((c) => now - c.t < 1000);
