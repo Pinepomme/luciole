@@ -2,6 +2,7 @@
 
 import json
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -393,3 +394,16 @@ def test_functions_held_in_variables_and_calls_by_name(tmp_path):
     guess = graph_edges[("headers:walk", "headers:Message.get_content_type")]
     assert guess["by_name"] is True
     assert "by_name" not in graph_edges[("headers:DateHeader.parse", "headers:parse_date")]
+
+
+def test_star_import_cycles_are_fast(tmp_path):
+    names = ["a", "b", "c", "d"]
+    files = {"pkg/__init__.py": ""}
+    for name in names:
+        stars = "".join(f"from .{other} import *\n" for other in names if other != name)
+        files[f"pkg/{name}.py"] = stars + f"\ndef f_{name}(x):\n    return len(x) + g(x)\n"
+    files["pkg/a.py"] += "\ndef g(x):\n    return x\n"
+    start = time.perf_counter()
+    graph = analyze(tmp_path, files)
+    assert time.perf_counter() - start < 1
+    assert ("pkg.d:f_d", "pkg.a:g") in calls(graph)  # still found through the star imports

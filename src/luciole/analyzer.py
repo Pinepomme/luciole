@@ -174,6 +174,7 @@ class Analyzer:
         self.aliases: dict[str, str] = {}  # variable id -> function it holds (`parse = staticmethod(parse_header)`)
         self.method_names: dict[str, list[str]] | None = None  # method name -> functions defined in classes
         self.by_name: set[tuple[str, str, str]] = set()  # edges resolved by method name alone
+        self.module_bindings: dict[tuple[str, str], str | None] = {}  # (module id, name) -> resolved, see module_binding
 
     # Nodes and edges
 
@@ -391,33 +392,46 @@ class Analyzer:
             scope = scope.parent
         return scope
 
-    def resolve(self, binding: Binding, depth: int = 0) -> str | None:
+    def resolve(self, binding: Binding, seen: set[tuple[str, str]] | None = None) -> str | None:
         if not isinstance(binding, Import):
             return binding
-        if depth > 20:  # import cycle
-            return None
         if binding.name is None:
             module = self.modules.get(binding.module)
             return module.node_id if module else None
         module = self.modules.get(binding.module)
-        found = self.module_binding(module, binding.name, depth + 1) if module else None
+        found = self.module_binding(module, binding.name, seen) if module else None
         if found:
             return found
         submodule = self.modules.get(f"{binding.module}.{binding.name}" if binding.module else binding.name)
         return submodule.node_id if submodule else None
 
-    def module_binding(self, module: Scope, name: str, depth: int = 0) -> str | None:
-        """A module's own binding for `name`, else one its `from m import *` lines bring in."""
-        if name in module.bindings:
-            return self.resolve(module.bindings[name], depth)
-        if depth > 20 or name.startswith("_"):  # star imports leave out _private names
+    def module_binding(self, module: Scope, name: str, seen: set[tuple[str, str]] | None = None) -> str | None:
+        """A module's own binding for `name`, else one its `from m import *` lines bring in.
+
+        `seen` holds the (module, name) pairs already being looked up, so import cycles end; the
+        answers of outermost lookups are cached, which keeps star imports between many modules linear.
+        """
+        key = (module.node_id, name)
+        outermost = seen is None
+        if outermost:
+            if key in self.module_bindings:
+                return self.module_bindings[key]
+            seen = set()
+        elif key in seen:  # import cycle
             return None
-        for star in module.star_imports:
-            source = self.modules.get(star)
-            found = self.module_binding(source, name, depth + 1) if source else None
-            if found:
-                return found
-        return None
+        seen.add(key)
+        found = None
+        if name in module.bindings:
+            found = self.resolve(module.bindings[name], seen)
+        elif not name.startswith("_"):  # star imports leave out _private names
+            for star in module.star_imports:
+                source = self.modules.get(star)
+                found = self.module_binding(source, name, seen) if source else None
+                if found:
+                    break
+        if outermost:
+            self.module_bindings[key] = found
+        return found
 
     def lookup(self, scope: Scope, name: str, shadowed: list[set[str]] = ()) -> str | None:
         """Resolve a name read in `scope` (LEGB; class bodies are not visible from methods)."""
