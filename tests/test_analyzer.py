@@ -493,6 +493,33 @@ def test_property_objects_are_not_getter_calls(tmp_path):
     assert ("m:get", "m:C.x") in found
 
 
+def test_type_checking_imports_do_not_run(tmp_path):
+    graph = analyze(tmp_path, {
+        "pkg/__init__.py": "",
+        "pkg/models.py": "class Model:\n    def save(self):\n        pass\n",
+        "pkg/app.py": """
+            from __future__ import annotations
+
+            import typing
+            from typing import TYPE_CHECKING
+
+            if TYPE_CHECKING:
+                from pkg.models import Model
+            if typing.TYPE_CHECKING:
+                import pkg.models
+            else:
+                import pkg
+
+            def use(m: Model):
+                m.save()
+        """,
+    })
+    graph_edges = {(e["source"], e["target"]): e for e in graph["edges"] if e["kind"] == "calls"}
+    assert ("pkg.app", "pkg.models") not in graph_edges
+    assert ("pkg.app", "pkg") in graph_edges  # the else branch runs
+    assert "by_name" not in graph_edges[("pkg.app:use", "pkg.models:Model.save")]  # the type still resolves
+
+
 def test_star_import_cycles_are_fast(tmp_path):
     names = ["a", "b", "c", "d"]
     files = {"pkg/__init__.py": ""}
