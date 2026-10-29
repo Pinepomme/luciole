@@ -80,6 +80,56 @@ export function pytestRun(name: string, tests: string[], folder: string): RunCon
   return { name, module: "pytest", args: tests.map((test) => path.relative(folder, test) || test), folder };
 }
 
+/** A launch configuration for VS Code's Python debugger (debug type `debugpy`). */
+export interface PythonDebugConfiguration {
+  type: "debugpy";
+  request: "launch";
+  name: string;
+  program?: string;
+  module?: string;
+  args: string[];
+  cwd: string;
+  env: Record<string, string>;
+  /** The interpreter; when missing, the Python extension's own choice. */
+  python?: string;
+  console: "integratedTerminal";
+  justMyCode: true;
+  /** Marks the sessions Luciole starts, to follow them. */
+  __luciole: true;
+}
+
+export interface DebugOptions {
+  /** The auto-start folder (`luciole/_autostart`), whose sitecustomize starts the recorder. */
+  autoStartDir: string;
+  /** The project the recorder reports on (LUCIOLE_ROOT). */
+  root: string;
+  python?: string;
+  /** PYTHONPATH of the environment the debugger starts from, kept after the auto-start folder. */
+  pythonPath?: string;
+}
+
+/**
+ * `run` under VS Code's Python debugger, with the auto-start variables: breakpoints, stepping,
+ * variables and the debug console are the debugger's, and the recorder lights up the brain.
+ */
+export function debugConfiguration(run: ResolvedRun, options: DebugOptions): PythonDebugConfiguration {
+  const [first, ...rest] = run.target;
+  const what = first === "-m" ? { module: rest[0], args: rest.slice(1) } : { program: first, args: rest };
+  const pythonPath = [options.autoStartDir, run.env.PYTHONPATH ?? options.pythonPath].filter(Boolean).join(path.delimiter);
+  return {
+    type: "debugpy",
+    request: "launch",
+    name: `Luciole: ${run.label}`,
+    ...what,
+    cwd: run.cwd,
+    env: { ...run.env, PYTHONPATH: pythonPath, LUCIOLE_ROOT: options.root },
+    ...(options.python ? { python: options.python } : {}),
+    console: "integratedTerminal",
+    justMyCode: true,
+    __luciole: true,
+  };
+}
+
 /** `${workspaceFolder}` and `${file}`, as in VS Code's launch.json. */
 export function substituteVariables(text: string, variables: RunVariables): string {
   return text.replace(/\$\{(workspaceFolder|file)\}/g, (match, name: keyof RunVariables) => variables[name] ?? match);

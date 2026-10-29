@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fileRunKind, pytestRun, resolveRun, splitArgs } from "../src/runs";
+import * as path from "node:path";
+import { debugConfiguration, fileRunKind, pytestRun, ResolvedRun, resolveRun, splitArgs } from "../src/runs";
 
 const folder = "/work/app";
 
@@ -50,4 +51,42 @@ test("tests run with pytest from the folder their paths are relative to", () => 
   // Whatever folder is active when it runs (or runs again), it runs from that folder.
   const run = resolveRun(config, { workspaceFolder: config.folder! });
   assert.deepEqual(run, { label: "tests for cart.py", target: ["-m", "pytest", "tests/test_cart.py"], cwd: folder, env: {} });
+});
+
+const autoStartDir = "/ext/python/luciole/_autostart";
+
+test("a script runs under the Python debugger with the auto-start variables", () => {
+  const run = resolveRun({ name: "train", program: "train.py", args: ["--epochs", "1"], env: { SEED: "1" } }, { workspaceFolder: folder }) as ResolvedRun;
+  const config = debugConfiguration(run, { autoStartDir, root: folder, python: "/work/app/.venv/bin/python", pythonPath: "/opt/lib" });
+  assert.deepEqual(config, {
+    type: "debugpy",
+    request: "launch",
+    name: "Luciole: train",
+    program: "/work/app/train.py",
+    args: ["--epochs", "1"],
+    cwd: folder,
+    env: { SEED: "1", PYTHONPATH: [autoStartDir, "/opt/lib"].join(path.delimiter), LUCIOLE_ROOT: folder },
+    python: "/work/app/.venv/bin/python",
+    console: "integratedTerminal",
+    justMyCode: true,
+    __luciole: true,
+  });
+});
+
+test("modules and tests run under the debugger with -m", () => {
+  const tests = resolveRun(pytestRun("tests for cart.py", ["/work/app/tests/test_cart.py"], folder), { workspaceFolder: folder }) as ResolvedRun;
+  const config = debugConfiguration(tests, { autoStartDir, root: folder });
+  assert.equal(config.module, "pytest");
+  assert.equal(config.program, undefined);
+  assert.deepEqual(config.args, ["tests/test_cart.py"]);
+  assert.equal(config.cwd, folder);
+  assert.equal(config.python, undefined); // the Python extension's interpreter
+  assert.deepEqual(config.env, { PYTHONPATH: autoStartDir, LUCIOLE_ROOT: folder });
+});
+
+test("a run's own PYTHONPATH comes after the auto-start folder", () => {
+  const run = resolveRun({ name: "m", module: "app.main", args: ["-v"], env: { PYTHONPATH: "src" } }, { workspaceFolder: folder }) as ResolvedRun;
+  const config = debugConfiguration(run, { autoStartDir, root: folder, pythonPath: "/ignored" });
+  assert.equal(config.env.PYTHONPATH, [autoStartDir, "src"].join(path.delimiter));
+  assert.deepEqual([config.name, config.module, config.args], ["Luciole: m", "app.main", ["-v"]]);
 });

@@ -9,7 +9,7 @@ import ForceGraph3D from "3d-force-graph";
 import * as THREE from "three";
 import SpriteText from "three-spritetext";
 import type { Graph } from "../graph";
-import type { FromWebview, LiveFrame, LiveState, SourceLine, StepMode, ThreadStack, ToWebview } from "../messages";
+import type { FromWebview, LiveFrame, SourceLine, ThreadStack, ToWebview } from "../messages";
 import { Brain, breakpointAction, breakpointHint, buildBrain, Neuron, neuronAt, Synapse, SynapseKind, synapseId } from "./brain";
 import { addCall, alongPolyline, partOf, Trace, traceAt } from "./flow";
 import { bundle, labelAnchor, Layout, layoutBrain, NEURON_GAP, neuronRadius, Region, regionMembers, route, Vec3 } from "./layout";
@@ -76,9 +76,6 @@ const pathEl = document.getElementById("path")!;
 const messageEl = document.getElementById("message")!;
 const liveButton = document.getElementById("live") as HTMLButtonElement;
 const stopButton = document.getElementById("stop") as HTMLButtonElement;
-const pauseButton = document.getElementById("pause") as HTMLButtonElement;
-const steppingEl = document.getElementById("stepping")!;
-const stepButtons = Array.from(steppingEl.querySelectorAll<HTMLButtonElement>("button[data-step]"));
 
 const css = getComputedStyle(document.body);
 const cssColor = (name: string, fallback: string) => css.getPropertyValue(name).trim() || fallback;
@@ -157,7 +154,6 @@ let pathway = new Set<SynapseLink>();
 /** Synapses with a call being traced on them. */
 const flowing = new Set<SynapseLink>();
 let live = false;
-let paused = false;
 /** VS Code's breakpoints, and the functions that hold one. */
 let breakpoints: SourceLine[] = [];
 let breakpointNodes = new Set<string>();
@@ -818,29 +814,9 @@ function resize(): void {
 }
 new ResizeObserver(resize).observe(document.getElementById("brain")!);
 
-/** Under VS Code's debugger, its toolbar pauses and steps: the panel's own buttons hide. */
-let debugging = false;
-let liveState: LiveState | undefined;
-
-function showLiveButtons(): void {
-  const { running, stopping, held, stepping } = liveState ?? { running: false, stopping: false, held: 0, stepping: false };
-  const shown = running && !debugging;
-  stopButton.hidden = !shown;
-  stopButton.textContent = stopping ? "Force stop" : "Stop";
-  pauseButton.hidden = !shown || stopping;
-  pauseButton.textContent = paused ? "Resume" : "Pause";
-  pauseButton.classList.toggle("primary", paused);
-  steppingEl.hidden = !shown || stopping || !paused;
-  stepButtons.forEach((button) => (button.disabled = !held || stepping));
-}
-
 liveButton.addEventListener("click", () => vscode.postMessage({ type: "runLive" }));
 document.getElementById("runWith")!.addEventListener("click", () => vscode.postMessage({ type: "runLiveWith" }));
 stopButton.addEventListener("click", () => vscode.postMessage({ type: "stopLive" }));
-pauseButton.addEventListener("click", () => vscode.postMessage({ type: "pauseLive", paused: !paused }));
-for (const button of stepButtons) {
-  button.addEventListener("click", () => vscode.postMessage({ type: "step", mode: button.dataset.step as StepMode }));
-}
 document.getElementById("refresh")!.addEventListener("click", () => vscode.postMessage({ type: "refresh" }));
 document.getElementById("fit")!.addEventListener("click", () => fit(600));
 
@@ -862,29 +838,12 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
     placeDebugMarks();
   } else if (message.type === "debugStopped") {
     onDebugStopped(message.at);
-  } else if (message.type === "focus") {
-    const node = nodeById.get(message.node);
-    if (node) {
-      flyTo(node);
-    }
-  } else if (message.type === "debugging") {
-    debugging = message.on;
-    showLiveButtons();
   } else if (message.type === "liveState") {
-    liveState = message.state;
-    const { running, stopping, held, stepping } = message.state;
-    paused = message.state.paused;
-    showLiveButtons();
-    if (stopping) {
+    const { running, stopping } = message.state;
+    stopButton.hidden = !running || message.state.debugged; // the debug toolbar stops a debugged run
+    stopButton.textContent = stopping ? "Force stop" : "Stop";
+    if (running && stopping) {
       setStatus("stopping…");
-    } else if (stepping) {
-      setStatus("stepping…");
-    } else if (paused && !held) {
-      setStatus("pausing… (threads stop at their next line of project code)");
-    } else if (paused) {
-      setStatus(`paused · ${held} thread${held > 1 ? "s" : ""} stopped · variables in the Luciole sidebar`);
-    } else if (running && live) {
-      setStatus("live · resumed");
     }
   }
 });

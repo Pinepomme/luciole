@@ -16,6 +16,13 @@
   much they call each other, with their names at their centres. The same project always gives
   the same map, and editing a file leaves the rest in place. Calls between regions travel
   together in tracts instead of thousands of crossing lines.
+- Run Live (⚡, Run Live…, run configurations, tests for a file, Run again) runs the program under
+  VS Code's Python debugger, lit up by the recorder: breakpoints, stopping on exceptions, stepping,
+  the Variables, Watch and Call Stack views, hover and the Debug Console all work on it. Without
+  the Python Debugger extension (`ms-python.debugpy`), it runs in a terminal as before, lighting
+  only. Luciole's own Pause/Resume and Step commands, their keys (F10, F11, Shift+F11, F5) and
+  buttons, and the Luciole Variables view are removed: the debugger's do the same. The recorder
+  keeps its pause, step and variables protocol for other clients of the engine.
 - Auto-start: with the **Luciole: on** switch (status bar, setting `luciole.autoStart`), every
   Python program started in a new VS Code terminal lights up the view, child processes included
   (forked ones too). Nothing is started when the view is not listening. `luciole env` does the
@@ -38,7 +45,7 @@
 - Callbacks: a function passed, not called, as an argument (`Thread(target=crunch)`,
   `pool.submit(work)`, `sorted(key=rank)`, `button.bind(self.on_click)`) is linked to the function
   passing it (`calls` edges with `"callback": true`), so threads and handlers no longer float apart.
-- The view shows several processes at once; Pause and Stop apply to all of them.
+- The view shows several processes at once; Stop applies to all of them (terminal runs).
 - The graph and `luciole tests` skip the folders the project's `.gitignore` lists (data, runs,
   outputs), and `luciole tests` also finds tests that reach a module through other modules.
 - A process ended by SIGTERM (a `multiprocessing` pool's workers) still reports its last calls.
