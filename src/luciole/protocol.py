@@ -9,6 +9,9 @@ Every connection to the engine starts with a hello, which the engine answers bef
     <- {"welcome": {"protocol": 1, "version": "0.1.0"}}
     <- {"refused": "..."}                    (then the engine closes the connection)
 
+A starting engine checks that the one named in the file runs with the role "probe": it is
+welcomed, and the connection closed.
+
 PROTOCOL changes when a message changes meaning; versions of Luciole that speak the same protocol
 work together. The running engine is found through its file in ~/.luciole (LUCIOLE_HOME), one per
 protocol, so engines of different protocols can run side by side. See docs/graph-format.md.
