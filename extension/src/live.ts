@@ -14,6 +14,7 @@ import * as vscode from "vscode";
 import { PROTOCOL, ensureEngine, parseEngineLine, viewerRoots } from "./engine";
 import type { LiveFrame, LiveState } from "./messages";
 import { ProcessInfo, Processes, processLabel } from "./processes";
+import { ProcessList, RunningProcess, underDebugpy } from "./running";
 import type { PythonDebugConfiguration, ResolvedRun } from "./runs";
 
 export interface LiveListener {
@@ -53,6 +54,14 @@ export class LiveSession implements vscode.Disposable {
   /** A debugger Run Live, from the call that starts it until its session ends. */
   private debugRun: { session?: vscode.DebugSession } | undefined;
   private readonly processes = new Processes<number>();
+  /** What the Running view lists: processes lit up now, and the last ones that exited. */
+  readonly running = new ProcessList();
+  private readonly changed = new vscode.EventEmitter<void>();
+  readonly onDidChangeProcesses = this.changed.event;
+  /** Processes of debug sessions, by pid (debugpy's "process" event): the debug toolbar stops them. */
+  private readonly debuggedPids = new Map<number, vscode.DebugSession>();
+  /** Processes sent SIGINT from the Running view: the next Stop kills them. */
+  private readonly interrupted = new Set<number>();
   private state: LiveState = IDLE;
   private readonly subscriptions: vscode.Disposable[];
   private disposed = false;
@@ -76,6 +85,11 @@ export class LiveSession implements vscode.Disposable {
         }
       }),
       vscode.debug.onDidTerminateDebugSession((session) => {
+        for (const [pid, debugged] of this.debuggedPids) {
+          if (debugged === session) {
+            this.debuggedPids.delete(pid);
+          }
+        }
         if (session === this.debugRun?.session) {
           this.debugRun = undefined;
           this.update();
@@ -225,6 +239,35 @@ export class LiveSession implements vscode.Disposable {
     }
   }
 
+  /** The debug session `session` runs the process `pid`. */
+  debuggedProcess(session: vscode.DebugSession, pid: number): void {
+    this.debuggedPids.set(pid, session);
+    this.changed.fire();
+  }
+
+  /** True when `process` runs under VS Code's debugger (a Run Live, or the user's own debug session). */
+  isDebugged(process: RunningProcess): boolean {
+    return this.debuggedPids.has(process.info.pid) || underDebugpy(process.info.argv);
+  }
+
+  /** Stops one process of the Running view: SIGINT (like Ctrl+C), then SIGKILL if asked again. */
+  stopProcess(id: number): void {
+    const pid = this.running.get(id)?.info.pid;
+    if (pid === undefined) {
+      return;
+    }
+    const signal = this.interrupted.has(id) ? "SIGKILL" : "SIGINT";
+    if (this.signal(pid, signal)) {
+      this.interrupted.add(id);
+    }
+  }
+
+  clearExited(): void {
+    if (this.running.clearExited()) {
+      this.changed.fire();
+    }
+  }
+
   /** The connection to the engine, once subscribed. */
   private subscribed: net.Socket | undefined;
 
@@ -243,6 +286,7 @@ export class LiveSession implements vscode.Disposable {
   dispose(): void {
     this.disposed = true;
     this.subscriptions.forEach((subscription) => subscription.dispose());
+    this.changed.dispose();
     this.subscribed?.destroy();
     this.terminal?.dispose();
   }
@@ -282,12 +326,17 @@ export class LiveSession implements vscode.Disposable {
       if (this.launching && info.pid === (await this.launching.pid)) {
         this.launching = undefined; // Run Live's process: running until it exits, project code or not
         this.processes.activate(id);
+        this.show(id);
         this.update();
       }
       return;
     }
     if (message.exit !== undefined) {
       this.processes.remove(message.exit);
+      this.interrupted.delete(message.exit);
+      if (this.running.exit(message.exit)) {
+        this.changed.fire();
+      }
       this.update();
       return;
     }
@@ -303,6 +352,7 @@ export class LiveSession implements vscode.Disposable {
     const frame = this.processes.merge(id, { t, stacks, calls, links, spawns, waiting, done });
     if (frame) {
       if (!wasActive) {
+        this.show(id);
         this.listener.started(processLabel(this.processes.info(id)));
         this.update();
       }
@@ -310,10 +360,22 @@ export class LiveSession implements vscode.Disposable {
     }
   }
 
+  /** `id` lit up: list it in the Running view. */
+  private show(id: number): void {
+    const info = this.processes.info(id);
+    if (info && this.running.start(id, info)) {
+      this.changed.fire();
+    }
+  }
+
   /** No engine to hear from: no process runs as far as this window knows. */
   private forgetProcesses(): void {
     for (const id of this.processes.ids) {
       this.processes.remove(id);
+    }
+    this.interrupted.clear();
+    if (this.running.exitAll()) {
+      this.changed.fire();
     }
     this.update();
   }
