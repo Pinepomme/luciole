@@ -81,7 +81,9 @@ export type ToWebview =
   /** VS Code's breakpoints in the graph's files (paths relative to its root). */
   | { type: "breakpoints"; breakpoints: SourceLine[] }
   /** The debugger stopped there, or went on (undefined). */
-  | { type: "debugStopped"; at: SourceLine | undefined };
+  | { type: "debugStopped"; at: SourceLine | undefined }
+  /** A Python debug session runs: pausing and stepping are the debugger's, the panel hides its own. */
+  | { type: "debugging"; on: boolean };
 
 /** A line of a file, relative to the graph's root. */
 export interface SourceLine {

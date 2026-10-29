@@ -90,7 +90,9 @@ async function reportStop(session: vscode.DebugSession, threadId: number | undef
     };
     const frame = reply.stackFrames?.[0];
     if (frame?.source?.path) {
-      hooks.stopped(frame.source.path, frame.line);
+      // In a remote window (WSL, SSH, containers), debugpy gives a URI: vscode-remote://wsl%2Bubuntu/home/…
+      const where = frame.source.path;
+      hooks.stopped(/^[a-z][\w+.-]*:\/\//i.test(where) ? vscode.Uri.parse(where).fsPath : where, frame.line);
     } else {
       hooks.log(`debugger stopped in thread ${threadId}, in a frame with no source file`);
     }

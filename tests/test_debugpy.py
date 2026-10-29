@@ -92,6 +92,9 @@ def test_breakpoints_stop_while_the_graph_lights_up(tmp_path):
         trace = adapter.request("stackTrace", threadId=stopped["body"]["threadId"], startFrame=0, levels=1)
         frame = adapter.wait(lambda m: m.get("type") == "response" and m.get("request_seq") == trace)["body"]["stackFrames"][0]
         assert (frame["name"], frame["line"]) == ("total", 2)  # what the brain is told when the debugger stops
+        listing = adapter.request("threads")
+        threads = adapter.wait(lambda m: m.get("type") == "response" and m.get("request_seq") == listing)["body"]["threads"]
+        assert not [t["name"] for t in threads if t["name"].startswith("luciole")]  # the recorder's own threads stay out of sight
         adapter.request("continue", threadId=stopped["body"]["threadId"])
         adapter.wait(lambda m: m.get("event") == "terminated")
         adapter.request("disconnect")

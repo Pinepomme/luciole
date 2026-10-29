@@ -74,6 +74,15 @@ MAX_PAUSED_FRAMES = 60
 STEP_MODES = ("over", "into", "out")
 
 
+def own_thread(target, name: str) -> threading.Thread:
+    """A thread of the recorder's own. Marked the way debugpy marks its threads, so that VS Code's
+    debugger neither lists nor pauses it: the view stays live while the debugger is stopped."""
+    thread = threading.Thread(target=target, name=name, daemon=True)
+    thread.is_pydev_daemon_thread = True
+    thread.pydev_do_not_trace = True
+    return thread
+
+
 class Step:
     """A step in progress in `thread`, from `frame` (where it was paused)."""
 
@@ -527,7 +536,7 @@ class Session:
         for event, callback in callbacks.items():
             monitoring.register_callback(tool, event, callback)
         recorder.line_events = lambda on: monitoring.set_events(tool, always | (events.LINE if on else 0))
-        self.pump_thread = threading.Thread(target=self.pump, name="luciole-recorder", daemon=True)
+        self.pump_thread = own_thread(self.pump, "luciole-recorder")
         self.pump_thread.start()
         self.thread_start = threading.Thread.start
         threading.Thread.start = recorder.thread_start_hook(self.thread_start)
@@ -536,7 +545,7 @@ class Session:
         monitoring.set_events(tool, always)
         if self.connection:
             # After set_events above, which would undo an early pause's LINE events.
-            threading.Thread(target=self.control, name="luciole-control", daemon=True).start()
+            own_thread(self.control, "luciole-control").start()
 
     def stop(self, close: bool) -> None:
         """Remove the callbacks, send the last frame and {"done": true}; `close` the connection too.

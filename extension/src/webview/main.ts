@@ -7,7 +7,7 @@ import ForceGraph3D from "3d-force-graph";
 import * as THREE from "three";
 import SpriteText from "three-spritetext";
 import type { Graph } from "../graph";
-import type { FromWebview, LiveFrame, SourceLine, StepMode, ThreadStack, ToWebview } from "../messages";
+import type { FromWebview, LiveFrame, LiveState, SourceLine, StepMode, ThreadStack, ToWebview } from "../messages";
 import { Brain, breakpointAction, breakpointHint, buildBrain, Neuron, neuronAt, Synapse, SynapseKind, synapseId } from "./brain";
 
 declare function acquireVsCodeApi(): { postMessage(message: FromWebview): void };
@@ -558,6 +558,22 @@ function resize(): void {
 }
 new ResizeObserver(resize).observe(document.getElementById("brain")!);
 
+/** Under VS Code's debugger, its toolbar pauses and steps: the panel's own buttons hide. */
+let debugging = false;
+let liveState: LiveState | undefined;
+
+function showLiveButtons(): void {
+  const { running, stopping, held, stepping } = liveState ?? { running: false, stopping: false, held: 0, stepping: false };
+  const shown = running && !debugging;
+  stopButton.hidden = !shown;
+  stopButton.textContent = stopping ? "Force stop" : "Stop";
+  pauseButton.hidden = !shown || stopping;
+  pauseButton.textContent = paused ? "Resume" : "Pause";
+  pauseButton.classList.toggle("primary", paused);
+  steppingEl.hidden = !shown || stopping || !paused;
+  stepButtons.forEach((button) => (button.disabled = !held || stepping));
+}
+
 liveButton.addEventListener("click", () => vscode.postMessage({ type: "runLive" }));
 document.getElementById("runWith")!.addEventListener("click", () => vscode.postMessage({ type: "runLiveWith" }));
 stopButton.addEventListener("click", () => vscode.postMessage({ type: "stopLive" }));
@@ -592,16 +608,14 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
     if (node) {
       flyTo(node);
     }
+  } else if (message.type === "debugging") {
+    debugging = message.on;
+    showLiveButtons();
   } else if (message.type === "liveState") {
+    liveState = message.state;
     const { running, stopping, held, stepping } = message.state;
     paused = message.state.paused;
-    stopButton.hidden = !running;
-    stopButton.textContent = stopping ? "Force stop" : "Stop";
-    pauseButton.hidden = !running || stopping;
-    pauseButton.textContent = paused ? "Resume" : "Pause";
-    pauseButton.classList.toggle("primary", paused);
-    steppingEl.hidden = !running || stopping || !paused;
-    stepButtons.forEach((button) => (button.disabled = !held || stepping));
+    showLiveButtons();
     if (stopping) {
       setStatus("stopping…");
     } else if (stepping) {
