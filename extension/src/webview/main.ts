@@ -67,9 +67,11 @@ const INTER_REGION_OPACITY = 0.25;
 const MAX_PATH_LINES = 5;
 /** Above this many shown labels, overlapping ones are not hidden (it costs pairs of labels). */
 const MAX_DECLUTTERED = 400;
-/** Region labels show between these heights on screen, in pixels: readable, and not so big you are inside. */
-const REGION_LABEL_MIN = 10;
-const REGION_LABEL_MAX = 120;
+/** Region labels keep this height on screen, in pixels, like a map's place names. */
+const REGION_LABEL_PX = { package: 15, module: 12, class: 11 } as const;
+/** A region is named while it spans this many pixels on screen, and not once it fills the view (you are inside). */
+const REGION_NAMED_MIN = 70;
+const REGION_NAMED_MAX = 1.5;
 
 const vscode = acquireVsCodeApi();
 const statusEl = document.getElementById("status")!;
@@ -273,7 +275,7 @@ function makeRegionLabels(): void {
       continue;
     }
     const color = new THREE.Color().setHSL(regionHue(layout!, region.id) / 360, region.kind === "class" ? 0.25 : 0.5, 0.75);
-    const text = new SpriteText(region.label, Math.max(3.5, region.radius * (region.kind === "class" ? 0.15 : region.depth === 1 ? 0.26 : 0.22)), `#${color.getHexString()}`);
+    const text = new SpriteText(region.label, 10, `#${color.getHexString()}`); // resized each frame to a fixed height on screen
     text.fontFace = css.getPropertyValue("--vscode-font-family").trim() || "sans-serif";
     text.fontWeight = region.kind === "class" ? "normal" : "bold";
     // A dark outline, so names read over the neurons they sit on.
@@ -281,9 +283,9 @@ function makeRegionLabels(): void {
     text.strokeColor = background;
     text.material.depthTest = false;
     text.material.depthWrite = false;
-    text.material.opacity = region.kind === "class" ? 0.7 : 0.9;
+    text.material.opacity = region.kind === "class" ? 0.6 : 0.8;
     text.renderOrder = 1;
-    text.userData = { region, members: members.get(region.id) ?? [] };
+    text.userData = { region, members: members.get(region.id) ?? [], aspect: text.scale.x / text.scale.y };
     regionLabels.add(text);
   }
 }
@@ -379,9 +381,22 @@ function declutterLabels(): void {
       shown.push({ text: node.parts.label, priority: labelPriority(node) });
     }
   }
+  const perspective = camera as THREE.PerspectiveCamera;
+  const fovScale = 2 * Math.tan(THREE.MathUtils.degToRad(perspective.fov) / 2);
   for (const child of regionLabels.children) {
     const text = child as SpriteText;
     const region = text.userData.region as Region;
+    // Pixels per world unit at the region's distance: names keep one height on screen, and show
+    // while the region is big enough to be worth naming but doesn't fill the view.
+    const distance = Math.max(1, camera.position.distanceTo(center.set(region.center.x, region.center.y, region.center.z)));
+    const pixels = height / (distance * fovScale);
+    const span = 2 * region.radius * pixels;
+    text.visible = span >= REGION_NAMED_MIN && span <= REGION_NAMED_MAX * Math.max(width, height);
+    if (!text.visible) {
+      continue;
+    }
+    const tall = REGION_LABEL_PX[region.kind as keyof typeof REGION_LABEL_PX] / pixels;
+    text.scale.set(tall * text.userData.aspect, tall, 1);
     if (region.kind === "package") {
       // Above the package's neurons (its modules fill the middle), wherever they are in its disc.
       const points = (text.userData.members as string[]).map((id) => nodeById.get(id)!).filter(Boolean).map((n) => ({ x: n.x ?? 0, y: n.y ?? 0, z: n.z ?? 0 }));
@@ -391,9 +406,7 @@ function declutterLabels(): void {
       // Modules and classes are named at their centre.
       text.position.set(region.center.x, region.center.y, region.center.z);
     }
-    const box = boxOf(text);
-    const size = box ? box.bottom - box.top : 0;
-    text.visible = size >= REGION_LABEL_MIN && size <= REGION_LABEL_MAX;
+    text.visible = boxOf(text) !== undefined;
     if (text.visible) {
       // Between the functions that matter (1000 and up) and the others (below 100).
       shown.push({ text, priority: 900 - region.depth * 100 + Math.min(region.radius, 999) / 10 });

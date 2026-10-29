@@ -56,8 +56,6 @@ export const NEURON_GAP = 9;
 const REGION_GAP = 8;
 const STEPS = 160;
 const GRAVITY = 0.12;
-/** Thickness of packages and of the whole map, relative to their width. */
-const FLAT = 0.3;
 
 export function neuronRadius(degree: number): number {
   return 2.5 + Math.sqrt(degree) * 1.5;
@@ -193,10 +191,8 @@ export function layoutBrain(brain: Brain, nodes: Map<string, GraphNode>, neuronG
       const [a, b] = key.split("\n");
       return { a, b, weight };
     });
-    // Packages and the whole map spread as thick discs, so regions don't hide one another seen
-    // from the front; modules and classes stay round.
-    const flat = region.kind === "root" || region.kind === "package";
-    const positions = packItems(packed, links, flat ? FLAT : 1, neuronGap);
+    // Round at every level: the map is a 3D brain, not a plane (discs read flat once you turn it).
+    const positions = packItems(packed, links, 1, neuronGap);
     packed.forEach((item, i) => local.set(item.key, positions[i]));
     region.radius = packed.reduce((r, item, i) => Math.max(r, length(positions[i]) + item.radius), 0) + (region.kind === "root" ? 0 : 3);
   };
