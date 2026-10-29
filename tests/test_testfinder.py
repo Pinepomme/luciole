@@ -60,3 +60,16 @@ def test_cli_prints_json(tmp_path, capsys):
     assert main(["tests", str(root / "pkg" / "util.py"), "--root", str(root), "--json"]) == 0
     printed = json.loads(capsys.readouterr().out)
     assert [path.replace("\\", "/").rsplit("/", 2)[-2:] for path in printed] == [["tests", "test_from_package.py"], ["tests", "test_plain_import.py"]]
+
+
+def test_namespace_packages(tmp_path):
+    root = project(tmp_path, {
+        "src/ns/types.py": "X = 1\n",  # ns has no __init__.py: a namespace package
+        "src/ns/sub/__init__.py": "",
+        "src/ns/sub/mod.py": "Y = 2\n",
+        "tests/test_stdlib_types.py": "import types\n",
+        "tests/test_ns_types.py": "from ns import types\n",
+        "tests/test_sub.py": "from ns.sub import mod\n",
+    })
+    assert names(testfinder.tests_for(root / "src" / "ns" / "types.py", root), root) == ["tests/test_ns_types.py"]
+    assert names(testfinder.tests_for(root / "src" / "ns" / "sub" / "mod.py", root), root) == ["tests/test_sub.py"]
