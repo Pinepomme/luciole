@@ -91,12 +91,17 @@ Detailed plan: `docs/roadmap.md`. This section is the summary a new session need
 
 ### Next steps, in order
 
-1. **Release v0.2.0** (`dev` holds phase 1 and most of phase 2): bump both versions, rename `## Unreleased` in `CHANGELOG.md`, PR `dev` → `main`, tag `v0.2.0` (DEVELOPING.md section 7). Open VSX is still skipped until `OVSX_PAT` is set.
-2. **Phase 2 (rest)**: scale (whole-folder graphs of 30k+ lines are an unreadable cloud today: search, filtering, collapsible modules). Hands-on check of Run Live under the debugger (branch `feature/run-live-debugpy`). Small leftovers: `luciole tests` ignores `sys.path` changes made in `conftest.py`. Several clients on one debug session (a DAP proxy around debugpy, owned by the engine) moves to phase 3, which needs it.
-3. **Phase 3: agents**: `luciole mcp` server (graph queries, record a run, calls per function, compare runs, breakpoints/inspection on the shared session), a Claude Code plugin (MCP + a skill teaching when to debug with Luciole + slash commands, optional hooks), the agent's activity shown on the graph, explicit approval to run programs, summarized/paginated answers, a small planted-bug benchmark.
-4. **Phase 4: recording and time travel** (Python): variable-level events with size limits and secret redaction, trace storage (SQLite or column store), a replay timeline, stepping backwards, MCP tools for values/slicing/run diffs.
-5. **Phase 5: beyond VS Code**: `luciole serve` (3D view in a browser), other editors through DAP, a `language` field in both formats, decide the engine's implementation language.
-6. **Phase 6: JS/TS** (js-debug behind the proxy, Chrome DevTools Protocol recorder, graph from SCIP/language servers) and **phase 7: native** (gdb/lldb behind the proxy, `-finstrument-functions` or XRay, rr for time travel).
+Direction: Luciole becomes a **debugger on steroids**: tracing functions, going back in time, the evolution of variables over time. VS Code's debugger (debugpy) does live control (breakpoints, stepping, inspection); Luciole's recorder is the history engine. Design choices must keep that door open: the recorder keeps its value snapshots (`values.py`) and in-thread machinery for phase 4.
+
+1. **Phase 2 (rest)**, one feature branch each:
+   - **Run Live under VS Code's debugger** (`feature/run-live-debugpy`): ⚡ Run Live and every run kind launch through debugpy with the auto-start variables, so breakpoints, exceptions, watch, hover, console, Variables and Call Stack are VS Code's. Luciole's own pause/step buttons and Variables view go away (the recorder keeps its pause/step protocol for engine clients). No release is planned for now.
+   - **Structured layout** (`feature/region-layout`): regions inside regions (packages → modules → classes → functions, nearness means same module), positions seeded from paths so the map is stable, calls between regions bundled into tracts, region labels. Then semantic zoom (regions open into modules and functions as you get closer), size and brightness by importance (callers, runtime calls; entry points marked), then search, focus (N calls around a function) and filters. Measured on public projects only (`rich`, `black`, cloned into a scratch folder).
+   - Small leftovers: a window reconnecting after a workspace-folder change forgets a paused program's state; `luciole tests` ignores `sys.path` changes made in `conftest.py`.
+   - Several clients on one debug session (a DAP proxy around debugpy, owned by the engine) moves to phase 3, which needs it.
+2. **Phase 3: agents**: `luciole mcp` server (graph queries, record a run, calls per function, compare runs, breakpoints/inspection on the shared session), a Claude Code plugin (MCP + a skill teaching when to debug with Luciole + slash commands, optional hooks), the agent's activity shown on the graph, explicit approval to run programs, summarized/paginated answers, a small planted-bug benchmark.
+3. **Phase 4: recording and time travel** (Python), the steroids: variable-level events with size limits and secret redaction, trace storage (SQLite or column store), a replay timeline, stepping backwards, MCP tools for values/slicing/run diffs.
+4. **Phase 5: beyond VS Code**: `luciole serve` (3D view in a browser), other editors through DAP, a `language` field in both formats, decide the engine's implementation language.
+5. **Phase 6: JS/TS** (js-debug behind the proxy, Chrome DevTools Protocol recorder, graph from SCIP/language servers) and **phase 7: native** (gdb/lldb behind the proxy, `-finstrument-functions` or XRay, rr for time travel).
 
 Open question: phases 2 and 3 could swap (MCP graph and run tools are cheap once the engine exists).
 
