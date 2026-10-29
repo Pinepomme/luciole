@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- ⚡ Run Live on a file of a package that imports relatively (`from . import x`) runs it as a
+  module (`python -m pkg.mod`), the only way it can run; it stopped at its first relative import.
 - Each file's functions get a muted tint of their own (Apple's system hues, half-way to grey), so you see which module a function is in; activity stays in the accent.
 - A calmer, minimal look: neutral greys at rest and one accent color for activity, the theme's
   own (its link color), with red only for breakpoints and the debugger. Smaller matte neurons,

@@ -10,7 +10,7 @@ import type { Graph } from "./graph";
 import { webviewHtml } from "./html";
 import { LiveSession } from "./live";
 import type { FromWebview, ToWebview } from "./messages";
-import { RunConfiguration, debugConfiguration, fileRunKind, pytestRun, resolveRun, splitArgs } from "./runs";
+import { RunConfiguration, debugConfiguration, fileRunKind, packageModule, pytestRun, resolveRun, splitArgs } from "./runs";
 
 let panel: GraphPanel | undefined;
 let output: vscode.OutputChannel;
@@ -164,7 +164,8 @@ function fileTarget(): string | undefined {
 
 /**
  * Run a Python file the way it is meant to run (see fileRunKind): a test file with pytest, a
- * script as itself, a library module through the tests that import it, else as a script.
+ * script as itself (as a module when it is in a package and imports relatively), a library
+ * module through the tests that import it, else as a script.
  */
 async function runFile(context: vscode.ExtensionContext, file: string | undefined): Promise<void> {
   if (!file) {
@@ -172,7 +173,8 @@ async function runFile(context: vscode.ExtensionContext, file: string | undefine
   }
   const name = path.basename(file);
   const open = vscode.workspace.textDocuments.find((document) => document.uri.fsPath === file);
-  const kind = fileRunKind(file, open?.getText() ?? (await fs.promises.readFile(file, "utf8").catch(() => "")));
+  const source = open?.getText() ?? (await fs.promises.readFile(file, "utf8").catch(() => ""));
+  const kind = fileRunKind(file, source);
   const folder = workspaceFolderOf(file);
   if (kind === "test") {
     return startRun(context, pytestRun(`pytest ${name}`, [file], folder));
@@ -183,6 +185,13 @@ async function runFile(context: vscode.ExtensionContext, file: string | undefine
       return startRun(context, pytestRun(`tests for ${name}`, tests, folder));
     }
     void vscode.window.showInformationMessage(`Luciole: no test file imports ${name}, so it runs as a script.`);
+  }
+  // A file of a package that imports relatively only runs as a module: `python -m pkg.mod`.
+  const asModule = packageModule(file, source, (dir) => fs.existsSync(path.join(dir, "__init__.py")));
+  if (asModule) {
+    // Importable from the folder it runs in; else from its package's folder, put first on PYTHONPATH.
+    const env = path.resolve(asModule.root) === path.resolve(folder) ? undefined : { PYTHONPATH: [asModule.root, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter) };
+    return startRun(context, { name: `-m ${asModule.module}`, module: asModule.module, folder, ...(env ? { env } : {}) });
   }
   return startRun(context, { name, program: file, folder });
 }
