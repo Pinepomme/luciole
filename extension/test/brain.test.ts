@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { test } from "node:test";
 import type { Graph } from "../src/graph";
-import { buildBrain, MAX_STATE_PAIRS, neuronAt } from "../src/webview/brain";
+import { breakpointAction, breakpointHint, buildBrain, MAX_STATE_PAIRS, neuronAt } from "../src/webview/brain";
 
 // out/test/brain.test.js -> repo root
 const shop: Graph = JSON.parse(readFileSync(resolve(__dirname, "../../../examples/shop.graph.json"), "utf8"));
@@ -77,6 +77,26 @@ test("a line belongs to the innermost function around it, else to its module", (
   assert.equal(neuronAt(neurons, "shop.py", 7)?.id, "shop:with_tax");
   assert.equal(neuronAt(neurons, "shop.py", 2)?.id, "shop"); // module code
   assert.equal(neuronAt(neurons, "other.py", 7), undefined);
+});
+
+test("right-click removes every breakpoint marking a function, else adds one where each call starts", () => {
+  const neurons = buildBrain(shop).neurons;
+  const neuron = (id: string) => neurons.find((n) => n.id === id)!;
+  const main = neuron("shop:main"); // lines 22-27, body_line 23
+  assert.deepEqual(breakpointAction(neurons, main, []), { add: 23 });
+  assert.deepEqual(breakpointAction(neurons, main, [{ file: "other.py", line: 25 }, { file: "shop.py", line: 7 }]), { add: 23 });
+  // A gutter breakpoint on another line of main marks it: right-click removes that one.
+  const other = breakpointAction(neurons, main, [{ file: "shop.py", line: 25 }])!;
+  assert.deepEqual(other, { remove: [25] });
+  assert.equal(breakpointHint(main, other), "remove the breakpoint (line 25)");
+  const own = breakpointAction(neurons, main, [{ file: "shop.py", line: 23 }])!;
+  assert.equal(breakpointHint(main, own), "remove the breakpoint");
+  const several = breakpointAction(neurons, main, [{ file: "shop.py", line: 26 }, { file: "shop.py", line: 23 }, { file: "shop.py", line: 26 }])!;
+  assert.deepEqual(several, { remove: [23, 26] });
+  assert.equal(breakpointHint(main, several), "remove its 2 breakpoints (lines 23, 26)");
+  assert.equal(breakpointHint(main, { add: 23 }), "stop on each call");
+  // Module code takes no breakpoints from the brain.
+  assert.equal(breakpointAction(neurons, neuron("shop"), [{ file: "shop.py", line: 30 }]), undefined);
 });
 
 test("imports and calls matched by name become call synapses", () => {

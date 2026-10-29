@@ -8,7 +8,7 @@ import * as THREE from "three";
 import SpriteText from "three-spritetext";
 import type { Graph } from "../graph";
 import type { FromWebview, LiveFrame, SourceLine, StepMode, ThreadStack, ToWebview } from "../messages";
-import { Brain, buildBrain, Neuron, neuronAt, Synapse, SynapseKind, synapseId } from "./brain";
+import { Brain, breakpointAction, breakpointHint, buildBrain, Neuron, neuronAt, Synapse, SynapseKind, synapseId } from "./brain";
 
 declare function acquireVsCodeApi(): { postMessage(message: FromWebview): void };
 
@@ -121,10 +121,12 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
   })
   .onNodeClick((node: object) => reveal(node as NeuronNode))
   .onNodeRightClick((node: object) => {
-    // A breakpoint where each call starts (not on the `def` line, which runs once, at import).
-    const { node: graphNode } = (node as NeuronNode).neuron;
-    if (graphNode.kind === "function") {
-      vscode.postMessage({ type: "toggleBreakpoint", file: graphNode.file, line: graphNode.body_line ?? graphNode.loc.line });
+    const { neuron } = node as NeuronNode;
+    const action = breakpointAction(brain?.neurons ?? [], neuron, breakpoints);
+    if (action && "add" in action) {
+      vscode.postMessage({ type: "addBreakpoint", file: neuron.node.file, line: action.add });
+    } else if (action) {
+      vscode.postMessage({ type: "removeBreakpoints", file: neuron.node.file, lines: action.remove });
     }
   });
 
@@ -233,7 +235,8 @@ function escape(text: string): string {
 
 function neuronTooltip(neuron: Neuron): string {
   const name = neuron.node.kind === "module" ? `module ${neuron.label}` : `${neuron.label}(${neuron.params.join(", ")})`;
-  const hint = neuron.node.kind === "function" ? `<br><span class="dim">right-click: ${breakpointNodes.has(neuron.id) ? "remove the breakpoint" : "stop on each call"}</span>` : "";
+  const action = breakpointAction(brain?.neurons ?? [], neuron, breakpoints);
+  const hint = action ? `<br><span class="dim">right-click: ${escape(breakpointHint(neuron, action))}</span>` : "";
   return `<b>${escape(name)}</b><br><span class="dim">${escape(neuron.node.file)}:${neuron.node.loc.line}</span>${hint}`;
 }
 

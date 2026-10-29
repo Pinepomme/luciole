@@ -98,5 +98,7 @@ export type FromWebview =
   | { type: "pauseLive"; paused: boolean }
   | { type: "step"; mode: StepMode }
   | { type: "reveal"; file: string; line: number; col: number }
-  /** Right-click on a neuron: add or remove a breakpoint where each call of the function starts. */
-  | { type: "toggleBreakpoint"; file: string; line: number };
+  /** Right-click on a neuron: a breakpoint where each call of the function starts. */
+  | { type: "addBreakpoint"; file: string; line: number }
+  /** Right-click on a neuron that has breakpoints: remove them all. */
+  | { type: "removeBreakpoints"; file: string; lines: number[] };

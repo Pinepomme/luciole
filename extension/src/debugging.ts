@@ -77,18 +77,27 @@ async function reportStop(session: vscode.DebugSession, threadId: number | undef
   }
 }
 
-/** Adds a breakpoint at `line` (1-based) of `file`, or removes the one there. */
-export function toggleBreakpoint(file: string, line: number): void {
-  const uri = vscode.Uri.file(file);
-  const existing = vscode.debug.breakpoints.filter(
-    (breakpoint) =>
-      breakpoint instanceof vscode.SourceBreakpoint && breakpoint.location.uri.fsPath === uri.fsPath && breakpoint.location.range.start.line === line - 1,
+function breakpointsAt(file: string, lines: number[]): vscode.SourceBreakpoint[] {
+  const fsPath = vscode.Uri.file(file).fsPath;
+  return vscode.debug.breakpoints.filter(
+    (breakpoint): breakpoint is vscode.SourceBreakpoint =>
+      breakpoint instanceof vscode.SourceBreakpoint && breakpoint.location.uri.fsPath === fsPath && lines.includes(breakpoint.location.range.start.line + 1),
   );
-  if (existing.length) {
-    vscode.debug.removeBreakpoints(existing);
-  } else {
-    vscode.debug.addBreakpoints([new vscode.SourceBreakpoint(new vscode.Location(uri, new vscode.Position(line - 1, 0)))]);
+}
+
+/** Adds a breakpoint at `line` (1-based) of `file`, in place of a disabled one there. */
+export function addBreakpoint(file: string, line: number): void {
+  const existing = breakpointsAt(file, [line]);
+  if (existing.some((breakpoint) => breakpoint.enabled)) {
+    return;
   }
+  vscode.debug.removeBreakpoints(existing);
+  vscode.debug.addBreakpoints([new vscode.SourceBreakpoint(new vscode.Location(vscode.Uri.file(file), new vscode.Position(line - 1, 0)))]);
+}
+
+/** Removes the breakpoints at `lines` (1-based) of `file`. */
+export function removeBreakpoints(file: string, lines: number[]): void {
+  vscode.debug.removeBreakpoints(breakpointsAt(file, lines));
 }
 
 /** Enabled source breakpoints, as absolute file paths and 1-based lines. */
