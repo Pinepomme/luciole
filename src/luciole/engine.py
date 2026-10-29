@@ -30,6 +30,7 @@ import itertools
 import json
 import logging
 import os
+import signal
 import socket
 import threading
 import time
@@ -287,6 +288,9 @@ def serve(port: int = 0, idle: float = 600) -> int:
         log.warning("an engine already runs on port %s", running)
         return 0
     engine = Engine(port, idle)
+    # Stopped (SIGTERM, Ctrl+C) like when idle: it removes its file on the way out.
+    signal.signal(signal.SIGTERM, lambda *_: engine.stop())
+    signal.signal(signal.SIGINT, lambda *_: engine.stop())
     log.warning("engine on port %s (protocol %s)", engine.port, PROTOCOL)
     if not engine.serve():  # another one started at the same time: callers find it in its file
         log.warning("an engine already runs on port %s", engine_port())
