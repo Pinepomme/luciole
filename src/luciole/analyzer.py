@@ -132,6 +132,11 @@ def is_super(node: ast.expr) -> bool:
     return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "super"
 
 
+def is_type_checking(test: ast.expr) -> bool:
+    """`TYPE_CHECKING` or `typing.TYPE_CHECKING`: true for type checkers only."""
+    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")
+
+
 def is_overload(node: ast.AST) -> bool:
     """`@typing.overload` stubs only exist for type checkers; they are left out of the graph."""
     return isinstance(node, FUNCTION_DEFS) and any(
@@ -612,6 +617,7 @@ class FlowVisitor:
         self.scope = scope
         self.actor = actor
         self.shadowed: list[set[str]] = []  # names bound by enclosing lambdas and comprehensions
+        self.type_checking = False  # in an `if TYPE_CHECKING:` block
 
     def run(self, body: list[ast.stmt]) -> None:
         for stmt in body:
@@ -692,11 +698,20 @@ class FlowVisitor:
             self.run(node.body)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             self.imports(node)
+        elif isinstance(node, ast.If) and is_type_checking(node.test):
+            # Imports for type checkers only: they never run, but their names still resolve.
+            self.expr(node.test)
+            outer, self.type_checking = self.type_checking, True
+            self.run(node.body)
+            self.type_checking = outer
+            self.run(node.orelse)
         elif not isinstance(node, (ast.Global, ast.Nonlocal)):
             self.generic(node)
 
     def imports(self, node: ast.Import | ast.ImportFrom) -> None:
         """Importing a module runs its code, and its packages' first: calls to each module."""
+        if self.type_checking:
+            return
         if isinstance(node, ast.Import):
             names = [alias.name for alias in node.names]
         else:
