@@ -201,7 +201,7 @@ async function runFile(context: vscode.ExtensionContext, file: string | undefine
     }
     void vscode.window.showInformationMessage(`Luciole: no test file imports ${name}, so it runs as a script.`);
   }
-  return startRun(context, { name, program: file });
+  return startRun(context, { name, program: file, folder });
 }
 
 function workspaceFolderOf(file: string): string {
@@ -254,7 +254,7 @@ async function pickRun(context: vscode.ExtensionContext): Promise<void> {
   }
   if (file) {
     picks.push(
-      { label: "$(file) Current file as a script", description: vscode.workspace.asRelativePath(file), choose: async () => ({ name: path.basename(file), program: file }) },
+      { label: "$(file) Current file as a script", description: vscode.workspace.asRelativePath(file), choose: async () => ({ name: path.basename(file), program: file, folder: workspaceFolderOf(file) }) },
       {
         label: "$(beaker) Tests for the current file",
         description: "pytest on the test files that import it",
@@ -273,7 +273,7 @@ async function pickRun(context: vscode.ExtensionContext): Promise<void> {
         description: vscode.workspace.asRelativePath(file),
         choose: async () => {
           const line = await vscode.window.showInputBox({ prompt: `Arguments for ${path.basename(file)}`, placeHolder: "--config configs/small.yaml" });
-          return line === undefined ? undefined : { name: `${path.basename(file)} ${line}`.trim(), program: file, args: splitArgs(line) };
+          return line === undefined ? undefined : { name: `${path.basename(file)} ${line}`.trim(), program: file, args: splitArgs(line), folder: workspaceFolderOf(file) };
         },
       },
     );
@@ -319,7 +319,10 @@ async function startRun(context: vscode.ExtensionContext, config: RunConfigurati
   }
   const file = activePythonFile();
   const anchor = config.program && path.isAbsolute(config.program) ? config.program : file;
+  // The run's own folder first: the panel's Run live button leaves no active editor, and in a
+  // multi-root workspace the first folder may not be the one its paths are relative to.
   const folder =
+    config.folder ??
     (anchor && vscode.workspace.getWorkspaceFolder(vscode.Uri.file(anchor))?.uri.fsPath) ??
     vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
     (anchor && path.dirname(anchor));
@@ -342,7 +345,7 @@ async function startRun(context: vscode.ExtensionContext, config: RunConfigurati
   } else if (!panel?.showsFolder) {
     showGraph(context, folder, false); // a module can run anything in the project
   }
-  void context.workspaceState.update(LAST_RUN, config);
+  void context.workspaceState.update(LAST_RUN, { ...config, folder }); // runs again from the same folder
   panel?.post({ type: "liveStarted", script: run.label });
   await live.run(run, folder, pythonPath(folder), dir);
 }

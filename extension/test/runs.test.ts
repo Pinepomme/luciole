@@ -44,10 +44,10 @@ test("Run Live picks how to run a file", () => {
   assert.equal(fileRunKind("/app/cart.py", "    if __name__ == '__main__':  # nested, not the module's own\n"), "module");
 });
 
-test("tests run with pytest, relative to the workspace folder", () => {
-  assert.deepEqual(pytestRun("tests for cart.py", ["/work/app/tests/test_cart.py"], folder), {
-    name: "tests for cart.py",
-    module: "pytest",
-    args: ["tests/test_cart.py"],
-  });
+test("tests run with pytest from the folder their paths are relative to", () => {
+  const config = pytestRun("tests for cart.py", ["/work/app/tests/test_cart.py"], folder);
+  assert.deepEqual(config, { name: "tests for cart.py", module: "pytest", args: ["tests/test_cart.py"], folder });
+  // Whatever folder is active when it runs (or runs again), it runs from that folder.
+  const run = resolveRun(config, { workspaceFolder: config.folder! });
+  assert.deepEqual(run, { label: "tests for cart.py", target: ["-m", "pytest", "tests/test_cart.py"], cwd: folder, env: {} });
 });
