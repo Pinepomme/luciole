@@ -9,6 +9,7 @@ import SpriteText from "three-spritetext";
 import type { Graph } from "../graph";
 import type { FromWebview, LiveFrame, LiveState, SourceLine, StepMode, ThreadStack, ToWebview } from "../messages";
 import { Brain, breakpointAction, breakpointHint, buildBrain, Neuron, neuronAt, Synapse, SynapseKind, synapseId } from "./brain";
+import { bundle, Layout, layoutBrain, NEURON_GAP, neuronRadius, Region, regionHue, route, Vec3 } from "./layout";
 
 declare function acquireVsCodeApi(): { postMessage(message: FromWebview): void };
 
@@ -18,6 +19,8 @@ interface NeuronNode {
   x?: number;
   y?: number;
   z?: number;
+  /** Its place on the map: it is pulled back there (after a drag, or a refresh). */
+  home: Vec3;
   /** 1 when the function just ran or is running, fading to 0. */
   heat: number;
   parts?: { material: THREE.MeshLambertMaterial; halo: THREE.Sprite; spark: THREE.Sprite; mark: THREE.Sprite; label?: SpriteText; radius: number; base: THREE.Color };
@@ -29,7 +32,26 @@ interface SynapseLink {
   target: string | NeuronNode;
   synapse: Synapse;
   heat: number;
+  /** Centres of the regions the line bends through (none inside a region: a straight line). */
+  via: Vec3[];
   line?: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
+  /** Set by three-forcegraph, which moves pulses along it: ours, for bundled lines. */
+  __curve?: THREE.Curve<THREE.Vector3> | null;
+}
+
+/** A polyline as a three.js curve, so pulses follow bundled lines. */
+class PathCurve extends THREE.Curve<THREE.Vector3> {
+  constructor(private points: Vec3[]) {
+    super();
+  }
+
+  override getPoint(t: number, target = new THREE.Vector3()): THREE.Vector3 {
+    const at = Math.min(Math.max(t, 0), 1) * (this.points.length - 1);
+    const i = Math.min(Math.floor(at), this.points.length - 2);
+    const [a, b] = [this.points[i], this.points[i + 1]];
+    const k = at - i;
+    return target.set(a.x + (b.x - a.x) * k, a.y + (b.y - a.y) * k, a.z + (b.z - a.z) * k);
+  }
 }
 
 /** Labels are always shown below this many neurons; above, only on lit or hovered ones. */
@@ -39,10 +61,15 @@ const FADE = 0.7;
 /** Glow kept by functions that ran during the current live session, once their flash fades. */
 const VISITED = 0.12;
 const MAX_PULSES_PER_LINK = 3;
+/** Share of their usual opacity kept by lines between regions. */
+const INTER_REGION_OPACITY = 0.25;
 /** Lines of the bottom bar: one per thread, then what is waiting. */
 const MAX_PATH_LINES = 5;
 /** Above this many shown labels, overlapping ones are not hidden (it costs pairs of labels). */
-const MAX_DECLUTTERED = 300;
+const MAX_DECLUTTERED = 400;
+/** Region labels show between these heights on screen, in pixels: readable, and not so big you are inside. */
+const REGION_LABEL_MIN = 10;
+const REGION_LABEL_MAX = 120;
 
 const vscode = acquireVsCodeApi();
 const statusEl = document.getElementById("status")!;
@@ -76,6 +103,11 @@ const glowTexture = makeGlowTexture();
 const dotTexture = makeDotTexture();
 
 let brain: Brain | undefined;
+let layout: Layout | undefined;
+/** Package, module and class names, above their regions. */
+const regionLabels = new THREE.Group();
+/** A faint glow of its color behind each top-level region, like an area on a map. */
+const regionGlows = new THREE.Group();
 let target: string | undefined;
 let nodes: NeuronNode[] = [];
 let links: SynapseLink[] = [];
@@ -106,19 +138,24 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
   .nodeThreeObject((node: object) => neuronObject(node as NeuronNode))
   .nodeLabel((node: object) => neuronTooltip((node as NeuronNode).neuron))
   .linkThreeObject((link: object) => synapseObject(link as SynapseLink))
-  .linkPositionUpdate((object, { start, end }) => {
+  .linkPositionUpdate((object, { start, end }, link) => {
+    const { via } = link as SynapseLink;
+    const points = bundle(start, via, end);
     const positions = (object as THREE.Line).geometry.getAttribute("position") as THREE.BufferAttribute;
-    positions.setXYZ(0, start.x, start.y, start.z);
-    positions.setXYZ(1, end.x, end.y, end.z);
+    points.forEach((p, i) => positions.setXYZ(i, p.x, p.y, p.z));
     positions.needsUpdate = true;
     (object as THREE.Line).geometry.computeBoundingSphere();
+    (link as SynapseLink).__curve = via.length ? new PathCurve(points) : null;
     return true;
   })
   .linkLabel((link: object) => synapseTooltip((link as SynapseLink).synapse))
   .linkDirectionalParticleColor(() => "#ffc94d")
   .linkDirectionalParticleWidth(2.5)
   .linkDirectionalParticleSpeed(0.025)
-  .cooldownTicks(300)
+  .cooldownTicks(120)
+  .d3Force("charge", null)
+  .d3Force("center", null)
+  .d3Force("home", homeForce())
   .onNodeHover((node: object | null) => {
     hovered = (node as NeuronNode | null) ?? undefined;
     document.body.style.cursor = node ? "pointer" : "";
@@ -134,11 +171,33 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
     }
   });
 
+graph.scene().add(regionLabels, regionGlows);
+// The map places neurons: links keep their force only to join their ends to the nodes.
+(graph.d3Force("link") as unknown as { strength(k: number): void }).strength(0);
+
+/** Pulls each neuron to its place on the map. They start there: this undoes drags and glides refreshes. */
+function homeForce() {
+  let pulled: NeuronNode[] = [];
+  const force = (alpha: number) => {
+    const k = 0.3 * Math.max(alpha, 0.05);
+    for (const node of pulled) {
+      const n = node as NeuronNode & { vx: number; vy: number; vz: number };
+      n.vx += (node.home.x - node.x!) * k;
+      n.vy += (node.home.y - node.y!) * k;
+      n.vz += (node.home.z - node.z!) * k;
+    }
+  };
+  force.initialize = (nodes: object[]) => {
+    pulled = nodes as NeuronNode[];
+  };
+  return force;
+}
+
 let fitted = false;
 graph.onEngineStop(() => {
   if (!fitted) {
     fitted = true;
-    graph.zoomToFit(600, 40);
+    fit(600);
   }
   document.body.dataset.state = "ready";
 });
@@ -146,8 +205,8 @@ graph.onEngineStop(() => {
 // Three.js objects
 
 function neuronObject(node: NeuronNode): THREE.Object3D {
-  const radius = 2.5 + Math.sqrt(node.neuron.degree) * 1.5;
-  const base = moduleColor(node.neuron.module);
+  const radius = neuronRadius(node.neuron.degree);
+  const base = new THREE.Color().setHSL((layout ? regionHue(layout, node.id) : 0) / 360, 0.35, 0.55);
   const material = new THREE.MeshLambertMaterial({ color: base.clone(), emissive: AMBER, emissiveIntensity: 0 });
   const group = new THREE.Group();
   group.add(new THREE.Mesh(new THREE.SphereGeometry(radius, 20, 14), material));
@@ -174,23 +233,58 @@ function neuronObject(node: NeuronNode): THREE.Object3D {
 
 function synapseObject(link: SynapseLink): THREE.Object3D {
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
+  link.via = layout ? route(layout, link.synapse.source, link.synapse.target) : [];
+  const count = bundle({ x: 0, y: 0, z: 0 }, link.via, { x: 0, y: 0, z: 0 }).length;
+  geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(count * 3), 3));
   const material = new THREE.LineBasicMaterial({ color: LINE_COLORS[link.synapse.kind].clone(), transparent: true, opacity: baseOpacity(link) });
   link.line = new THREE.Line(geometry, material);
   return link.line;
 }
 
+/** Lines between regions are fainter: they add up into tracts where many travel together. */
 function baseOpacity(link: SynapseLink): number {
-  return { call: 0.55, state: 0.3, runtime: 0.2, spawn: 0.3 }[link.synapse.kind];
+  const opacity = { call: 0.55, state: 0.3, runtime: 0.2, spawn: 0.3 }[link.synapse.kind];
+  return link.via.length ? opacity * INTER_REGION_OPACITY : opacity;
 }
 
-/** Each module gets its own soft hue, so modules read as regions of the brain. */
-function moduleColor(module: string): THREE.Color {
-  let hash = 0;
-  for (const char of module) {
-    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+/** A label per region (package, module, class), sized by the region; declutterLabels places them. */
+function makeRegionLabels(): void {
+  for (const child of regionLabels.children) {
+    (child as SpriteText).material.map?.dispose();
+    (child as SpriteText).material.dispose();
   }
-  return new THREE.Color().setHSL((hash % 360) / 360, 0.35, 0.55);
+  regionLabels.clear();
+  regionGlows.children.forEach((glow) => ((glow as THREE.Sprite).material.dispose()));
+  regionGlows.clear();
+  for (const region of layout?.regions.values() ?? []) {
+    // A region holding the whole brain (a single file) needs neither: it is the brain.
+    const whole = region.size === layout!.regions.get("")!.size;
+    if (region.depth === 1 && region.size > 1 && !whole) {
+      const color = new THREE.Color().setHSL(regionHue(layout!, region.id) / 360, 0.5, 0.5);
+      const glow = new THREE.Sprite(
+        new THREE.SpriteMaterial({ map: glowTexture, color, transparent: true, opacity: 0.1, blending: THREE.AdditiveBlending, depthWrite: false }),
+      );
+      glow.position.set(region.center.x, region.center.y, region.center.z);
+      glow.scale.setScalar(region.radius * 3);
+      regionGlows.add(glow);
+    }
+    if (region.kind === "root" || whole || (region.kind === "class" && region.size < 3)) {
+      continue;
+    }
+    const color = new THREE.Color().setHSL(regionHue(layout!, region.id) / 360, region.kind === "class" ? 0.25 : 0.5, 0.75);
+    const text = new SpriteText(region.label, Math.max(3.5, region.radius * (region.kind === "class" ? 0.15 : region.depth === 1 ? 0.26 : 0.22)), `#${color.getHexString()}`);
+    text.fontFace = css.getPropertyValue("--vscode-font-family").trim() || "sans-serif";
+    text.fontWeight = region.kind === "class" ? "normal" : "bold";
+    // A dark outline, so names read over the neurons they sit on.
+    text.strokeWidth = 0.6;
+    text.strokeColor = background;
+    text.material.depthTest = false;
+    text.material.depthWrite = false;
+    text.material.opacity = region.kind === "class" ? 0.7 : 0.9;
+    text.renderOrder = 1;
+    text.userData = { region };
+    regionLabels.add(text);
+  }
 }
 
 function makeGlowTexture(): THREE.Texture {
@@ -253,12 +347,12 @@ const corner = new THREE.Vector3();
 const cameraRight = new THREE.Vector3();
 const cameraUp = new THREE.Vector3();
 
-/** Hides labels that overlap a more important one on screen, so the ones left can be read. */
+/**
+ * Places region labels above their regions and keeps those of a readable size on screen, then
+ * hides labels that overlap a more important one, so the ones left can be read. Region labels
+ * come after functions that run, are hovered or hold a breakpoint, and before the others.
+ */
 function declutterLabels(): void {
-  const shown = nodes.filter((node) => node.parts?.label?.visible);
-  if (shown.length < 2 || shown.length > MAX_DECLUTTERED) {
-    return;
-  }
   const camera = graph.camera();
   const element = document.getElementById("brain")!;
   const [width, height] = [element.clientWidth, element.clientHeight];
@@ -268,17 +362,45 @@ function declutterLabels(): void {
     corner.copy(from).addScaledVector(cameraRight, dx).addScaledVector(cameraUp, dy).project(camera);
     return { x: ((corner.x + 1) / 2) * width, y: ((1 - corner.y) / 2) * height, z: corner.z };
   };
-  const placed: { left: number; right: number; top: number; bottom: number }[] = [];
   const center = new THREE.Vector3();
-  for (const node of shown.sort((a, b) => labelPriority(b) - labelPriority(a))) {
-    const text = node.parts!.label!;
+  const boxOf = (text: SpriteText) => {
     text.getWorldPosition(center);
     const a = toScreen(-text.scale.x / 2, text.scale.y / 2, center);
     const b = toScreen(text.scale.x / 2, -text.scale.y / 2, center);
     if (a.z > 1 || b.z > 1) {
-      continue; // behind the camera
+      return undefined; // behind the camera
     }
-    const box = { left: Math.min(a.x, b.x), right: Math.max(a.x, b.x), top: Math.min(a.y, b.y), bottom: Math.max(a.y, b.y) };
+    return { left: Math.min(a.x, b.x), right: Math.max(a.x, b.x), top: Math.min(a.y, b.y), bottom: Math.max(a.y, b.y) };
+  };
+  const shown: { text: SpriteText; priority: number }[] = [];
+  for (const node of nodes) {
+    if (node.parts?.label?.visible) {
+      shown.push({ text: node.parts.label, priority: labelPriority(node) });
+    }
+  }
+  for (const child of regionLabels.children) {
+    const text = child as SpriteText;
+    const region = text.userData.region as Region;
+    const { x, y, z } = region.center;
+    // Modules and classes are named at their centre, packages above them (their modules fill the middle).
+    text.position.set(x, y, z).addScaledVector(cameraUp, region.kind === "package" ? region.radius + text.scale.y * 0.6 : 0);
+    const box = boxOf(text);
+    const size = box ? box.bottom - box.top : 0;
+    text.visible = size >= REGION_LABEL_MIN && size <= REGION_LABEL_MAX;
+    if (text.visible) {
+      // Between the functions that matter (1000 and up) and the others (below 100).
+      shown.push({ text, priority: 900 - region.depth * 100 + Math.min(region.radius, 999) / 10 });
+    }
+  }
+  if (shown.length < 2 || shown.length > MAX_DECLUTTERED) {
+    return;
+  }
+  const placed: { left: number; right: number; top: number; bottom: number }[] = [];
+  for (const { text } of shown.sort((a, b) => b.priority - a.priority)) {
+    const box = boxOf(text);
+    if (!box) {
+      continue;
+    }
     if (placed.some((p) => box.left < p.right && p.left < box.right && box.top < p.bottom && p.top < box.bottom)) {
       text.visible = false;
     } else {
@@ -366,15 +488,20 @@ function load(graphData: Graph, newTarget: string): void {
   const sameTarget = newTarget === target;
   target = newTarget;
   brain = buildBrain(graphData);
+  // Small brains show every name: room for them.
+  const gap = brain.neurons.length <= ALWAYS_LABEL ? 28 : NEURON_GAP;
+  layout = layoutBrain(brain, new Map(graphData.nodes.map((node) => [node.id, node])), gap);
+  makeRegionLabels();
   const previous = new Map(nodes.map((n) => [n.id, n]));
   nodes = brain.neurons.map((neuron) => {
-    // Keep positions across refreshes of the same target, so the brain doesn't jump.
+    // A refresh of the same target starts from where things were: they glide to their new place.
+    const home = layout!.positions.get(neuron.id)!;
     const old = sameTarget ? previous.get(neuron.id) : undefined;
-    return { id: neuron.id, neuron, heat: 0, x: old?.x, y: old?.y, z: old?.z };
+    return { id: neuron.id, neuron, heat: 0, home, x: old?.x ?? home.x, y: old?.y ?? home.y, z: old?.z ?? home.z };
   });
   nodeById.clear();
   nodes.forEach((n) => nodeById.set(n.id, n));
-  links = brain.synapses.map((synapse) => ({ id: synapse.id, source: synapse.source, target: synapse.target, synapse, heat: 0 }));
+  links = brain.synapses.map((synapse) => ({ id: synapse.id, source: synapse.source, target: synapse.target, synapse, heat: 0, via: [] }));
   callLinks.clear();
   spawnLinks.clear();
   for (const link of links) {
@@ -475,7 +602,7 @@ function onLive(frame: LiveFrame): void {
         }
         // Not in the static graph (a call it missed, or a spawn): add a synapse from now on.
         const synapse: Synapse = { id: synapseId(kind, source, target), kind, source, target, variables: [], count: 0 };
-        link = { id: synapse.id, source, target, synapse, heat: 1 };
+        link = { id: synapse.id, source, target, synapse, heat: 1, via: [] };
         links.push(link);
         known.set(key, link);
         added = true;
@@ -532,6 +659,42 @@ function reveal(node: NeuronNode): void {
   flyTo(node);
 }
 
+/**
+ * Frames the whole brain from where the camera looks: its extent across and up the screen, so
+ * the flat map fills the view, and room for labels.
+ */
+function fit(duration: number): void {
+  if (!nodes.length) {
+    return;
+  }
+  const camera = graph.camera() as THREE.PerspectiveCamera;
+  const forward = camera.getWorldDirection(new THREE.Vector3());
+  const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+  const up = new THREE.Vector3().crossVectors(right, forward).normalize();
+  const point = new THREE.Vector3();
+  const low = [Infinity, Infinity, Infinity];
+  const high = [-Infinity, -Infinity, -Infinity];
+  for (const node of nodes) {
+    point.set(node.x ?? 0, node.y ?? 0, node.z ?? 0);
+    const r = node.parts?.radius ?? 0;
+    [point.dot(right), point.dot(up), point.dot(forward)].forEach((v, i) => {
+      low[i] = Math.min(low[i], v - r);
+      high[i] = Math.max(high[i], v + r);
+    });
+  }
+  const mid = (i: number) => (low[i] + high[i]) / 2;
+  const center = new THREE.Vector3().addScaledVector(right, mid(0)).addScaledVector(up, mid(1)).addScaledVector(forward, mid(2));
+  // Room for the labels above packages, and for the names around small brains.
+  const margin = nodes.length <= ALWAYS_LABEL ? 1.3 : 1.15;
+  const vertical = (camera.fov / 2) * (Math.PI / 180);
+  const horizontal = Math.atan(Math.tan(vertical) * camera.aspect);
+  const halfWidth = Math.max((high[0] - low[0]) / 2, 20) * margin;
+  const halfHeight = Math.max((high[1] - low[1]) / 2, 20) * margin;
+  const distance = Math.max(halfWidth / Math.tan(horizontal), halfHeight / Math.tan(vertical)) + (high[2] - low[2]) / 2;
+  const position = center.clone().addScaledVector(forward, -distance);
+  graph.cameraPosition({ x: position.x, y: position.y, z: position.z }, { x: center.x, y: center.y, z: center.z }, duration);
+}
+
 function flyTo(node: NeuronNode): void {
   const distance = 80;
   const length = Math.hypot(node.x ?? 0, node.y ?? 0, node.z ?? 0) || 1;
@@ -582,7 +745,7 @@ for (const button of stepButtons) {
   button.addEventListener("click", () => vscode.postMessage({ type: "step", mode: button.dataset.step as StepMode }));
 }
 document.getElementById("refresh")!.addEventListener("click", () => vscode.postMessage({ type: "refresh" }));
-document.getElementById("fit")!.addEventListener("click", () => graph.zoomToFit(600, 40));
+document.getElementById("fit")!.addEventListener("click", () => fit(600));
 
 window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
   const message = event.data;
