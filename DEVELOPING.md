@@ -140,6 +140,14 @@ What to know:
   Then open a pull request **into `dev`** (not `main`). CI runs the Python tests on Linux
   (3.10 to 3.14), macOS and Windows, and the extension's typecheck, tests and packaging. Merge
   when it's green.
+- **One feature, one branch, one pull request.** Name branches `feature/…`, `fix/…` or `docs/…`.
+  Fixes found while reviewing a feature go on that feature's branch, before it merges.
+- **Merge with a merge commit** (GitHub's "Create a merge commit"), never squash or rebase: `dev`
+  then keeps one merge per feature, with the feature's commits under it. `git log --first-parent
+  dev` lists the features in order; `git log --graph` shows each one's own commits. Deleting the
+  branch after merging loses nothing.
+- **A feature that needs another one not merged yet:** branch from it, and open the pull request
+  against that branch. When the first one merges, GitHub retargets the second to `dev`.
 - Commits are authored as `Pinepomme <45495853+Pinepomme@users.noreply.github.com>` (set in this
   repo's git config; check with `git config user.email`). Pull requests are opened from the
   Pinepomme GitHub account.
@@ -148,6 +156,9 @@ Rules that hold across the codebase:
 
 - The Python package stays **standard library only**. `debugpy` is the one allowed exception.
 - No telemetry. Nothing leaves the user's machine.
+- Test and measure on **public code only**: copies of the standard library, or open-source
+  projects cloned into a scratch folder. Never private or company code, and never name private
+  projects in commits, pull requests or comments.
 - The graph JSON is the contract between the two halves. If you change it, update
   `docs/graph-format.md` and `schema/graph.schema.json` too; `tests/test_graph_format.py` checks
   `examples/shop.graph.json` against the schema.
