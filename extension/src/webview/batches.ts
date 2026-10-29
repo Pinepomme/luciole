@@ -3,6 +3,9 @@
  * drawn one by one, the cost is in the draw calls, not in what is drawn, and turning the camera
  * stutters. Each neuron and synapse keeps its own object for 3d-force-graph (its position, and
  * hover and clicks, which raycast it), with a material that is never drawn.
+ *
+ * Only what changed is written and uploaded: a still brain costs nothing, and a dragged neuron
+ * costs its own sphere and lines, not the whole brain's.
  */
 
 import * as THREE from "three";
@@ -25,6 +28,9 @@ export interface Sphere {
 /** Every neuron's sphere, as instances of one mesh. */
 export class SphereBatch {
   private mesh?: THREE.InstancedMesh;
+  private drawn: Sphere[] = [];
+  /** Where each was last drawn, x y z: only spheres that moved are written again. */
+  private placed = new Float64Array(0);
   private matrix = new THREE.Matrix4();
   private position = new THREE.Vector3();
   private scale = new THREE.Vector3();
@@ -32,31 +38,48 @@ export class SphereBatch {
 
   constructor(private readonly parent: THREE.Object3D) {}
 
-  /** Draws `spheres` where they are now, in their colors. Called each frame. */
-  update(spheres: Sphere[]): void {
-    if (!this.mesh || this.mesh.instanceMatrix.count < spheres.length) {
+  /** Draws `spheres`: their places again when some `moved`, their colors when some were `recolored`. */
+  update(spheres: Sphere[], moved: boolean, recolored: boolean): void {
+    const ready = spheres.length === this.drawn.length && spheres.every((sphere, i) => sphere === this.drawn[i] && sphere.parts) ? this.drawn : spheres.filter((sphere) => sphere.parts);
+    const changed = ready !== this.drawn;
+    if (!this.mesh || this.mesh.instanceMatrix.count < ready.length) {
       this.dispose();
-      const capacity = Math.max(16, Math.ceil(spheres.length * 1.25)); // room for neurons found at runtime
+      const capacity = Math.max(16, Math.ceil(ready.length * 1.25)); // room for neurons found at runtime
       this.mesh = new THREE.InstancedMesh(UNIT_SPHERE, new THREE.MeshLambertMaterial(), capacity);
       this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       this.mesh.frustumCulled = false; // instances move: the mesh's own bounds would be stale
       this.parent.add(this.mesh);
     }
     const mesh = this.mesh;
-    let i = 0;
-    for (const sphere of spheres) {
-      if (sphere.parts) {
-        this.position.set(sphere.x ?? 0, sphere.y ?? 0, sphere.z ?? 0);
-        this.scale.setScalar(sphere.parts.radius);
+    this.drawn = ready;
+    mesh.count = ready.length;
+    if (changed) {
+      this.placed = new Float64Array(ready.length * 3).fill(NaN);
+    }
+    if (changed || moved) {
+      let low = Infinity;
+      let high = -1;
+      ready.forEach((sphere, i) => {
+        const [x, y, z] = [sphere.x ?? 0, sphere.y ?? 0, sphere.z ?? 0];
+        if (this.placed[i * 3] === x && this.placed[i * 3 + 1] === y && this.placed[i * 3 + 2] === z) {
+          return;
+        }
+        this.placed.set([x, y, z], i * 3);
+        this.position.set(x, y, z);
+        this.scale.setScalar(sphere.parts!.radius);
         mesh.setMatrixAt(i, this.matrix.compose(this.position, this.rotation, this.scale));
-        mesh.setColorAt(i, sphere.parts.color);
-        i++;
+        low = Math.min(low, i);
+        high = i;
+      });
+      if (high >= 0) {
+        mesh.instanceMatrix.clearUpdateRanges();
+        mesh.instanceMatrix.addUpdateRange(low * 16, (high - low + 1) * 16);
+        mesh.instanceMatrix.needsUpdate = true;
       }
     }
-    mesh.count = i;
-    mesh.instanceMatrix.needsUpdate = true;
-    if (mesh.instanceColor) {
-      mesh.instanceColor.needsUpdate = true;
+    if ((changed || recolored) && ready.length) {
+      ready.forEach((sphere, i) => mesh.setColorAt(i, sphere.parts!.color));
+      mesh.instanceColor!.needsUpdate = true;
     }
   }
 
@@ -67,6 +90,7 @@ export class SphereBatch {
       this.mesh.dispose();
       this.mesh = undefined;
     }
+    this.drawn = [];
   }
 }
 
@@ -84,65 +108,101 @@ export class LineBatch {
   private lines?: THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>;
   private drawn: Polyline[] = [];
   private drawnPoints: (number | undefined)[] = [];
+  private index = new Map<Polyline, number>();
   private offsets: number[] = [];
-  /** Set when a line moved: positions are written again on the next update. */
-  moved = true;
+  private moved = new Set<Polyline>();
+  private recolored = new Set<Polyline>();
+  private all = true;
 
   constructor(private readonly parent: THREE.Object3D) {}
+
+  /** `line` was placed again: written with the next update. */
+  move(line: Polyline): void {
+    this.moved.add(line);
+  }
+
+  /** `line` changed color or opacity: written with the next update. */
+  recolor(line: Polyline): void {
+    this.recolored.add(line);
+  }
+
+  /** Every line written again with the next update (they were all restyled). */
+  rewriteAll(): void {
+    this.all = true;
+  }
 
   update(polylines: Polyline[]): void {
     if (!this.lines || polylines.length !== this.drawn.length || polylines.some((line, i) => line !== this.drawn[i] || line.points !== this.drawnPoints[i])) {
       this.build(polylines);
     }
     const geometry = this.lines!.geometry;
-    if (this.moved) {
-      this.moved = false;
-      const positions = geometry.getAttribute("position") as THREE.BufferAttribute;
-      const array = positions.array as Float32Array;
-      polylines.forEach((line, i) => {
-        let at = this.offsets[i] * 3;
-        const points = line.path?.points ?? [];
-        const count = Math.min(points.length, line.points ?? 0);
-        for (let p = 0; p + 1 < count; p++) {
-          for (const q of [points[p], points[p + 1]]) {
-            array[at++] = q.x;
-            array[at++] = q.y;
-            array[at++] = q.z;
-          }
-        }
-        // Points this line has no use for (a shorter path than planned) collapse onto its start.
-        const end = this.offsets[i + 1] * 3;
-        const start = points[0] ?? { x: 0, y: 0, z: 0 };
-        while (at < end) {
-          array[at++] = start.x;
-          array[at++] = start.y;
-          array[at++] = start.z;
-        }
-      });
-      positions.needsUpdate = true;
-    }
+    const positions = geometry.getAttribute("position") as THREE.BufferAttribute;
     const colors = geometry.getAttribute("color") as THREE.BufferAttribute;
-    const array = colors.array as Float32Array;
-    let changed = false;
-    polylines.forEach((line, i) => {
-      const at = this.offsets[i] * 4;
-      if (!line.color || line.opacity === undefined || at === this.offsets[i + 1] * 4) {
-        return;
-      }
-      const { r, g, b } = line.color;
-      if (array[at] === r && array[at + 1] === g && array[at + 2] === b && array[at + 3] === line.opacity) {
-        return;
-      }
-      changed = true;
-      for (let v = at, end = this.offsets[i + 1] * 4; v < end; v += 4) {
-        array[v] = r;
-        array[v + 1] = g;
-        array[v + 2] = b;
-        array[v + 3] = line.opacity;
-      }
-    });
-    if (changed) {
+    if (this.all) {
+      polylines.forEach((line, i) => {
+        this.writePositions(line, i);
+        this.writeColor(line, i);
+      });
+      positions.clearUpdateRanges();
+      colors.clearUpdateRanges();
+      positions.needsUpdate = true;
       colors.needsUpdate = true;
+      this.all = false;
+    } else {
+      this.upload(this.moved, positions, 3, (line, i) => this.writePositions(line, i));
+      this.upload(this.recolored, colors, 4, (line, i) => this.writeColor(line, i));
+    }
+    this.moved.clear();
+    this.recolored.clear();
+  }
+
+  /** Writes `lines` and uploads only their parts of `attribute` (`size` numbers per vertex). */
+  private upload(lines: Set<Polyline>, attribute: THREE.BufferAttribute, size: number, write: (line: Polyline, i: number) => void): void {
+    if (!lines.size) {
+      return;
+    }
+    attribute.clearUpdateRanges();
+    for (const line of lines) {
+      const i = this.index.get(line);
+      if (i !== undefined && this.offsets[i + 1] > this.offsets[i]) {
+        write(line, i);
+        attribute.addUpdateRange(this.offsets[i] * size, (this.offsets[i + 1] - this.offsets[i]) * size);
+      }
+    }
+    attribute.needsUpdate = true;
+  }
+
+  private writePositions(line: Polyline, i: number): void {
+    const array = (this.lines!.geometry.getAttribute("position") as THREE.BufferAttribute).array as Float32Array;
+    let at = this.offsets[i] * 3;
+    const end = this.offsets[i + 1] * 3;
+    const points = line.path?.points ?? [];
+    const count = Math.min(points.length, line.points ?? 0);
+    for (let p = 0; p + 1 < count; p++) {
+      for (const q of [points[p], points[p + 1]]) {
+        array[at++] = q.x;
+        array[at++] = q.y;
+        array[at++] = q.z;
+      }
+    }
+    // Points this line has no use for (a shorter path than planned) collapse onto its start.
+    const start = points[0] ?? { x: 0, y: 0, z: 0 };
+    while (at < end) {
+      array[at++] = start.x;
+      array[at++] = start.y;
+      array[at++] = start.z;
+    }
+  }
+
+  private writeColor(line: Polyline, i: number): void {
+    const array = (this.lines!.geometry.getAttribute("color") as THREE.BufferAttribute).array as Float32Array;
+    const { r, g, b } = line.color ?? { r: 0, g: 0, b: 0 };
+    const opacity = line.opacity ?? 0;
+    for (let v = this.offsets[i] * 4, end = this.offsets[i + 1] * 4; v < end; v += 4) {
+      array[v] = r;
+      array[v + 1] = g;
+      array[v + 2] = b;
+      array[v + 3] = opacity;
     }
   }
 
@@ -155,8 +215,7 @@ export class LineBatch {
     const vertices = this.offsets[this.offsets.length - 1];
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(vertices * 3), 3).setUsage(THREE.DynamicDrawUsage));
-    // Opacity in the fourth component; NaN so the first update writes every line's color.
-    geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(vertices * 4).fill(NaN), 4).setUsage(THREE.DynamicDrawUsage));
+    geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(vertices * 4), 4).setUsage(THREE.DynamicDrawUsage));
     // Hairlines that don't hide one another: tracts read by how many lines run together.
     const material = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false });
     this.lines = new THREE.LineSegments(geometry, material);
@@ -164,7 +223,8 @@ export class LineBatch {
     this.parent.add(this.lines);
     this.drawn = polylines.slice();
     this.drawnPoints = polylines.map((line) => line.points);
-    this.moved = true;
+    this.index = new Map(polylines.map((line, i) => [line, i]));
+    this.all = true;
   }
 
   dispose(): void {

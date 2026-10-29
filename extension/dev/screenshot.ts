@@ -3,10 +3,14 @@
  * Uses the real webview bundle and Content Security Policy, with a stub of the VS Code API.
  *
  *   node out/dev/screenshot.js [path] [--events FILE [--frames N] [--every MS] [--zoom F]]
- *                              [--breakpoint FILE:LINE] [--stopped FILE:LINE] [--out dir] [--fps]
+ *                              [--breakpoint FILE:LINE] [--stopped FILE:LINE] [--out dir] [--fps] [--cpu [--slow N] [--profile]]
  *                              [--theme light]
  *
  * --theme light uses VS Code's Light Modern colors instead of Dark Modern.
+ * --cpu instead measures frame times with nothing drawn (what any machine pays, whatever its GPU):
+ * idle, turning the camera, and the busiest neuron sliding back home after a drag. --slow N makes
+ * the CPU N times slower (Chrome's throttling, as on a modest laptop); --profile also prints where
+ * the time goes.
  * --fps also prints how many frames per second the overview draws (and, with --frames, the replay),
  * and its draw calls per frame (what a real GPU pays for: thousands of objects stutter).
  *
@@ -131,6 +135,11 @@ async function main(): Promise<void> {
     console.log(file);
   };
 
+  if (process.argv.includes("--cpu")) {
+    await cpuOnly(page, json);
+    await browser.close();
+    return;
+  }
   await page.evaluate((graph) => window.postMessage({ type: "graph", target: "harness", graph, warnings: [] }, "*"), JSON.parse(json));
   await shot("1-overview");
   // Frames drawn in 3 s (software WebGL here: compare runs, not with a real GPU).
@@ -230,6 +239,123 @@ async function main(): Promise<void> {
   if (problems.length) {
     console.error(problems.join("\n"));
     process.exit(1);
+  }
+}
+
+/**
+ * --cpu: frame times with nothing drawn (renderer.render does nothing), so what any machine pays
+ * whatever its GPU: idle, then while a dragged neuron slides back home.
+ */
+async function cpuOnly(page: import("playwright-core").Page, json: string): Promise<void> {
+  await page.evaluate(() => {
+    // Nothing drawn, but objects still placed: render() is where three.js updates world matrices.
+    (window as any).luciole.graph.renderer().render = (scene: any, camera: any) => {
+      scene.updateMatrixWorld();
+      if (camera.parent === null) {
+        camera.updateMatrixWorld();
+      }
+    };
+  });
+  // --slow N: a CPU N times slower (Chrome's throttling), as on a modest laptop.
+  const slow = Number(option("--slow") ?? 1);
+  if (slow > 1) {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: slow });
+  }
+  await page.evaluate((graph) => window.postMessage({ type: "graph", target: "harness", graph, warnings: [] }, "*"), JSON.parse(json));
+  for (let i = 0; i < 600 && (await page.evaluate(() => document.body.dataset.state)) !== "ready"; i++) {
+    await page.waitForTimeout(50);
+  }
+  await page.waitForTimeout(1000); // the camera's fit
+  const frames = (ms: number) =>
+    page.evaluate(
+      (ms) =>
+        new Promise<string>((resolve) => {
+          const times: number[] = [];
+          let last = performance.now();
+          const start = last;
+          const tick = (now: number) => {
+            times.push(now - last);
+            last = now;
+            if (now - start < ms) {
+              requestAnimationFrame(tick);
+            } else {
+              times.sort((a, b) => a - b);
+              resolve(`${(times.length / (ms / 1000)).toFixed(0)} frames/s, median ${times[times.length >> 1].toFixed(1)} ms, worst ${times[times.length - 1].toFixed(0)} ms`);
+            }
+          };
+          requestAnimationFrame(tick);
+        }),
+      ms,
+    );
+  // With --profile, where the time went: the functions that took the most, by their own time.
+  const profiled = async (label: string, run: () => Promise<string>) => {
+    if (!process.argv.includes("--profile")) {
+      console.log(`${label}: ${await run()}`);
+      return;
+    }
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Profiler.enable");
+    await cdp.send("Profiler.start");
+    const result = await run();
+    const { profile } = await cdp.send("Profiler.stop");
+    const byId = new Map(profile.nodes.map((node) => [node.id, node.callFrame]));
+    const own = new Map<string, number>();
+    (profile.samples ?? []).forEach((id, i) => {
+      const frame = byId.get(id)!;
+      const name = `${frame.functionName || "(anonymous)"} ${frame.url.split("/").pop()}:${frame.lineNumber + 1}`;
+      own.set(name, (own.get(name) ?? 0) + (profile.timeDeltas?.[i] ?? 0) / 1000);
+    });
+    console.log(`${label}: ${result}`);
+    [...own]
+      .filter(([name]) => !name.startsWith("(idle)"))
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 14)
+      .forEach(([name, ms]) => console.log(`   ${ms.toFixed(0).padStart(6)} ms  ${name}`));
+  };
+  await profiled("idle", () => frames(2000));
+  // Turning: a drag across the background, then the camera easing to a stop.
+  const box = await page.evaluate(() => {
+    const rect = document.getElementById("brain")!.getBoundingClientRect();
+    return { x: rect.left + 20, y: rect.top + 20 };
+  });
+  await page.mouse.move(box.x, box.y);
+  await page.mouse.down();
+  for (let i = 1; i <= 10; i++) {
+    await page.mouse.move(box.x + 30 * i, box.y + 10 * i);
+  }
+  await page.mouse.up();
+  await profiled("after turning the camera", () => frames(3000));
+  await page.waitForTimeout(3000);
+  await profiled("still again", () => frames(1500));
+  // A neuron dragged away, then let go: it slides back home.
+  {
+    const at = await page.evaluate(() => {
+      const graph = (window as any).luciole.graph;
+      const node = graph.graphData().nodes.slice().sort((a: any, b: any) => b.neuron.degree - a.neuron.degree)[0];
+      const screen = graph.graph2ScreenCoords(node.x, node.y, node.z);
+      const rect = document.getElementById("brain")!.getBoundingClientRect();
+      return { x: screen.x + rect.left, y: screen.y + rect.top, id: node.id };
+    });
+    await page.mouse.move(at.x - 3, at.y);
+    await page.mouse.move(at.x, at.y);
+    await page.waitForTimeout(400);
+    const hovering = await page.evaluate(() => document.body.style.cursor === "pointer");
+    await page.mouse.down();
+    for (let i = 1; i <= 10; i++) {
+      await page.mouse.move(at.x + 15 * i, at.y + 8 * i);
+      await page.waitForTimeout(20);
+    }
+    const away = () =>
+      page.evaluate((id) => {
+        const node = (window as any).luciole.graph.graphData().nodes.find((n: any) => n.id === id);
+        return Math.hypot(node.x - node.home.x, node.y - node.home.y, node.z - node.home.z).toFixed(0);
+      }, at.id);
+    console.log(`dragged ${at.id} ${await away()} units from its place${hovering ? "" : " (the pointer missed it)"}`);
+    await page.mouse.up();
+    await profiled("sliding back", () => frames(2500));
+    const drawing = await page.evaluate(() => !(window as any).luciole.paused?.());
+    console.log(`then: ${await away()} units from its place, ${drawing ? "still drawing" : "no longer drawing"}`);
   }
 }
 
