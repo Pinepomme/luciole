@@ -464,6 +464,35 @@ def test_a_method_matched_by_name_keeps_the_receivers_flow(tmp_path):
     assert ("m:cb#obj", "m:cb#return") in edges(graph, "flows_to")
 
 
+def test_property_objects_are_not_getter_calls(tmp_path):
+    graph = analyze(tmp_path, {"m.py": """
+        class C:
+            @property
+            def x(self):
+                return 1
+
+            @x.setter
+            def x(self, v):
+                pass
+
+            @x.deleter
+            def x(self):
+                pass
+
+
+        def doc():
+            return C.x.__doc__
+
+
+        def get(c: C):
+            return c.x
+    """})
+    found = calls(graph)
+    assert ("m", "m:C.x") not in found  # @x.setter, @x.deleter
+    assert ("m:doc", "m:C.x") not in found  # on the class, not an instance
+    assert ("m:get", "m:C.x") in found
+
+
 def test_star_import_cycles_are_fast(tmp_path):
     names = ["a", "b", "c", "d"]
     files = {"pkg/__init__.py": ""}

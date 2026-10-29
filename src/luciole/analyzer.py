@@ -778,6 +778,8 @@ class FlowVisitor:
 
     def decorators(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> None:
         for decorator in node.decorator_list:
+            if isinstance(decorator, ast.Attribute) and decorator.attr in ("setter", "getter", "deleter") and self.an.is_property(self.ref(decorator.value)):
+                continue  # `@x.setter` uses the property object: no get
             self.expr(decorator)
             target = self.ref(decorator)
             if self.an.kind(target) == "function":
@@ -828,7 +830,8 @@ class FlowVisitor:
                 if target is None and self.an.value_class(self.scope, node.value) is None and not self.from_module(node.value):
                     target = self.an.only_method_named(node.attr)
                     by_name = target is not None
-            if self.an.is_property(target):  # reading `obj.prop` runs its getter, maybe a subclass's
+            on_class = isinstance(node, ast.Attribute) and self.an.kind(self.ref(node.value)) == "class"  # `Class.prop` is the property
+            if self.an.is_property(target) and not on_class:  # reading `obj.prop` runs its getter, maybe a subclass's
                 self.an.add_edge("calls", self.actor, target, pos(node), by_name)
                 cls = self.an.value_class(self.scope, node.value) if isinstance(node, ast.Attribute) else None
                 for getter in self.an.overrides(cls, node.attr) if cls else []:
