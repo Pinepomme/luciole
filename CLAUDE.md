@@ -93,17 +93,18 @@ Detailed plan: `docs/roadmap.md`. This section is the summary a new session need
 
 Direction: Luciole becomes a **debugger on steroids**: tracing functions, going back in time, the evolution of variables over time. VS Code's debugger (debugpy) does live control (breakpoints, stepping, inspection); Luciole's recorder is the history engine. Design choices must keep that door open: the recorder keeps its value snapshots (`values.py`) and in-thread machinery for phase 4.
 
-1. **Phase 2 (rest)**, one feature branch each:
-   - **Run Live under VS Code's debugger** (`feature/run-live-debugpy`): ⚡ Run Live and every run kind launch through debugpy with the auto-start variables, so breakpoints, exceptions, watch, hover, console, Variables and Call Stack are VS Code's. Luciole's own pause/step buttons and Variables view go away (the recorder keeps its pause/step protocol for engine clients). No release is planned for now.
-   - **Structured layout** (`feature/region-layout`): regions inside regions (packages → modules → classes → functions, nearness means same module), positions seeded from paths so the map is stable, calls between regions bundled into tracts, region labels. Then semantic zoom (regions open into modules and functions as you get closer), size and brightness by importance (callers, runtime calls; entry points marked), then search, focus (N calls around a function) and filters. Measured on public projects only (`rich`, `black`, cloned into a scratch folder).
-   - Small leftovers: a window reconnecting after a workspace-folder change forgets a paused program's state; `luciole tests` ignores `sys.path` changes made in `conftest.py`.
+1. **Phase 2 (rest)**:
+   - Merged into `dev` (2026-10-29): Run Live under VS Code's debugger (#9), the region map (#10), the minimal look with calls tracing their line and a muted tint per file (#11).
+   - **Luciole sidebar** (PR #13, `feature/sidebar`): actions, running programs, and a map outline with search that flies to the item in the brain. Waiting for the user's hands-on check.
+   - **Fix:** `tests/test_autostart.py::test_processes_ended_by_sigterm_send_their_last_calls` fails about half the time on macOS CI (0 of 20 pool-worker calls reported): fork-pool workers on macOS lose their calls when terminated. Needs investigation through macOS CI.
+   - **First cleanup PR** after this cluster (see Code health): split `main.ts` and `analyzer.py`, dead code from the removed pause/step UI, docs that drifted.
+   - Next on the map: semantic zoom, size by importance, search/focus/filters. Small leftovers: `luciole tests` ignores `sys.path` changes made in `conftest.py`.
    - Several clients on one debug session (a DAP proxy around debugpy, owned by the engine) moves to phase 3, which needs it.
-2. **Phase 3: agents**: `luciole mcp` server (graph queries, record a run, calls per function, compare runs, breakpoints/inspection on the shared session), a Claude Code plugin (MCP + a skill teaching when to debug with Luciole + slash commands, optional hooks), the agent's activity shown on the graph, explicit approval to run programs, summarized/paginated answers, a small planted-bug benchmark.
-3. **Phase 4: recording and time travel** (Python), the steroids: variable-level events with size limits and secret redaction, trace storage (SQLite or column store), a replay timeline, stepping backwards, MCP tools for values/slicing/run diffs.
-4. **Phase 5: beyond VS Code**: `luciole serve` (3D view in a browser), other editors through DAP, a `language` field in both formats, decide the engine's implementation language.
-5. **Phase 6: JS/TS** (js-debug behind the proxy, Chrome DevTools Protocol recorder, graph from SCIP/language servers) and **phase 7: native** (gdb/lldb behind the proxy, `-finstrument-functions` or XRay, rr for time travel).
+2. **Phase 3: history and agents, one track** (detail and efforts in `docs/roadmap.md`): goal, go to the origin of anything (value, call, object, exception), for the user in the view and for Claude through MCP. The static graph has every possible data path; the recorder captures which happened and with which values. Steps: (1) trace store in SQLite, call tree + arguments/returns + exceptions, recording levels 0–1 (`feature/trace-store`); (2) `luciole mcp` over the trace and the graph; (3) scoped variable history (level 2: `sys.monitoring` per-function events), redaction and limits; (4) origin queries (dynamic backward slicing over static edges + trace); (5) VS Code: timeline scrubbing, variables over time per function, origin paths on the brain; later, stepping backwards and instruction-level provenance. Then the Claude Code plugin and a planted-bug benchmark.
+3. **Phase 5: beyond VS Code**: `luciole serve` (3D view in a browser), other editors through DAP, a `language` field in both formats, decide the engine's implementation language.
+4. **Phase 6: JS/TS** (js-debug behind the proxy, Chrome DevTools Protocol recorder, graph from SCIP/language servers) and **phase 7: native** (gdb/lldb behind the proxy, `-finstrument-functions` or XRay, rr for time travel).
 
-Open question: phases 2 and 3 could swap (MCP graph and run tools are cheap once the engine exists).
+Code health (rules in `docs/roadmap.md`): contracts between parts, logic outside the UI with unit tests, split files past ~800 lines when next touched, a cleanup PR after each feature cluster.
 
 ### Decisions and conventions
 

@@ -48,8 +48,7 @@ share the same session.
 | 0 | Consolidate and ship v0.1 | days | a stranger can install it and use it on their own project |
 | 1 | Engine foundation | ~1 week | any Python process (terminal, tests, child processes) lights up the same view |
 | 2 | Debugging through the engine | weeks | it is used every day on a real project, with breakpoints |
-| 3 | Agents (MCP and Claude Code plugin) | 1–2 weeks | an agent finds a planted bug faster with Luciole than without |
-| 4 | Recording and time travel (Python) | weeks to months | "where did this value come from?" is answered for a real bug |
+| 3 | History and agents (one track: trace store, MCP, variable history, origins, timeline) | ~2 months | "where did this value come from?" is answered for a real bug, and an agent finds planted bugs faster with Luciole than without |
 | 5 | Beyond VS Code | weeks | the same features work from Neovim or a browser |
 | 6 | Second language: JS/TS | weeks | the same experience on a TypeScript project |
 | 7 | Native: C/C++/Rust | months | live lighting and time travel on a C program |
@@ -112,29 +111,67 @@ share the same session.
   - semantic zoom: regions open into modules, then functions, as you get closer;
   - size and brightness by importance (callers, runtime calls), entry points marked;
   - search, focus (the functions N calls around a selection) and filters (tests, private helpers).
+- [x] A minimal look: neutral greys, one accent (the theme's), a muted tint per file; calls trace
+  their line from caller to callee; no legend.
+- A Luciole sidebar: actions, running programs, a map outline with search (PR #13).
 
-### Phase 3: Agents
-
-- A `luciole mcp` server, a client of the engine. Tools: graph queries (neighbors, callers,
-  slicing), recording a run, calls per function, comparing two runs, and breakpoints and
-  inspection on the shared debug session.
-- A Claude Code plugin: the MCP server, a skill that teaches when and how to debug with Luciole,
-  and slash commands. Optional hooks, such as recording a failing test run automatically.
-- The agent's activity shown on the graph: what it looks at glows, its breakpoints appear.
-- Safety: running a program needs explicit approval; answers are summarized and paginated.
-- A small benchmark of planted bugs, with and without Luciole. Listing in the MCP registry.
-
-### Phase 4: Recording and time travel (Python)
+### Phase 3: History and agents (one track)
 
 The "debugger on steroids": VS Code's debugger does live control, Luciole's recorder keeps the
-history. Trace functions, go back in time, watch a variable's value evolve across a run.
+history, and Claude reads it through an MCP server. The goal: go to the origin of anything (a
+value, a call, an object, an exception), for you in the view and for Claude through MCP.
 
-- Variable-level events: values on function entry and return and on assignments, with size limits
-  and redaction of secrets.
-- Trace storage (SQLite or a column store), indexed by node and by time.
-- A replay timeline in the view: scrub back and forth, with the graph replaying.
-- Stepping backwards through recorded runs.
-- MCP tools for values, runtime slicing and value-level comparison of runs.
+The key idea: the static graph already holds every possible data path (`flows_to`, `passes_arg`,
+`returns`, reads, writes). The recorder only captures which paths actually happened and with which
+values. Together they answer "where does this come from" without tracking every instruction.
+
+**The trace: one per run, in SQLite** (standard library):
+- *frames*: id, function (node id), caller frame, thread, start/end time, arguments, return value
+  or exception: the **call tree**;
+- *writes*: variable (node id), frame, line, time, value: each variable's **history**;
+- *values*: capped snapshots (type, short repr, first items of containers), with secret redaction
+  (`password`, `token`, `key`…) and size limits per value and per run.
+
+**Levels**, since recording everything is slow; `sys.monitoring` turns detailed events on per
+function, which keeps the cost where you look:
+- level 0, always on: call tree, timings, exceptions;
+- level 1: arguments and return values of project functions;
+- level 2, scoped: every assignment in chosen functions (variable history);
+- level 3, narrow: instruction-level detail in one function, for exact provenance.
+
+The debugging loop (yours or Claude's): run the failing test at level 0/1, spot the suspicious
+function, re-run with level 2 on that area, ask origin questions. Re-running with more detail is
+much simpler than exact replay, and most bugs reproduce under a test.
+
+**Origins:**
+- a value: its last write before that moment and that line; the static edges say which operands
+  fed the line, the trace gives their values then; recurse. A dynamic backward slice (the vision's
+  "Trace" mode);
+- a call: its caller frame and call site, including dynamic calls the static graph never saw;
+- an object: where it was created, and every place that changed its attributes;
+- an exception: where it was raised, its chain, the values on the way.
+
+**Steps, in order:**
+
+| Step | What | Rough effort |
+|---|---|---|
+| 1 | Trace store: call tree, arguments/returns, exceptions (levels 0–1) | 1–1.5 weeks |
+| 2 | `luciole mcp`: trace queries plus graph queries (neighbors, callers, slicing) | ~1 week |
+| 3 | Scoped variable history (level 2), redaction, limits | 1–2 weeks |
+| 4 | Origin queries: dynamic slicing over static edges and the trace | ~2 weeks |
+| 5 | In VS Code: a timeline to scrub (the brain replays), a function's variables and their values over time, origin paths lit on the brain | ~2 weeks |
+| 6 | Later: stepping backwards in the debugger over a recording; level 3 provenance | — |
+
+MCP tools (summarized and paginated answers): `run(command, level, scope)`, `call_tree`,
+`calls_of(function)` with arguments and returns, `variable_history`, `origin_of(variable, frame,
+time)`, `exceptions`, `diff_runs`, and the graph queries. Then a Claude Code plugin (the MCP server,
+a skill teaching when to debug with Luciole, slash commands, optional hooks such as recording a
+failing test), the agent's activity shown on the graph, explicit approval to run programs, and a
+benchmark of planted bugs with and without Luciole. Several clients on one debug session (a DAP
+proxy around debugpy, owned by the engine) comes when an agent needs to drive the debugger live.
+
+Effort goes first to the trace store and origin queries (what nothing else offers); the MCP
+server early, so Claude is the first user of the data model; the UI after, starting minimal.
 
 ### Phase 5: Beyond VS Code
 
@@ -160,6 +197,23 @@ history. Trace functions, go back in time, watch a variable's value evolve acros
 Jupyter (`%load_ext luciole`), a pytest plugin, export to the Chrome/Perfetto trace format,
 recordings made in CI opened locally, distributed tracing (OpenTelemetry) across services,
 aggregates per GPU kernel, sharing recordings with teammates.
+
+## Code health
+
+The codebase must stay easy to change as it grows. Standing rules:
+
+- **Contracts between parts.** The graph format, the live protocol and (soon) the trace schema are
+  documented and tested; parts talk only through them (analyzer, recorder, engine, extension, MCP).
+  A change to a contract updates its doc and its tests in the same PR.
+- **Logic outside the UI.** Anything that can be computed (layout, flow timing, run
+  configurations, tree data, queries) lives in modules with no `vscode` or `three` import, with
+  unit tests. `main.ts` and `extension.ts` only wire things up.
+- **Size limits as a signal.** A file past ~800 lines, or a function past ~80, is split at the next
+  feature that touches it, as its own commit. Today: `analyzer.py`, `main.ts` and `recorder.py` are
+  near or over.
+- **A cleanup PR after each feature cluster**: dead code, duplicated helpers, names that no longer
+  fit, docs that drifted. Reviewed like a feature.
+- **Every PR reviewed** (code review pass plus the hands-on checklist) before it merges.
 
 ## Delivery rules
 
