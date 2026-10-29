@@ -98,11 +98,18 @@ share the same session.
   `type()`).
 - [x] Callbacks: a function passed as an argument (`Thread(target=f)`, `pool.submit(f)`,
   `key=f`, event handlers) is linked to the function passing it (`"callback": true`).
-- Scale: whole-folder graphs of 30k+ lines that stay readable (search, filtering, modules that
-  collapse and expand).
-- Decide the future of live mode's own pause/step/Variables view. Partly decided: under VS Code's
-  debugger, pausing and stepping are the debugger's (Luciole's buttons hide and drive it); live
-  mode's own pause remains for ⚡ Run Live.
+- Run Live under VS Code's debugger: every run starts through debugpy with the recorder on, so
+  live control (breakpoints, stepping, Variables, Call Stack, console) is the debugger's. Decided:
+  Luciole's own pause/step buttons and Variables view go; the recorder keeps its value snapshots
+  and pause/step protocol for engine clients and for phase 4.
+- Scale, a structured layout instead of one force-directed cloud:
+  - regions inside regions (packages → modules → classes → functions): nearness means "same
+    module";
+  - stable positions, seeded from paths: the same project always gives the same map;
+  - calls between regions bundled into tracts; region labels, so the overview reads like a map;
+  - semantic zoom: regions open into modules, then functions, as you get closer;
+  - size and brightness by importance (callers, runtime calls), entry points marked;
+  - search, focus (the functions N calls around a selection) and filters (tests, private helpers).
 
 ### Phase 3: Agents
 
@@ -116,6 +123,9 @@ share the same session.
 - A small benchmark of planted bugs, with and without Luciole. Listing in the MCP registry.
 
 ### Phase 4: Recording and time travel (Python)
+
+The "debugger on steroids": VS Code's debugger does live control, Luciole's recorder keeps the
+history. Trace functions, go back in time, watch a variable's value evolve across a run.
 
 - Variable-level events: values on function entry and return and on assignments, with size limits
   and redaction of secrets.
