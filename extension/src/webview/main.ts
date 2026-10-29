@@ -41,6 +41,8 @@ const VISITED = 0.12;
 const MAX_PULSES_PER_LINK = 3;
 /** Lines of the bottom bar: one per thread, then what is waiting. */
 const MAX_PATH_LINES = 5;
+/** Above this many shown labels, overlapping ones are not hidden (it costs pairs of labels). */
+const MAX_DECLUTTERED = 300;
 
 const vscode = acquireVsCodeApi();
 const statusEl = document.getElementById("status")!;
@@ -56,6 +58,8 @@ const css = getComputedStyle(document.body);
 const cssColor = (name: string, fallback: string) => css.getPropertyValue(name).trim() || fallback;
 const background = cssColor("--vscode-editor-background", "#1e1e1e");
 const foreground = cssColor("--vscode-editor-foreground", "#cccccc");
+/** Behind labels, so they read over spheres and lines. */
+const labelBackground = `#${new THREE.Color(background).getHexString()}b3`;
 /** Running. */
 const AMBER = new THREE.Color("#ffc94d");
 /** Suspended on an await. */
@@ -162,6 +166,7 @@ function neuronObject(node: NeuronNode): THREE.Object3D {
   const mark = new THREE.Sprite(new THREE.SpriteMaterial({ map: dotTexture, color: RED, transparent: true, opacity: 0, depthWrite: false, depthTest: false }));
   mark.scale.setScalar(Math.max(2.5, radius * 0.9));
   mark.position.set(radius * 0.85, radius * 0.85, 0);
+  mark.renderOrder = 2; // over labels
   group.add(mark);
   node.parts = { material, halo, spark, mark, radius, base };
   return group;
@@ -219,12 +224,67 @@ function makeDotTexture(): THREE.Texture {
 function label(node: NeuronNode): SpriteText {
   const parts = node.parts!;
   if (!parts.label) {
-    parts.label = new SpriteText(node.neuron.label, 3.2, foreground);
-    parts.label.fontFace = css.getPropertyValue("--vscode-editor-font-family").trim() || "monospace";
-    parts.label.position.y = parts.radius + 4;
-    parts.halo.parent!.add(parts.label);
+    const text = new SpriteText(node.neuron.label, 3.2, foreground);
+    text.fontFace = css.getPropertyValue("--vscode-editor-font-family").trim() || "monospace";
+    text.backgroundColor = labelBackground;
+    text.padding = [0.8, 0.3];
+    text.borderRadius = 1;
+    // Drawn over the spheres: a neighbour in front no longer hides it (declutterLabels hides
+    // labels that overlap a more important one instead).
+    text.material.depthTest = false;
+    text.material.depthWrite = false;
+    text.renderOrder = 1;
+    // Just above the sphere and its breakpoint dot, whatever their size.
+    text.position.y = Math.max(parts.radius, parts.mark.position.y + parts.mark.scale.y / 2) + 1.5 + text.scale.y / 2;
+    parts.halo.parent!.add(text);
+    parts.label = text;
   }
   return parts.label;
+}
+
+/** Which label stays when two overlap on screen: the hovered one, where the debugger stopped, what runs. */
+function labelPriority(node: NeuronNode): number {
+  const rank =
+    node === hovered ? 5 : node.id === stoppedIn ? 4 : onStack.has(node.id) ? 3 : node.heat > 0.15 || waiting.has(node.id) ? 2 : breakpointNodes.has(node.id) ? 1 : 0;
+  return rank * 1000 + node.parts!.radius; // then bigger (more connected) neurons first
+}
+
+const corner = new THREE.Vector3();
+const cameraRight = new THREE.Vector3();
+const cameraUp = new THREE.Vector3();
+
+/** Hides labels that overlap a more important one on screen, so the ones left can be read. */
+function declutterLabels(): void {
+  const shown = nodes.filter((node) => node.parts?.label?.visible);
+  if (shown.length < 2 || shown.length > MAX_DECLUTTERED) {
+    return;
+  }
+  const camera = graph.camera();
+  const element = document.getElementById("brain")!;
+  const [width, height] = [element.clientWidth, element.clientHeight];
+  cameraRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+  cameraUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  const toScreen = (dx: number, dy: number, from: THREE.Vector3) => {
+    corner.copy(from).addScaledVector(cameraRight, dx).addScaledVector(cameraUp, dy).project(camera);
+    return { x: ((corner.x + 1) / 2) * width, y: ((1 - corner.y) / 2) * height, z: corner.z };
+  };
+  const placed: { left: number; right: number; top: number; bottom: number }[] = [];
+  const center = new THREE.Vector3();
+  for (const node of shown.sort((a, b) => labelPriority(b) - labelPriority(a))) {
+    const text = node.parts!.label!;
+    text.getWorldPosition(center);
+    const a = toScreen(-text.scale.x / 2, text.scale.y / 2, center);
+    const b = toScreen(text.scale.x / 2, -text.scale.y / 2, center);
+    if (a.z > 1 || b.z > 1) {
+      continue; // behind the camera
+    }
+    const box = { left: Math.min(a.x, b.x), right: Math.max(a.x, b.x), top: Math.min(a.y, b.y), bottom: Math.max(a.y, b.y) };
+    if (placed.some((p) => box.left < p.right && p.left < box.right && box.top < p.bottom && p.top < box.bottom)) {
+      text.visible = false;
+    } else {
+      placed.push(box);
+    }
+  }
 }
 
 // Tooltips (text only: names come from the analyzed code)
@@ -284,6 +344,7 @@ function animate(now: number): void {
       label(node).visible = wantsLabel;
     }
   }
+  declutterLabels();
   for (const link of links) {
     link.heat = pathway.has(link) ? 1 : Math.max(link.heat * fade, visited.has(link.id) ? VISITED : 0);
     if (link.line) {
