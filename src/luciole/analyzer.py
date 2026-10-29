@@ -836,9 +836,9 @@ class FlowVisitor:
                         self.an.add_edge("calls", self.actor, getter, pos(node))
                 return_var = self.an.scopes[target].return_var
                 return [(return_var, pos(node))] if return_var else []
-            if target or isinstance(node, ast.Name):
+            if (target and not by_name) or isinstance(node, ast.Name):
                 return []
-            return self.expr(node.value)
+            return self.expr(node.value)  # a method guessed by name doesn't hide where `obj` comes from
         if isinstance(node, ast.Subscript):
             self.dunder(node.value, "__delitem__" if isinstance(node.ctx, ast.Del) else "__getitem__", node)
         elif isinstance(node, ast.Compare):
