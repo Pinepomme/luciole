@@ -13,6 +13,12 @@ and time travel), and only then widen to other editors and languages.
   call path, pulses along calls, threads and asyncio tasks, and calls found only at runtime.
 - **Debugger controls in live mode**: Stop, Pause/Resume, Step over/into/out, and a Variables
   view (threads, call stack, expandable values, the stopped line highlighted).
+- **The engine** (`luciole engine`) and **auto-start**: any Python process (terminal runs, test
+  runners, child processes, debug sessions) lights up the view, with no change to how it starts.
+- **Debugging with the graph**: VS Code's Python debugger and the brain together (the stopped
+  function glows red, breakpoints from neurons).
+- **Call resolution** without a type checker, including callbacks (`Thread(target=f)`): on the
+  standard library's `email` and `asyncio`, missing runtime calls went from 52% to 27%.
 
 ## Target architecture
 
@@ -81,7 +87,7 @@ share the same session.
   proxy, which only phase 3 needs.
 - [x] Graph-driven debugging: right-click a neuron to stop the next time that function runs (a
   VS Code breakpoint on its first body line, in the Breakpoints view); neurons holding a
-  breakpoint show a red dot.
+  breakpoint show a red dot. Tested by hand in VS Code on WSL (2026-10-29).
 - Several clients on one session (needed by phase 3: you and an agent on the same run): a DAP
   proxy around debugpy, owned by the engine.
 - [x] Better call resolution, with the standard library only (no Pyright or jedi): imports, star
@@ -90,9 +96,13 @@ share the same session.
   runtime calls on `email` + `asyncio`: 52% → 27% (`scripts/missing_calls.py`). What remains needs
   types the code never states (unannotated parameters, `getattr` dispatch, classes built with
   `type()`).
+- [x] Callbacks: a function passed as an argument (`Thread(target=f)`, `pool.submit(f)`,
+  `key=f`, event handlers) is linked to the function passing it (`"callback": true`).
 - Scale: whole-folder graphs of 30k+ lines that stay readable (search, filtering, modules that
   collapse and expand).
-- Decide the future of live mode's own pause/step/Variables view.
+- Decide the future of live mode's own pause/step/Variables view. Partly decided: under VS Code's
+  debugger, pausing and stepping are the debugger's (Luciole's buttons hide and drive it); live
+  mode's own pause remains for ⚡ Run Live.
 
 ### Phase 3: Agents
 
