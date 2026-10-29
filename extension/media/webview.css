@@ -77,34 +77,6 @@ button[hidden],
   color: var(--vscode-descriptionForeground);
 }
 
-#legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  color: var(--vscode-descriptionForeground);
-}
-
-.key::before {
-  content: "";
-  display: inline-block;
-  width: 18px;
-  margin-right: 5px;
-  vertical-align: middle;
-  border-top: 2px solid var(--key-color);
-}
-
-.key.call { --key-color: #6f8bb3; }
-.key.state { --key-color: #8a6fb3; }
-.key.runtime { --key-color: #d18616; }
-.key.spawn { --key-color: #4fb3a9; }
-.key.waiting::before {
-  width: 9px;
-  height: 9px;
-  border: none;
-  border-radius: 50%;
-  background: #5aa9ff;
-}
-
 #brain {
   flex: 1;
   min-height: 0;
