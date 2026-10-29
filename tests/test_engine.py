@@ -169,6 +169,20 @@ def test_luciole_engine_leaves_a_running_engine(engine):
     assert protocol.engine_port() == engine.port
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM is not a signal on Windows")
+def test_luciole_engine_removes_its_file_when_terminated():
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    process = subprocess.Popen([sys.executable, "-m", "luciole", "engine"], env=env, stderr=subprocess.PIPE, text=True)
+    process.stderr.readline()  # "engine on port ...": its file is written
+    deadline = time.monotonic() + 10
+    while protocol.engine_port() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert protocol.engine_port() is not None
+    process.terminate()
+    assert process.wait(timeout=10) == 0
+    assert not protocol.engine_file().exists()
+
+
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="sys.monitoring needs Python 3.12")
 def test_luciole_run_reports_to_the_running_engine(engine, tmp_path):
     while protocol.engine_port() != engine.port:
