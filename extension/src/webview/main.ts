@@ -581,7 +581,7 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
     onDebugStopped(message.at);
   } else if (message.type === "liveState") {
     const { running, stopping } = message.state;
-    stopButton.hidden = !running;
+    stopButton.hidden = !running || message.state.debugged; // the debug toolbar stops a debugged run
     stopButton.textContent = stopping ? "Force stop" : "Stop";
     if (running && stopping) {
       setStatus("stopping…");

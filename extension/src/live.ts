@@ -29,7 +29,7 @@ export interface EngineOptions {
   version: string;
 }
 
-const IDLE: LiveState = { running: false, stopping: false };
+const IDLE: LiveState = { running: false, stopping: false, debugged: false };
 
 /** What the engine sends: its handshake, processes coming and going, and their messages. */
 type EngineMessage = LiveFrame & {
@@ -147,7 +147,7 @@ export class LiveSession implements vscode.Disposable {
     await this.endPrevious();
     const run: { session?: vscode.DebugSession } = {};
     this.debugRun = run;
-    this.setState({ ...IDLE, running: true });
+    this.setState({ ...IDLE, running: true, debugged: true });
     this.log.appendLine(`debugging ${config.module ? `-m ${config.module}` : config.program} ${config.args.join(" ")}`.trimEnd());
     const started = await vscode.debug.startDebugging(folder, config);
     if (!started && this.debugRun === run) {
@@ -251,7 +251,8 @@ export class LiveSession implements vscode.Disposable {
   private update(): void {
     const running = this.launching !== undefined || this.debugRun !== undefined || this.processes.active.length > 0;
     if (running && !this.state.running) {
-      this.setState({ ...IDLE, running: true });
+      // A program started by the user's own debug session, with auto-start on, is under the debugger too.
+      this.setState({ ...IDLE, running: true, debugged: this.debugRun !== undefined || vscode.debug.activeDebugSession !== undefined });
     } else if (!running && this.state.running) {
       this.listener.frame({ done: true });
       this.setState(IDLE);

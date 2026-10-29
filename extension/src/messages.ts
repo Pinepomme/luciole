@@ -29,6 +29,8 @@ export interface LiveState {
   running: boolean;
   /** Stop was asked once already: stopping a terminal run again kills the process. */
   stopping: boolean;
+  /** The run is under VS Code's debugger: its toolbar stops it, so the panel shows no Stop. */
+  debugged: boolean;
 }
 
 export type ToWebview =

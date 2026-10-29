@@ -25,8 +25,9 @@ the functions light up as they run.
   script, `pytest`, a server, and the processes they start. Nothing changes in how programs run,
   and with the switch off nothing is set at all. Terminals opened before the switch keep their old
   setting: open a new one.
-- **Stop** (in the panel's toolbar, or the debug toolbar) ends the debug session. A run in a plain
-  terminal (no Python Debugger extension, or auto-start) is interrupted like Ctrl+C: it gets a
+- **Stop**: a run under the debugger is stopped from VS Code's debug toolbar, which also pauses and
+  steps it (the panel shows no buttons of its own then). A run in a plain terminal (no Python
+  Debugger extension, or auto-start) has a Stop in the panel, which interrupts it like Ctrl+C: it gets a
   `KeyboardInterrupt`, its `finally` blocks run, and the traceback in the terminal shows where it
   was. If it keeps running (it catches the interrupt, or threads keep it alive), press
   **Force stop** to kill it.
