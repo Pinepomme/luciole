@@ -659,12 +659,12 @@ class FlowVisitor:
             for target in node.targets:
                 self.assign_typed(target, node.value, flows)
         elif isinstance(node, ast.AnnAssign):
-            if node.value:
-                self.assign_typed(node.target, node.value, self.expr(node.value))
             cls = self.an.annotation_class(self.scope, node.annotation)
             var = self.ref(node.target)
             if cls and self.an.is_variable(var):
-                self.an.var_types.setdefault(var, cls)
+                self.an.var_types[var] = cls
+            if node.value:  # the value's class, when plain, is more precise than the annotation
+                self.assign_typed(node.target, node.value, self.expr(node.value))
         elif isinstance(node, ast.AugAssign):
             targets = self.targets(node.target)
             for var, target in targets:
@@ -695,7 +695,7 @@ class FlowVisitor:
                     entered = self.an.return_type(enter) if self.an.kind(enter) == "function" else None
                     for var, target in targets:
                         if entered and target is item.optional_vars:
-                            self.an.var_types.setdefault(var, entered)
+                            self.an.var_types[var] = entered
             self.run(node.body)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             self.imports(node)
@@ -744,8 +744,8 @@ class FlowVisitor:
         held = self.held_function(value)
         for var, node in targets:
             if node is target:
-                if cls:
-                    self.an.var_types.setdefault(var, cls)
+                if cls:  # the latest assignment wins: code mostly runs in source order
+                    self.an.var_types[var] = cls
                 if held:
                     self.an.aliases.setdefault(var, held)
 
