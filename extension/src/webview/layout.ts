@@ -379,18 +379,6 @@ export function bundle(start: Vec3, via: Vec3[], end: Vec3, beta = 0.97, perSpan
   return out;
 }
 
-/**
- * A hue (0-360) for a neuron or a region, from the regions holding it: top-level regions far
- * apart, the regions inside one around its hue. Regions holding everything (the root, the
- * module of a single file) don't count: their insides get the colors.
- */
-export function regionHue(layout: Layout, id: string): number {
-  const all = layout.regions.get("")?.size ?? 0;
-  const chain = (layout.chains.get(id) ?? regionChain(layout, id)).filter((r, i, c) => i === c.length - 1 || layout.regions.get(r)!.size < all);
-  const base = hash(chain[0] ?? id) % 360;
-  return chain[1] === undefined ? base : (base + (hash(chain[1]) % 90) - 45 + 360) % 360;
-}
-
 /** The neurons inside each region, at any depth. */
 export function regionMembers(layout: Layout): Map<string, string[]> {
   const members = new Map<string, string[]>();

@@ -1,55 +1,34 @@
 /**
- * The light that flows along synapses in live mode: a wave leaves the caller and glides to the
- * callee, brightest at its head with a fading tail. Waves keep their own slow pace, whatever the
- * speed of the calls: on a busy synapse they follow one another closely and merge into a steady
- * glow. Pure (no three.js): main.ts draws what this computes, in a shader that mirrors
- * `brightness`.
+ * How a synapse shows a call in live mode: the line traces itself from the caller to the callee
+ * in the accent color, like a route drawing itself on a map, then eases back to grey. A busy line
+ * stays drawn until its calls stop: calls never stack up or restart the sweep. Pure (no
+ * three.js): main.ts draws the part of the line this says is drawn.
  */
 
-/** One wave of light on a synapse. Times in seconds, positions along the line from 0 (caller) to 1 (callee). */
-export interface Wave {
+/** A call traced along a synapse. Times in seconds. */
+export interface Trace {
+  /** When the sweep left the caller. */
   start: number;
-  /** Seconds for the head to cross the line and the tail to leave it. */
-  duration: number;
-  /** 0 to 1: more calls, a brighter wave. */
-  strength: number;
+  /** Seconds for the sweep to reach the callee. */
+  crossing: number;
+  /** The latest call: the line stays drawn until HOLD after it. */
+  last: number;
+  /** A call during the fade: the line comes back up from `from`, its opacity then. */
+  rise?: { at: number; from: number };
 }
 
-/** Most waves at once on one synapse (the shader's array size). */
-export const MAX_WAVES = 4;
-/** Seconds between two waves leaving on one synapse: calls in between brighten the last one. */
-export const WAVE_GAP = 0.3;
-/** Seconds to cross, from short lines to long tracts. */
-export const CROSSING = { min: 0.7, max: 1.2 } as const;
-/** Length (world units) of a wave's tail on long lines; on short ones it is a share of the line. */
-const TAIL = 45;
-/** Synapses lit at once before their light dims, so a busy brain doesn't blow out where lines cross. */
-const CROWD = 30;
-/** How fast summed waves saturate: brightness is 1 - exp(-SATURATION * sum). */
-const SATURATION = 2.0;
+/** Seconds for the sweep to cross, from short lines to long tracts. */
+export const CROSSING = { min: 0.3, max: 0.4 } as const;
+/** Seconds a line stays drawn after its last call (live frames come every 50 ms). */
+export const HOLD = 0.25;
+/** Seconds to ease back to grey. */
+export const FADE_OUT = 0.5;
+/** Seconds for a fading line to come back up when called again. */
+export const RISE = 0.15;
 
-/** Seconds a wave takes on a line of this length (world units). */
+/** Seconds the sweep takes on a line of this length (world units). */
 export function crossingTime(length: number): number {
   return CROSSING.min + (CROSSING.max - CROSSING.min) * Math.min(1, Math.max(0, length / 400));
-}
-
-/** A wave's tail, as a share of a line of this length. */
-export function tailLength(length: number): number {
-  return Math.min(0.6, Math.max(0.15, TAIL / Math.max(length, 1)));
-}
-
-/**
- * `count` calls along a synapse at `now`: a new wave, unless one left less than WAVE_GAP ago or
- * the line is full, in which case the newest wave brightens. Returns the waves (changed in place).
- */
-export function addCalls(waves: Wave[], count: number, now: number, length: number): Wave[] {
-  const newest = waves[waves.length - 1];
-  if (newest && (now - newest.start < WAVE_GAP || waves.length >= MAX_WAVES)) {
-    newest.strength = Math.min(1, newest.strength + 0.15 * count);
-  } else {
-    waves.push({ start: now, duration: crossingTime(length), strength: 0.75 + 0.25 * (1 - 1 / (1 + count)) });
-  }
-  return waves;
 }
 
 /** Eased progress: slow to leave, slow to arrive. */
@@ -57,71 +36,58 @@ export function ease(p: number): number {
   return 0.5 - 0.5 * Math.cos(Math.PI * Math.min(1, Math.max(0, p)));
 }
 
-/** Where a wave's head is at `now`: from 0 to 1 + tail, so the tail leaves the line too. */
-export function headAt(wave: Wave, now: number, tail: number): number {
-  return ease((now - wave.start) / wave.duration) * (1 + tail);
-}
-
-/** Drops the waves that have left their line. */
-export function prune(waves: Wave[], now: number): Wave[] {
-  return waves.filter((wave) => now - wave.start < wave.duration);
-}
-
 /**
- * Light of one wave at `s` along the line, its head at `head`: 1 at the head, a short soft front
- * ahead of it, a tail fading behind.
+ * How much of the line is drawn at `now` (`head`, 0 at the caller to 1 at the callee) and how
+ * strongly (`opacity`, 0 to 1); undefined once it is back to grey.
  */
-export function profile(s: number, head: number, tail: number): number {
-  const behind = head - s;
-  if (behind < 0) {
-    const front = behind / (0.12 * tail);
-    return Math.exp(-front * front);
+export function traceAt(trace: Trace, now: number): { head: number; opacity: number; fading: boolean } | undefined {
+  const head = ease((now - trace.start) / trace.crossing);
+  const rise = trace.rise ? trace.rise.from + (1 - trace.rise.from) * ease((now - trace.rise.at) / RISE) : 1;
+  const holdEnd = Math.max(trace.start + trace.crossing, trace.last + HOLD);
+  if (now <= holdEnd) {
+    return { head, opacity: rise, fading: false };
   }
-  const left = Math.max(0, 1 - behind / tail);
-  return left * left;
-}
-
-/** The waves on a line as the shader takes them: head position and strength of each. */
-export function waveState(waves: Wave[], now: number, tail: number): { head: number; strength: number }[] {
-  return waves.map((wave) => {
-    const p = (now - wave.start) / wave.duration;
-    // Fades in as it leaves, so a wave doesn't pop up at full strength.
-    return { head: headAt(wave, now, tail), strength: wave.strength * Math.min(1, p * 8) };
-  });
+  const fade = (now - holdEnd) / FADE_OUT;
+  return fade >= 1 ? undefined : { head, opacity: rise * (1 - ease(fade)), fading: true };
 }
 
 /**
- * How much the whole line glows while waves pass along it, besides the waves themselves: up as a
- * wave leaves, down as it arrives.
+ * A call along a synapse at `now`: a new sweep on an idle line; on a line being drawn or held,
+ * it only keeps the line drawn longer; on a fading one, the line comes back up where it is.
  */
-export function lineGlow(waves: Wave[], now: number): number {
-  let glow = 0;
-  for (const wave of waves) {
-    const p = Math.min(1, Math.max(0, (now - wave.start) / wave.duration));
-    glow = Math.max(glow, 0.12 * wave.strength * Math.sin(Math.PI * p));
+export function addCall(trace: Trace | undefined, now: number, length: number): Trace {
+  const state = trace && traceAt(trace, now);
+  if (!trace || !state) {
+    return { start: now, crossing: crossingTime(length), last: now };
   }
-  return glow;
-}
-
-/**
- * Light at `s` along the line: the waves add up, plus the line's glow, and saturate towards 1
- * instead of blowing out. The fragment shader in main.ts computes the same.
- */
-export function brightness(s: number, waves: { head: number; strength: number }[], tail: number, glow = 0): number {
-  let sum = glow;
-  for (const { head, strength } of waves) {
-    sum += strength * profile(s, head, tail);
+  if (state.fading) {
+    trace.rise = { at: now, from: state.opacity };
   }
-  return 1 - Math.exp(-SATURATION * sum);
+  trace.last = Math.max(trace.last, now);
+  return trace;
 }
 
 /**
- * How bright each line's light is when `flowing` synapses have some: full up to CROWD, then dimmer
- * as more light up, so that lines crossing or running together in tracts add up to a glow instead
- * of a white blur.
+ * The drawn part of a polyline whose points are at `along` (0 to 1): the points before `head`,
+ * then the point at `head` itself, so the stroke ends exactly there.
  */
-export function crowdGain(flowing: number): number {
-  return Math.min(1, Math.sqrt(CROWD / Math.max(flowing, 1)));
+export function partOf<P extends { x: number; y: number; z: number }>(points: P[], along: number[], head: number): { x: number; y: number; z: number }[] {
+  if (head >= 1) {
+    return points;
+  }
+  const out: { x: number; y: number; z: number }[] = [points[0]];
+  for (let i = 1; i < points.length; i++) {
+    if (along[i] < head) {
+      out.push(points[i]);
+      continue;
+    }
+    const span = along[i] - along[i - 1];
+    const t = span > 0 ? (head - along[i - 1]) / span : 1;
+    const [a, b] = [points[i - 1], points[i]];
+    out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t });
+    break;
+  }
+  return out;
 }
 
 /** Positions along a polyline, 0 at its first point and 1 at its last, by length; and its length. */

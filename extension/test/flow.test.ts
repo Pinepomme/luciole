@@ -1,85 +1,74 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { addCalls, alongPolyline, brightness, CROSSING, crossingTime, crowdGain, ease, headAt, lineGlow, MAX_WAVES, profile, prune, tailLength, Wave, WAVE_GAP, waveState } from "../src/webview/flow";
+import { addCall, alongPolyline, CROSSING, crossingTime, ease, FADE_OUT, HOLD, partOf, RISE, traceAt } from "../src/webview/flow";
 
-test("waves take their own time to cross, longer on longer lines, whatever the call rate", () => {
+test("the sweep takes its own short time to cross, a little longer on longer lines", () => {
   assert.equal(crossingTime(0), CROSSING.min);
   assert.equal(crossingTime(10_000), CROSSING.max);
   assert.ok(crossingTime(100) < crossingTime(300));
-  // A thousand calls at once still make one wave of the same pace.
-  const waves = addCalls([], 1000, 5, 100);
-  assert.equal(waves.length, 1);
-  assert.equal(waves[0].duration, crossingTime(100));
-  assert.ok(waves[0].strength <= 1);
-});
-
-test("calls close together brighten the last wave; spaced calls start new ones, up to a few", () => {
-  const waves: Wave[] = [];
-  addCalls(waves, 1, 0, 100);
-  const first = waves[0].strength;
-  addCalls(waves, 1, WAVE_GAP / 2, 100);
-  assert.equal(waves.length, 1);
-  assert.ok(waves[0].strength > first);
-  for (let i = 1; i <= 10; i++) {
-    addCalls(waves, 1, i * WAVE_GAP, 100);
-  }
-  assert.equal(waves.length, MAX_WAVES);
-  assert.ok(waves.every((w) => w.strength <= 1));
-});
-
-test("a wave leaves the caller, reaches the callee eased, then its tail leaves too", () => {
-  const wave: Wave = { start: 0, duration: 1, strength: 1 };
-  const tail = 0.3;
-  assert.equal(headAt(wave, 0, tail), 0);
-  assert.ok(Math.abs(headAt(wave, 1, tail) - (1 + tail)) < 1e-9);
-  // Eased: slower at both ends than in the middle.
-  assert.ok(headAt(wave, 0.1, tail) < 0.1 * (1 + tail));
-  assert.ok(headAt(wave, 0.5, tail) > 0.45 * (1 + tail));
   assert.equal(ease(-1), 0);
   assert.equal(ease(2), 1);
-  assert.deepEqual(prune([wave], 0.5), [wave]);
-  assert.deepEqual(prune([wave], 1), []);
 });
 
-test("brightest at the head, a fading tail behind, a short front ahead", () => {
-  const tail = 0.3;
-  assert.equal(profile(0.5, 0.5, tail), 1);
-  assert.ok(profile(0.4, 0.5, tail) > profile(0.3, 0.5, tail));
-  assert.equal(profile(0.5 - tail, 0.5, tail), 0);
-  assert.ok(profile(0.52, 0.5, tail) < profile(0.48, 0.5, tail));
-  assert.ok(profile(0.6, 0.5, tail) < 0.01);
+test("a call draws the line from the caller to the callee, eased, then it fades back to grey", () => {
+  const trace = addCall(undefined, 0, 0);
+  const crossing = CROSSING.min;
+  assert.deepEqual(traceAt(trace, 0), { head: 0, opacity: 1, fading: false });
+  // Eased: slower at both ends than in the middle.
+  assert.ok(traceAt(trace, 0.1 * crossing)!.head < 0.1);
+  assert.ok(traceAt(trace, 0.5 * crossing)!.head > 0.45);
+  assert.equal(traceAt(trace, crossing)!.head, 1);
+  // Held a moment once drawn, then fading out.
+  const holdEnd = Math.max(crossing, HOLD);
+  assert.equal(traceAt(trace, holdEnd)!.opacity, 1);
+  const fading = traceAt(trace, holdEnd + FADE_OUT / 2)!;
+  assert.ok(fading.fading && fading.opacity > 0.4 && fading.opacity < 0.6);
+  assert.equal(traceAt(trace, holdEnd + FADE_OUT), undefined);
 });
 
-test("waves add up and saturate instead of blowing out", () => {
-  const one = brightness(0.5, [{ head: 0.5, strength: 1 }], 0.3);
-  const many = brightness(0.5, Array.from({ length: MAX_WAVES }, () => ({ head: 0.5, strength: 1 })), 0.3);
-  assert.ok(one > 0.5 && one < 1);
-  assert.ok(many > one && many < 1);
-  assert.equal(brightness(0.5, [], 0.3), 0);
-  // The line's own glow lights it all along.
-  assert.ok(brightness(0.1, [], 0.3, 0.2) > 0);
+test("a busy line stays drawn: calls neither stack nor restart the sweep", () => {
+  let trace = addCall(undefined, 0, 100);
+  for (let t = 0.05; t < 3; t += 0.05) {
+    const again = addCall(trace, t, 100);
+    assert.equal(again, trace);
+    trace = again;
+    const state = traceAt(trace, t)!;
+    assert.equal(state.opacity, 1);
+    assert.ok(t < trace.crossing || state.head === 1);
+  }
+  assert.equal(trace.start, 0);
+  assert.ok(traceAt(trace, 3 + HOLD + FADE_OUT / 2)!.fading);
 });
 
-test("a new wave fades in, and the line glows while waves pass", () => {
-  const waves: Wave[] = [{ start: 0, duration: 1, strength: 1 }];
-  assert.equal(waveState(waves, 0, 0.3)[0].strength, 0);
-  assert.equal(waveState(waves, 0.5, 0.3)[0].strength, 1);
-  assert.equal(lineGlow(waves, 0), 0);
-  assert.ok(lineGlow(waves, 0.5) > lineGlow(waves, 0.1));
-  assert.equal(lineGlow([], 0.5), 0);
+test("a call while the line fades brings it back up smoothly, without redrawing it", () => {
+  const trace = addCall(undefined, 0, 0);
+  const t = Math.max(CROSSING.min, HOLD) + FADE_OUT / 2;
+  const before = traceAt(trace, t)!.opacity;
+  addCall(trace, t, 0);
+  const after = traceAt(trace, t)!;
+  assert.ok(Math.abs(after.opacity - before) < 1e-9);
+  assert.equal(after.head, 1);
+  assert.ok(traceAt(trace, t + RISE / 2)!.opacity > before);
+  assert.equal(traceAt(trace, t + RISE)!.opacity, 1);
 });
 
-test("many lit synapses dim together, a few keep their full light", () => {
-  assert.equal(crowdGain(0), 1);
-  assert.equal(crowdGain(10), 1);
-  assert.ok(crowdGain(1000) < crowdGain(100));
-  assert.ok(crowdGain(1000) > 0);
+test("an idle line starts a new sweep", () => {
+  const trace = addCall(undefined, 0, 0);
+  const next = addCall(trace, 10, 0);
+  assert.notEqual(next, trace);
+  assert.equal(traceAt(next, 10)!.head, 0);
 });
 
-test("tails are a share of short lines and a fixed length on long tracts", () => {
-  assert.equal(tailLength(10), 0.6);
-  assert.equal(tailLength(10_000), 0.15);
-  assert.ok(tailLength(100) > tailLength(200));
+test("the drawn part of a line ends exactly at the head", () => {
+  const points = [
+    { x: 0, y: 0, z: 0 },
+    { x: 1, y: 0, z: 0 },
+    { x: 4, y: 0, z: 0 },
+  ];
+  const { along } = alongPolyline(points);
+  assert.deepEqual(partOf(points, along, 0), [points[0], { x: 0, y: 0, z: 0 }]);
+  assert.deepEqual(partOf(points, along, 0.5), [points[0], points[1], { x: 2, y: 0, z: 0 }]);
+  assert.equal(partOf(points, along, 1), points);
 });
 
 test("positions along a polyline go by length", () => {

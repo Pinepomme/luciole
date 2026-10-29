@@ -6,7 +6,7 @@ body {
   overflow: hidden;
   background: var(--vscode-editor-background);
   color: var(--vscode-foreground);
-  font-family: var(--vscode-font-family);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", var(--vscode-font-family), sans-serif;
   font-size: var(--vscode-font-size);
 }
 
@@ -27,7 +27,7 @@ body {
 button {
   border: none;
   padding: 3px 10px;
-  border-radius: 2px;
+  border-radius: 4px;
   cursor: pointer;
   color: var(--vscode-button-secondaryForeground);
   background: var(--vscode-button-secondaryBackground);
@@ -98,7 +98,8 @@ button[hidden],
   min-height: 1.4em;
   padding: 4px 8px;
   font-family: var(--vscode-editor-font-family);
-  color: #ffc94d;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
   border-top: 1px solid var(--vscode-panel-border);
   white-space: pre;
   overflow: hidden;
@@ -109,8 +110,8 @@ button[hidden],
 .float-tooltip-kap,
 .scene-tooltip {
   padding: 4px 8px;
-  border-radius: 3px;
-  font-family: var(--vscode-editor-font-family);
+  border-radius: 6px;
+  font-family: inherit;
   font-size: 12px;
   color: var(--vscode-editorHoverWidget-foreground, #ccc);
   background: var(--vscode-editorHoverWidget-background, #252526);

@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { test } from "node:test";
 import type { Graph, GraphEdge, GraphNode } from "../src/graph";
 import { buildBrain } from "../src/webview/brain";
-import { bundle, buildRegions, hash, labelAnchor, layoutBrain, length, neuronRadius, packItems, regionHue, regionMembers, route, seedPoint, Vec3 } from "../src/webview/layout";
+import { bundle, buildRegions, hash, labelAnchor, layoutBrain, length, neuronRadius, packItems, regionMembers, route, seedPoint, Vec3 } from "../src/webview/layout";
 
 // out/test/layout.test.js -> repo root
 const shop: Graph = JSON.parse(readFileSync(resolve(__dirname, "../../../examples/shop.graph.json"), "utf8"));
@@ -200,14 +200,6 @@ test("packing keeps items apart and pulls linked ones together", () => {
   const flat = packItems(Array.from({ length: 40 }, (_, i) => ({ key: `r:${i}`, radius: 10, region: true })), [], 0.3);
   const extent = (axis: keyof Vec3) => Math.max(...flat.map((p) => p[axis])) - Math.min(...flat.map((p) => p[axis]));
   assert.ok(extent("z") < 0.6 * Math.min(extent("x"), extent("y")));
-});
-
-test("colors: top-level regions apart, a single file's module doesn't count", () => {
-  const map = layout(app);
-  assert.equal(regionHue(map, "src.app.core.engine:Engine.run"), regionHue(map, "src.app.core.engine:Engine.step"));
-  const single = layout(shop);
-  // In a single file, the class gets its own hue rather than the module's.
-  assert.notEqual(regionHue(single, "shop:Cart.add"), regionHue(single, "shop:main"));
 });
 
 test("a region's name goes just above its neurons, not above its packed sphere", () => {
