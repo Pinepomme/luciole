@@ -13,6 +13,7 @@
  */
 
 import type { Graph, GraphNode } from "../graph";
+import type { SourceLine } from "../messages";
 
 export type SynapseKind = "call" | "state" | "runtime" | "spawn";
 
@@ -64,6 +65,36 @@ export function neuronAt(neurons: Neuron[], file: string, line: number): Neuron 
     }
   }
   return best;
+}
+
+/** What a right-click on a function's neuron does to its breakpoints. */
+export type BreakpointAction = { add: number } | { remove: number[] };
+
+/**
+ * A right-click on a function: removes every breakpoint that marks it (any line of its code, as
+ * for the red dot: see neuronAt), else adds one where each call starts (`body_line`: not the `def`
+ * line, which runs once, at import). Undefined for module code.
+ */
+export function breakpointAction(neurons: Neuron[], neuron: Neuron, breakpoints: SourceLine[]): BreakpointAction | undefined {
+  const { node } = neuron;
+  if (node.kind !== "function") {
+    return undefined;
+  }
+  const lines = breakpoints.filter(({ file, line }) => file === node.file && neuronAt(neurons, file, line)?.id === neuron.id).map(({ line }) => line);
+  const unique = [...new Set(lines)].sort((a, b) => a - b);
+  return unique.length ? { remove: unique } : { add: node.body_line ?? node.loc.line };
+}
+
+/** The right-click hint for `action` on `neuron`. */
+export function breakpointHint(neuron: Neuron, action: BreakpointAction): string {
+  if ("add" in action) {
+    return "stop on each call";
+  }
+  const lines = action.remove;
+  if (lines.length > 1) {
+    return `remove its ${lines.length} breakpoints (lines ${lines.join(", ")})`;
+  }
+  return lines[0] === (neuron.node.body_line ?? neuron.node.loc.line) ? "remove the breakpoint" : `remove the breakpoint (line ${lines[0]})`;
 }
 
 export function synapseId(kind: SynapseKind, source: string, target: string): string {

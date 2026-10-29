@@ -5,7 +5,7 @@ import { randomBytes } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { registerDebugging, sourceBreakpoints, toggleBreakpoint } from "./debugging";
+import { addBreakpoint, registerDebugging, removeBreakpoints, sourceBreakpoints } from "./debugging";
 import type { Graph } from "./graph";
 import { webviewHtml } from "./html";
 import { LiveSession } from "./live";
@@ -486,8 +486,10 @@ class GraphPanel {
       live.pause(message.paused);
     } else if (message.type === "step") {
       step(message.mode);
-    } else if (message.type === "toggleBreakpoint" && this.root) {
-      toggleBreakpoint(path.resolve(this.root, message.file), message.line);
+    } else if (message.type === "addBreakpoint" && this.root) {
+      addBreakpoint(path.resolve(this.root, message.file), message.line);
+    } else if (message.type === "removeBreakpoints" && this.root) {
+      removeBreakpoints(path.resolve(this.root, message.file), message.lines);
     } else if (message.type === "reveal" && this.root) {
       const position = new vscode.Position(message.line - 1, message.col);
       void vscode.window.showTextDocument(vscode.Uri.file(path.resolve(this.root, message.file)), {

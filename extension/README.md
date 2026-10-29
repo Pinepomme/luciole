@@ -40,7 +40,8 @@ the functions light up as they run.
   brain follows: when the debugger stops, its function glows red and the view flies to it. With
   auto-start on, the debugged program also lights up as it runs. **Right-click a neuron** to stop
   each time that function is called (a normal breakpoint, on its first line, listed in the
-  Breakpoints view); functions with a breakpoint have a red dot.
+  Breakpoints view); functions with a breakpoint on any of their lines have a red dot, and
+  right-clicking them again removes those breakpoints.
 - Threads and asyncio: each thread gets its own line in the bottom bar. Coroutines paused on an
   `await` glow blue, so you can tell running work (amber) from work waiting on I/O. Teal lines
   show where a thread or task was started from. Try it on `examples/workers.py`.
