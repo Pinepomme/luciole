@@ -4,7 +4,9 @@
  *
  *   node out/dev/screenshot.js [path] [--events FILE [--frames N] [--every MS] [--zoom F]]
  *                              [--breakpoint FILE:LINE] [--stopped FILE:LINE] [--out dir] [--fps]
+ *                              [--theme light]
  *
+ * --theme light uses VS Code's Light Modern colors instead of Dark Modern.
  * --fps also prints how many frames per second the overview draws (and, with --frames, the replay).
  *
  * --events replays a recording made with `luciole run --events FILE ...` and captures the
@@ -27,13 +29,22 @@ import { webviewHtml } from "../src/html";
 const extensionDir = path.resolve(__dirname, "../..");
 const repo = path.resolve(extensionDir, "..");
 
-// A few VS Code dark theme variables, so colors look as they do in the editor.
-const THEME = `<style>:root {
+// A few VS Code theme variables (Dark Modern, or Light Modern), so colors look as they do in the editor.
+const DARK = `
   --vscode-editor-background: #1f1f1f; --vscode-editor-foreground: #cccccc; --vscode-foreground: #cccccc;
   --vscode-descriptionForeground: #9d9d9d; --vscode-editorWidget-background: #202020;
-  --vscode-focusBorder: #0078d4; --vscode-panel-border: #2b2b2b; --vscode-errorForeground: #f85149;
+  --vscode-focusBorder: #0078d4; --vscode-textLink-foreground: #4daafc; --vscode-panel-border: #2b2b2b;
+  --vscode-errorForeground: #f85149; --vscode-button-background: #0078d4; --vscode-button-foreground: #ffffff;
   --vscode-button-secondaryBackground: #313131; --vscode-button-secondaryForeground: #cccccc;
-  --vscode-button-secondaryHoverBackground: #3c3c3c;
+  --vscode-button-secondaryHoverBackground: #3c3c3c; --vscode-debugIcon-breakpointForeground: #e51400;`;
+const LIGHT = `
+  --vscode-editor-background: #ffffff; --vscode-editor-foreground: #3b3b3b; --vscode-foreground: #3b3b3b;
+  --vscode-descriptionForeground: #3b3b3b; --vscode-editorWidget-background: #f8f8f8;
+  --vscode-focusBorder: #005fb8; --vscode-textLink-foreground: #005fb8; --vscode-panel-border: #e5e5e5;
+  --vscode-errorForeground: #f85149; --vscode-button-background: #005fb8; --vscode-button-foreground: #ffffff;
+  --vscode-button-secondaryBackground: #e5e5e5; --vscode-button-secondaryForeground: #3b3b3b;
+  --vscode-button-secondaryHoverBackground: #cccccc; --vscode-debugIcon-breakpointForeground: #e51400;`;
+const THEME = `<style>:root {${option("--theme") === "light" ? LIGHT : DARK}
   --vscode-font-family: system-ui, sans-serif; --vscode-font-size: 13px;
   --vscode-editor-font-family: "DejaVu Sans Mono", monospace;
   --vscode-charts-blue: #3794ff; --vscode-charts-green: #89d185; --vscode-charts-orange: #d18616;
