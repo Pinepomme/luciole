@@ -64,6 +64,7 @@ from luciole.analyzer import SKIP_DIRS, module_name
 log = logging.getLogger(__name__)
 
 FRAME = 0.05  # seconds between two frames
+ANSWER_TIMEOUT = 2  # seconds to wait for the engine's answer to the hello
 OWN_PACKAGE = Path(__file__).resolve().parent
 ASYNC_FLAGS = inspect.CO_COROUTINE | inspect.CO_ITERABLE_COROUTINE | inspect.CO_ASYNC_GENERATOR
 CALLER_SEARCH = 40  # frames to look through first for the nearest project caller (asyncio adds ~10)
@@ -492,6 +493,7 @@ class Session:
         self.tool: int | None = None
         self.thread_start = threading.Thread.start
         self.origin_depth = 0
+        self.answer = ""  # the engine's answer to the hello, for the control thread
 
     def write(self, frame: dict, targets: list) -> None:
         line = json.dumps(frame, separators=(",", ":")) + "\n"
@@ -519,6 +521,8 @@ class Session:
             # with a hello.
             hello = protocol.hello("recorder", pid=os.getpid(), argv=sys.orig_argv, root=str(recorder.root))
             self.write(hello, self.view_sinks)
+            self.lines = self.connection.makefile(encoding="utf-8")
+            self.answer = self.read_answer()
         events = monitoring.events
         callbacks = {
             events.PY_START: recorder.on_start,
@@ -593,10 +597,22 @@ class Session:
         while not self.stopping.wait(FRAME):
             self.recorder.flush()
 
+    def read_answer(self) -> str:
+        """The engine's welcome (or refusal), read now: a process that ended before its control
+        thread read it would close a socket holding unread data, which resets the connection,
+        and the engine would lose the calls not read yet (all of them, for a short process)."""
+        self.connection.settimeout(ANSWER_TIMEOUT)
+        try:
+            return self.lines.readline()
+        except (OSError, ValueError):  # no answer in time: the control thread reads nothing more
+            return ""
+        finally:
+            self.connection.settimeout(None)
+
     def control(self) -> None:
         """Commands from the view, one JSON object per line."""
         try:
-            for line in self.connection.makefile(encoding="utf-8"):
+            for line in itertools.chain([self.answer] if self.answer else [], self.lines):
                 try:
                     message = json.loads(line)
                     if "refused" in message:  # an engine of another protocol: record for nobody

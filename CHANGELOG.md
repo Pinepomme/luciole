@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Live mode: a process that ends within milliseconds of starting (a multiprocessing pool's
+  workers, terminated right after their last task) no longer loses its calls. The recorder now
+  reads the engine's welcome before the program goes on; left unread, it made the connection
+  reset when the process ended, and the engine dropped the calls it had not read yet.
 - Each file's functions get a muted tint of their own (Apple's system hues, half-way to grey), so you see which module a function is in; activity stays in the accent.
 - A calmer, minimal look: neutral greys at rest and one accent color for activity, the theme's
   own (its link color), with red only for breakpoints and the debugger. Smaller matte neurons,
