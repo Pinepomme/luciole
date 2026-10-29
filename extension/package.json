@@ -56,46 +56,6 @@
         "enablement": "luciole.liveRunning"
       },
       {
-        "command": "luciole.pauseLive",
-        "title": "Pause Live Run",
-        "category": "Luciole",
-        "icon": "$(debug-pause)",
-        "enablement": "luciole.liveRunning && !luciole.livePaused"
-      },
-      {
-        "command": "luciole.resumeLive",
-        "title": "Resume Live Run",
-        "category": "Luciole",
-        "icon": "$(debug-continue)",
-        "enablement": "luciole.liveRunning && luciole.livePaused"
-      },
-      {
-        "command": "luciole.stepOver",
-        "title": "Step Over",
-        "category": "Luciole",
-        "icon": "$(debug-step-over)",
-        "enablement": "luciole.livePaused"
-      },
-      {
-        "command": "luciole.stepInto",
-        "title": "Step Into",
-        "category": "Luciole",
-        "icon": "$(debug-step-into)",
-        "enablement": "luciole.livePaused"
-      },
-      {
-        "command": "luciole.stepOut",
-        "title": "Step Out",
-        "category": "Luciole",
-        "icon": "$(debug-step-out)",
-        "enablement": "luciole.livePaused"
-      },
-      {
-        "command": "luciole.revealFrame",
-        "title": "Show Frame",
-        "category": "Luciole"
-      },
-      {
         "command": "luciole.toggleAutoStart",
         "title": "Turn Auto-Start On or Off",
         "category": "Luciole",
@@ -160,29 +120,6 @@
         }
       }
     },
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "luciole",
-          "title": "Luciole",
-          "icon": "media/activity.svg"
-        }
-      ]
-    },
-    "views": {
-      "luciole": [
-        {
-          "id": "luciole.variables",
-          "name": "Variables"
-        }
-      ]
-    },
-    "viewsWelcome": [
-      {
-        "view": "luciole.variables",
-        "contents": "Pause a live run to see the variables of every function on its call path.\n[Run Live](command:luciole.runLive)"
-      }
-    ],
     "menus": {
       "editor/title": [
         {
@@ -196,34 +133,9 @@
           "group": "navigation@1"
         },
         {
-          "command": "luciole.pauseLive",
-          "when": "luciole.liveRunning && !luciole.livePaused && !inDebugMode",
-          "group": "navigation@0"
-        },
-        {
-          "command": "luciole.resumeLive",
-          "when": "luciole.liveRunning && luciole.livePaused && !inDebugMode",
-          "group": "navigation@0"
-        },
-        {
           "command": "luciole.showFileGraph",
           "when": "editorLangId == python",
           "group": "navigation@2"
-        },
-        {
-          "command": "luciole.stepOver",
-          "when": "luciole.livePaused && !inDebugMode",
-          "group": "navigation@0"
-        },
-        {
-          "command": "luciole.stepInto",
-          "when": "luciole.livePaused && !inDebugMode",
-          "group": "navigation@0"
-        },
-        {
-          "command": "luciole.stepOut",
-          "when": "luciole.livePaused && !inDebugMode",
-          "group": "navigation@0"
         },
         {
           "command": "luciole.runLiveWith",
@@ -242,68 +154,8 @@
           "command": "luciole.showGraph",
           "when": "explorerResourceIsFolder"
         }
-      ],
-      "commandPalette": [
-        {
-          "command": "luciole.revealFrame",
-          "when": "false"
-        }
-      ],
-      "view/title": [
-        {
-          "command": "luciole.pauseLive",
-          "when": "view == luciole.variables && luciole.liveRunning && !luciole.livePaused && !inDebugMode",
-          "group": "navigation@1"
-        },
-        {
-          "command": "luciole.resumeLive",
-          "when": "view == luciole.variables && luciole.liveRunning && luciole.livePaused && !inDebugMode",
-          "group": "navigation@1"
-        },
-        {
-          "command": "luciole.stepOver",
-          "when": "view == luciole.variables && luciole.livePaused && !inDebugMode",
-          "group": "navigation@1"
-        },
-        {
-          "command": "luciole.stepInto",
-          "when": "view == luciole.variables && luciole.livePaused && !inDebugMode",
-          "group": "navigation@1"
-        },
-        {
-          "command": "luciole.stepOut",
-          "when": "view == luciole.variables && luciole.livePaused && !inDebugMode",
-          "group": "navigation@1"
-        },
-        {
-          "command": "luciole.stopLive",
-          "when": "view == luciole.variables && luciole.liveRunning && !inDebugMode",
-          "group": "navigation@2"
-        }
       ]
-    },
-    "keybindings": [
-      {
-        "command": "luciole.stepOver",
-        "key": "f10",
-        "when": "luciole.livePaused && !inDebugMode"
-      },
-      {
-        "command": "luciole.stepInto",
-        "key": "f11",
-        "when": "luciole.livePaused && !inDebugMode"
-      },
-      {
-        "command": "luciole.stepOut",
-        "key": "shift+f11",
-        "when": "luciole.livePaused && !inDebugMode"
-      },
-      {
-        "command": "luciole.resumeLive",
-        "key": "f5",
-        "when": "luciole.livePaused && !inDebugMode"
-      }
-    ]
+    }
   },
   "scripts": {
     "build": "node build.mjs",

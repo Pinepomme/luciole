@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Handles, Processes, processLabel } from "../src/processes";
+import { Processes, processLabel } from "../src/processes";
 
 const stack = (thread: string, ...ids: string[]) => ({ thread, stack: ids });
 
@@ -37,16 +37,4 @@ test("processes are named by module or script", () => {
   assert.equal(processLabel({ pid: 7, argv: ["python", "-m", "pytest", "-x"] }), "pytest (7)");
   assert.equal(processLabel({ pid: 8, argv: ["C:\\Python\\python.exe", "-u", "C:\\app\\train.py"] }), "train.py (8)");
   assert.equal(processLabel(undefined), "python");
-});
-
-test("handles keep ids of different processes apart", () => {
-  const handles = new Handles<string>();
-  const parent = handles.handle("parent", 140);
-  const child = handles.handle("child", 140); // a forked child's main thread has its parent's ident
-  assert.notEqual(parent, child);
-  assert.equal(handles.handle("parent", 140), parent);
-  assert.deepEqual(handles.resolve(child), ["child", 140]);
-  handles.clear("child");
-  assert.equal(handles.resolve(child), undefined);
-  assert.deepEqual(handles.resolve(parent), ["parent", 140]);
 });
