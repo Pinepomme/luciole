@@ -12,6 +12,7 @@ import type { Graph } from "../graph";
 import type { FromWebview, LiveFrame, SourceLine, ThreadStack, ToWebview } from "../messages";
 import { Brain, breakpointAction, breakpointHint, buildBrain, Neuron, neuronAt, Synapse, SynapseKind, synapseId } from "./brain";
 import { addCall, alongPolyline, partOf, Trace, traceAt } from "./flow";
+import { HIDDEN, HIDDEN_LINE, LineBatch, SphereBatch, UNIT_SPHERE } from "./batches";
 import { bundle, labelAnchor, Layout, layoutBrain, NEURON_GAP, neuronRadius, Region, regionMembers, route, Vec3 } from "./layout";
 
 declare function acquireVsCodeApi(): { postMessage(message: FromWebview): void };
@@ -26,7 +27,8 @@ interface NeuronNode {
   home: Vec3;
   /** 1 when the function just ran or is running, fading to 0. */
   heat: number;
-  parts?: { material: THREE.MeshLambertMaterial; base: THREE.Color; ring: THREE.Sprite; mark: THREE.Sprite; label?: SpriteText; radius: number };
+  /** Drawn by the sphere batch, in `color`. */
+  parts?: { color: THREE.Color; base: THREE.Color; ring: THREE.Sprite; mark: THREE.Sprite; label?: SpriteText; radius: number };
 }
 
 interface SynapseLink {
@@ -37,7 +39,11 @@ interface SynapseLink {
   heat: number;
   /** Centres of the regions the line bends through (none inside a region: a straight line). */
   via: Vec3[];
+  /** Its own line, never drawn (hover raycasts it); the line batch draws it in `color`, at `opacity`. */
   line?: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
+  points?: number;
+  color?: THREE.Color;
+  opacity?: number;
   /** Where the line runs, as last drawn: points, their positions along it (0 to 1), its length. */
   path?: { points: Vec3[]; along: number[]; length: number };
   /** The latest call traced along it (live mode), and the accent stroke drawn over it. */
@@ -177,6 +183,7 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
     positions.needsUpdate = true;
     (object as THREE.Line).geometry.computeBoundingSphere();
     synapseLink.path = { points, ...alongPolyline(points) };
+    lineBatch.moved = true;
     return true;
   })
   .linkLabel((link: object) => synapseTooltip((link as SynapseLink).synapse))
@@ -200,6 +207,8 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
   });
 
 graph.scene().add(regionLabels, flows);
+const sphereBatch = new SphereBatch(graph.scene());
+const lineBatch = new LineBatch(graph.scene());
 // Soft, even light from above and to the left: matte spheres, gently shaded.
 const sun = new THREE.DirectionalLight(0xffffff, 0.4 * Math.PI);
 sun.position.set(-0.5, 1, 0.8);
@@ -239,21 +248,24 @@ graph.onEngineStop(() => {
 function neuronObject(node: NeuronNode): THREE.Object3D {
   const radius = neuronRadius(node.neuron.degree) * SPHERE_SCALE;
   const base = moduleTint(node.neuron.module);
-  const material = new THREE.MeshLambertMaterial({ color: base.clone() });
   const group = new THREE.Group();
-  group.add(new THREE.Mesh(new THREE.SphereGeometry(radius, 24, 16), material));
+  const hit = new THREE.Mesh(UNIT_SPHERE, HIDDEN); // for hover and clicks; the sphere batch draws it
+  hit.scale.setScalar(radius);
+  group.add(hit);
   // A thin ring around a function that runs (accent), waits on an await (accent, no fill) or
   // where the debugger stopped (red). Sized each frame: never too small to see.
   const ring = new THREE.Sprite(new THREE.SpriteMaterial({ map: ringTexture, color: ACCENT, transparent: true, opacity: 0, depthWrite: false }));
+  ring.visible = false;
   ring.scale.setScalar(radius * RING_SCALE);
   group.add(ring);
   // A red dot on functions that hold a breakpoint, as in the editor's gutter.
-  const mark = new THREE.Sprite(new THREE.SpriteMaterial({ map: dotTexture, color: RED, transparent: true, opacity: 0, depthWrite: false, depthTest: false }));
+  const mark = new THREE.Sprite(new THREE.SpriteMaterial({ map: dotTexture, color: RED, transparent: true, depthWrite: false, depthTest: false }));
+  mark.visible = false;
   mark.scale.setScalar(Math.max(2, radius * 0.9));
   mark.position.set(radius * 0.9, radius * 0.9, 0);
   mark.renderOrder = 2; // over labels
   group.add(mark);
-  node.parts = { material, base, ring, mark, radius };
+  node.parts = { color: base.clone(), base, ring, mark, radius };
   return group;
 }
 
@@ -262,9 +274,10 @@ function synapseObject(link: SynapseLink): THREE.Object3D {
   link.via = layout ? route(layout, link.synapse.source, link.synapse.target) : [];
   const count = bundle({ x: 0, y: 0, z: 0 }, link.via, { x: 0, y: 0, z: 0 }).length;
   geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(count * 3), 3));
-  // Hairlines that don't hide one another: tracts read by how many lines run together.
-  const material = new THREE.LineBasicMaterial({ color: LINE.clone(), transparent: true, opacity: baseOpacity(link), depthWrite: false });
-  link.line = new THREE.Line(geometry, material);
+  link.points = count;
+  link.color = LINE.clone();
+  link.opacity = baseOpacity(link);
+  link.line = new THREE.Line(geometry, HIDDEN_LINE); // for hover; the line batch draws it
   return link.line;
 }
 
@@ -491,14 +504,15 @@ function animate(now: number): void {
     if (!parts) {
       continue;
     }
-    (parts.mark.material as THREE.SpriteMaterial).opacity = breakpointNodes.has(node.id) ? 1 : 0;
+    parts.mark.visible = breakpointNodes.has(node.id); // a sprite drawn at opacity 0 still costs a draw call
     // Waiting on an await: a ring and no fill, unless the function is also running or just ran.
     const isWaiting = waiting.has(node.id) && node.heat < 0.5 && !isStopped;
     const color = isStopped ? RED : ACCENT;
-    parts.material.color.copy(parts.base).lerp(color, node.heat);
+    parts.color.copy(parts.base).lerp(color, node.heat);
     const ring = parts.ring.material as THREE.SpriteMaterial;
     ring.color.copy(color);
     ring.opacity = isWaiting ? 1 : node.heat;
+    parts.ring.visible = ring.opacity > 0;
     if (ring.opacity > 0) {
       parts.ring.scale.setScalar(Math.max(parts.radius * RING_SCALE, RING_MIN_PX * worldPerPixel(parts.ring)));
     }
@@ -517,11 +531,14 @@ function animate(now: number): void {
   for (const link of links) {
     // The call path in the accent, like its functions; it eases back to grey once left.
     link.heat = pathway.has(link) ? 1 : link.heat * fade;
-    if (link.line) {
-      link.line.material.color.copy(LINE).lerp(ACCENT, link.heat);
-      link.line.material.opacity = baseOpacity(link) + (1 - baseOpacity(link)) * link.heat;
+    if (link.color) {
+      link.heat = link.heat < 0.002 ? 0 : link.heat; // settled: the batch skips lines whose color is unchanged
+      link.color.copy(LINE).lerp(ACCENT, link.heat);
+      link.opacity = baseOpacity(link) + (1 - baseOpacity(link)) * link.heat;
     }
   }
+  sphereBatch.update(nodes);
+  lineBatch.update(links);
   flow(now / 1000);
   requestAnimationFrame(animate);
 }

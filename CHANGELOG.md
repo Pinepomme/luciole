@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Big graphs turn smoothly: all spheres are drawn in one batch and all lines in another, instead
+  of one object each (on `rich`, 38 draw calls per frame instead of 6,101). Looks the same.
 - Each file's functions get a muted tint of their own (Apple's system hues, half-way to grey), so you see which module a function is in; activity stays in the accent.
 - A calmer, minimal look: neutral greys at rest and one accent color for activity, the theme's
   own (its link color), with red only for breakpoints and the debugger. Smaller matte neurons,

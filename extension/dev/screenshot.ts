@@ -7,7 +7,8 @@
  *                              [--theme light]
  *
  * --theme light uses VS Code's Light Modern colors instead of Dark Modern.
- * --fps also prints how many frames per second the overview draws (and, with --frames, the replay).
+ * --fps also prints how many frames per second the overview draws (and, with --frames, the replay),
+ * and its draw calls per frame (what a real GPU pays for: thousands of objects stutter).
  *
  * --events replays a recording made with `luciole run --events FILE ...` and captures the
  * moment with the deepest call stack. --frames N then keeps replaying it in real time (looping)
@@ -126,7 +127,7 @@ async function main(): Promise<void> {
     await ready();
     await page.waitForTimeout(800); // let the camera finish zooming to fit
     const file = path.join(outDir, `${name}.png`);
-    await page.screenshot({ path: file });
+    await page.screenshot({ path: file, timeout: 180_000 }); // big graphs draw slowly in software WebGL
     console.log(file);
   };
 
@@ -144,7 +145,8 @@ async function main(): Promise<void> {
             requestAnimationFrame(count);
           }),
       );
-      console.log(`frames/s${what}: ${rate.toFixed(1)}`);
+      const calls = await page.evaluate(() => (window as any).luciole.graph.renderer().info.render.calls as number);
+      console.log(`frames/s${what}: ${rate.toFixed(1)} (${calls} draw calls)`);
     }
   };
   await fps("");
@@ -202,7 +204,7 @@ async function main(): Promise<void> {
       for (let i = 1; i <= count; i++) {
         await page.waitForTimeout(Math.max(0, start + i * every - Date.now()));
         const file = path.join(outDir, `2-live-${i}.png`);
-        await page.screenshot({ path: file });
+        await page.screenshot({ path: file, timeout: 180_000 }); // big graphs draw slowly in software WebGL
         console.log(`${file} (+${Date.now() - start} ms)`);
       }
     }
