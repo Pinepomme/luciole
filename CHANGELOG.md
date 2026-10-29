@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Each file's functions get a muted tint of their own (Apple's system hues, half-way to grey), so you see which module a function is in; activity stays in the accent.
 - A calmer, minimal look: neutral greys at rest and one accent color for activity, the theme's
   own (its link color), with red only for breakpoints and the debugger. Smaller matte neurons,
   hairline links, names in the system font with no outlines; no colors per region, no glows.

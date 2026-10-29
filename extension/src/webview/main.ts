@@ -26,7 +26,7 @@ interface NeuronNode {
   home: Vec3;
   /** 1 when the function just ran or is running, fading to 0. */
   heat: number;
-  parts?: { material: THREE.MeshLambertMaterial; ring: THREE.Sprite; mark: THREE.Sprite; label?: SpriteText; radius: number };
+  parts?: { material: THREE.MeshLambertMaterial; base: THREE.Color; ring: THREE.Sprite; mark: THREE.Sprite; label?: SpriteText; radius: number };
 }
 
 interface SynapseLink {
@@ -96,6 +96,20 @@ const PRIMARY = `#${grey(0.92).getHexString()}`;
 /** Neurons at rest, and lines. */
 const NEUTRAL = grey(LIGHT_THEME ? 0.45 : 0.4);
 const LINE = grey(LIGHT_THEME ? 0.8 : 0.55);
+/**
+ * Each file's neurons get a muted tint, so you see at a glance which module a function is in:
+ * Apple's system hues (no red: breakpoints and stops), half-way to the neutral grey so they stay
+ * quiet next to the accent. Picked by a hash of the module, so a module keeps its tint.
+ */
+const MODULE_HUES = ["#30B0C7", "#34C759", "#5856D6", "#AF52DE", "#FF9F0A", "#00C7BE", "#7D7AFF", "#A2845E", "#64D2FF", "#FFD60A"];
+const MODULE_TINT = LIGHT_THEME ? 0.55 : 0.5;
+function moduleTint(module: string): THREE.Color {
+  let hash = 2166136261;
+  for (let i = 0; i < module.length; i++) {
+    hash = Math.imul(hash ^ module.charCodeAt(i), 16777619);
+  }
+  return NEUTRAL.clone().lerp(new THREE.Color(MODULE_HUES[(hash >>> 0) % MODULE_HUES.length]), MODULE_TINT);
+}
 /** Activity (running, a call, the call path, waiting): the theme's accent. */
 const ACCENT = new THREE.Color(themeAccent());
 /** Where the debugger stopped, and breakpoints (VS Code's breakpoint red). */
@@ -228,7 +242,8 @@ graph.onEngineStop(() => {
 
 function neuronObject(node: NeuronNode): THREE.Object3D {
   const radius = neuronRadius(node.neuron.degree) * SPHERE_SCALE;
-  const material = new THREE.MeshLambertMaterial({ color: NEUTRAL.clone() });
+  const base = moduleTint(node.neuron.module);
+  const material = new THREE.MeshLambertMaterial({ color: base.clone() });
   const group = new THREE.Group();
   group.add(new THREE.Mesh(new THREE.SphereGeometry(radius, 24, 16), material));
   // A thin ring around a function that runs (accent), waits on an await (accent, no fill) or
@@ -242,7 +257,7 @@ function neuronObject(node: NeuronNode): THREE.Object3D {
   mark.position.set(radius * 0.9, radius * 0.9, 0);
   mark.renderOrder = 2; // over labels
   group.add(mark);
-  node.parts = { material, ring, mark, radius };
+  node.parts = { material, base, ring, mark, radius };
   return group;
 }
 
@@ -484,7 +499,7 @@ function animate(now: number): void {
     // Waiting on an await: a ring and no fill, unless the function is also running or just ran.
     const isWaiting = waiting.has(node.id) && node.heat < 0.5 && !isStopped;
     const color = isStopped ? RED : ACCENT;
-    parts.material.color.copy(NEUTRAL).lerp(color, node.heat);
+    parts.material.color.copy(parts.base).lerp(color, node.heat);
     const ring = parts.ring.material as THREE.SpriteMaterial;
     ring.color.copy(color);
     ring.opacity = isWaiting ? 1 : node.heat;
