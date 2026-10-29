@@ -54,7 +54,7 @@ export class LiveSession implements vscode.Disposable {
   private state: LiveState = IDLE;
   /** Pending "expand" requests, by ref handle. */
   private readonly expanding = new Map<number, (vars: Variable[]) => void>();
-  private readonly subscription: vscode.Disposable;
+  private readonly subscriptions: vscode.Disposable[];
   private disposed = false;
 
   constructor(
@@ -62,13 +62,16 @@ export class LiveSession implements vscode.Disposable {
     private readonly log: vscode.OutputChannel,
     private readonly options: EngineOptions,
   ) {
-    this.subscription = vscode.window.onDidCloseTerminal((terminal) => {
-      if (terminal === this.terminal) {
-        this.terminal = undefined;
-        this.launching = undefined;
-        this.update();
-      }
-    });
+    this.subscriptions = [
+      vscode.window.onDidCloseTerminal((terminal) => {
+        if (terminal === this.terminal) {
+          this.terminal = undefined;
+          this.launching = undefined;
+          this.update();
+        }
+      }),
+      vscode.workspace.onDidChangeWorkspaceFolders(() => this.resubscribe()),
+    ];
   }
 
   get current(): LiveState {
@@ -99,6 +102,24 @@ export class LiveSession implements vscode.Disposable {
     this.read(socket);
     this.log.appendLine(`watching the Luciole engine on port ${port}`);
     return { port, socket };
+  }
+
+  /**
+   * Folders were added to or removed from the workspace: the engine takes a viewer's roots only in
+   * its hello, so subscribe again with the new ones. The engine announces its processes to the new
+   * subscription, and their next frames light the view up again.
+   */
+  private resubscribe(): void {
+    const socket = this.subscribed;
+    if (!socket) {
+      return; // not subscribed (yet): the next subscription sends the current folders
+    }
+    this.log.appendLine("workspace folders changed; subscribing to the Luciole engine again");
+    this.subscribed = undefined;
+    this.engine = undefined;
+    socket.destroy();
+    this.forgetProcesses();
+    void this.connect().catch((error) => this.log.appendLine(`${error}`));
   }
 
   /** Starts `run` in a fresh terminal, closing the previous Run Live terminal. */
@@ -241,7 +262,7 @@ export class LiveSession implements vscode.Disposable {
 
   dispose(): void {
     this.disposed = true;
-    this.subscription.dispose();
+    this.subscriptions.forEach((subscription) => subscription.dispose());
     this.subscribed?.destroy();
     this.terminal?.dispose();
   }
@@ -325,6 +346,15 @@ export class LiveSession implements vscode.Disposable {
     }
   }
 
+  /** No engine to hear from: no process runs as far as this window knows. */
+  private forgetProcesses(): void {
+    for (const id of this.processes.ids) {
+      this.processes.remove(id);
+    }
+    this.threads.clear();
+    this.update();
+  }
+
   private mapRefs(id: number, vars: Variable[]): Variable[] {
     return vars.map((v) => (v.ref === undefined ? v : { ...v, ref: this.refs.handle(id, v.ref) }));
   }
@@ -360,11 +390,7 @@ export class LiveSession implements vscode.Disposable {
         }
         this.subscribed = undefined;
         this.engine = undefined;
-        for (const id of this.processes.ids) {
-          this.processes.remove(id);
-        }
-        this.threads.clear();
-        this.update();
+        this.forgetProcesses();
         if (!this.disposed) {
           this.log.appendLine("lost the Luciole engine; reconnecting");
           setTimeout(() => void this.connect().catch((error) => this.log.appendLine(`${error}`)), 2000);
