@@ -71,5 +71,6 @@ last run. Run configurations go in `settings.json`:
 Python 3.10 or newer for the graph, 3.12 or newer for live mode. Luciole uses the workspace's
 `.venv` if there is one, then `python3` (Run Live: the interpreter chosen in the Python
 extension). Set `luciole.pythonPath` to choose another interpreter. For Run Live under the
-debugger, the Python Debugger extension (`ms-python.debugpy`). Nothing needs installing in your
-project.
+debugger, the Python Debugger extension (`ms-python.debugpy`); without it, Run Live runs in a
+terminal (the brain lights up, no breakpoints or stepping) and the panel offers to install it.
+Nothing needs installing in your project.

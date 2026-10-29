@@ -27,6 +27,10 @@ export function webviewHtml({ cspSource, nonce, scriptUri, styleUri }: PageOptio
     <button id="fit" title="Fit the brain in the window">Fit</button>
     <span id="status"></span>
   </div>
+  <div id="notice" hidden>
+    <span>Running without the Python debugger: the brain lights up, but there are no breakpoints or stepping.</span>
+    <button id="installDebugger" class="primary" title="Install the Python Debugger extension (ms-python.debugpy) from the Marketplace">Install Python Debugger</button>
+  </div>
   <div id="message" hidden></div>
   <div id="brain"></div>
   <div id="path" title="What is running now, outermost first"></div>

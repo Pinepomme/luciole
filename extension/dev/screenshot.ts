@@ -4,7 +4,7 @@
  *
  *   node out/dev/screenshot.js [path] [--events FILE [--frames N] [--every MS] [--zoom F]]
  *                              [--breakpoint FILE:LINE] [--stopped FILE:LINE] [--out dir] [--fps]
- *                              [--theme light]
+ *                              [--theme light] [--without-debugger]
  *
  * --theme light uses VS Code's Light Modern colors instead of Dark Modern.
  * --fps also prints how many frames per second the overview draws (and, with --frames, the replay).
@@ -15,6 +15,7 @@
  * how the light moves. --zoom F brings the camera F times closer for these shots.
  * --breakpoint and --stopped (FILE relative to the graph's
  * root) show a breakpoint and the debugger stopped there, as VS Code would send them.
+ * --without-debugger shows a Run Live running in a terminal, the Python debugger not installed.
  *
  * Needs a Chromium: set CHROME_PATH, or have one in the Playwright cache (~/.cache/ms-playwright).
  */
@@ -220,6 +221,12 @@ async function main(): Promise<void> {
     await page.evaluate((at) => window.postMessage({ type: "debugStopped", at }, "*"), stopped);
     await page.waitForTimeout(1200); // the camera flies to the stop
     await shot("3-debugger");
+  }
+
+  if (process.argv.includes("--without-debugger")) {
+    const state = { running: true, stopping: false, debugged: false, withoutDebugger: true };
+    await page.evaluate((state) => window.postMessage({ type: "liveState", state }, "*"), state);
+    await shot("4-without-debugger");
   }
 
   const status = await page.textContent("#status");

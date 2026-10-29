@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Without the Python Debugger extension, Run Live still runs (in a terminal, lighting only), and
+  the panel now says so for as long as it runs, with a button that installs the debugger. This
+  replaces a notification that showed once ever.
 - Each file's functions get a muted tint of their own (Apple's system hues, half-way to grey), so you see which module a function is in; activity stays in the accent.
 - A calmer, minimal look: neutral greys at rest and one accent color for activity, the theme's
   own (its link color), with red only for breakpoints and the debugger. Smaller matte neurons,

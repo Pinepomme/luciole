@@ -5,7 +5,7 @@ import { randomBytes } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { addBreakpoint, hasPythonDebugger, pythonDebugSession, registerDebugging, removeBreakpoints, sourceBreakpoints } from "./debugging";
+import { addBreakpoint, hasPythonDebugger, installPythonDebugger, pythonDebugSession, registerDebugging, removeBreakpoints, sourceBreakpoints } from "./debugging";
 import type { Graph } from "./graph";
 import { webviewHtml } from "./html";
 import { LiveSession } from "./live";
@@ -20,7 +20,6 @@ let autoStartItem: vscode.StatusBarItem;
 /** The last run started, to run it again from the panel. */
 const LAST_RUN = "luciole.lastRun";
 /** Set once the user was told Run Live works better with the Python debugger installed. */
-const DEBUGGER_HINT = "luciole.debuggerHintShown";
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("Luciole");
@@ -334,12 +333,6 @@ async function startRun(context: vscode.ExtensionContext, config: RunConfigurati
   void context.workspaceState.update(LAST_RUN, { ...config, folder }); // runs again from the same folder
   panel?.post({ type: "liveStarted", script: run.label });
   if (!hasPythonDebugger()) {
-    if (!context.globalState.get<boolean>(DEBUGGER_HINT)) {
-      void context.globalState.update(DEBUGGER_HINT, true);
-      void vscode.window.showInformationMessage(
-        "Luciole: install the Python Debugger extension (ms-python.debugpy) and Run Live runs under it: breakpoints, stepping and variables while the brain lights up. Until then, it runs in a terminal.",
-      );
-    }
     await live.run(run, folder, pythonPath(folder), dir);
     return;
   }
@@ -471,6 +464,8 @@ class GraphPanel {
       void runAgain(this.context, this.target);
     } else if (message.type === "runLiveWith") {
       void pickRun(this.context);
+    } else if (message.type === "installDebugger") {
+      void installPythonDebugger();
     } else if (message.type === "stopLive") {
       void live.stop(pythonDebugSession());
     } else if (message.type === "addBreakpoint" && this.root) {

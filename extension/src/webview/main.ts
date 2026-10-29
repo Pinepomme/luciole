@@ -74,6 +74,8 @@ const vscode = acquireVsCodeApi();
 const statusEl = document.getElementById("status")!;
 const pathEl = document.getElementById("path")!;
 const messageEl = document.getElementById("message")!;
+const noticeEl = document.getElementById("notice")!;
+document.getElementById("installDebugger")!.addEventListener("click", () => vscode.postMessage({ type: "installDebugger" }));
 const liveButton = document.getElementById("live") as HTMLButtonElement;
 const stopButton = document.getElementById("stop") as HTMLButtonElement;
 
@@ -842,6 +844,7 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
     const { running, stopping } = message.state;
     stopButton.hidden = !running || message.state.debugged; // the debug toolbar stops a debugged run
     stopButton.textContent = stopping ? "Force stop" : "Stop";
+    noticeEl.hidden = !message.state.withoutDebugger;
     if (running && stopping) {
       setStatus("stopping…");
     }
