@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { PROTOCOL, engineFile, readEnginePort, viewerRoots } from "../src/engine";
+import { PROTOCOL, engineFile, parseEngineLine, readEnginePort, viewerRoots } from "../src/engine";
 
 test("the engine's file is per protocol, under LUCIOLE_HOME or ~/.luciole", () => {
   assert.equal(engineFile({ LUCIOLE_HOME: "/tmp/home" }), path.join("/tmp/home", `engine-v${PROTOCOL}.json`));
@@ -28,4 +28,17 @@ test("viewer roots are sent with symlinks resolved, as recorders resolve theirs"
   fs.symlinkSync(project, link, "junction"); // "junction": no privileges needed on Windows
   const missing = path.join(dir, "missing");
   assert.deepEqual(viewerRoots([link, project, missing]), [project, missing]);
+});
+
+test("a broken line from the engine still yields the message it ends with", () => {
+  assert.deepEqual(parseEngineLine('{"from":3,"calls":{"m:f":1}}'), { message: { from: 3, calls: { "m:f": 1 } }, recovered: false });
+  // A recorder died mid-line: its exit must not be lost.
+  assert.deepEqual(parseEngineLine('{"from":3,"stacks":[{"thread":"Ma{"exit":3}'), { message: { exit: 3 }, recovered: true });
+  assert.deepEqual(parseEngineLine('{"from":3,"st{"from":4,"stacks":[{"thread":"MainThread","stack":["m:f"]}]}'), {
+    message: { from: 4, stacks: [{ thread: "MainThread", stack: ["m:f"] }] },
+    recovered: true,
+  });
+  assert.equal(parseEngineLine('{"from":3,"stacks":[{"thread":"Ma'), undefined);
+  assert.equal(parseEngineLine("garbage"), undefined);
+  assert.equal(parseEngineLine("[1, 2]"), undefined);
 });
