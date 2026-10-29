@@ -433,21 +433,33 @@ class Analyzer:
             self.module_bindings[key] = found
         return found
 
-    def lookup(self, scope: Scope, name: str, shadowed: list[set[str]] = ()) -> str | None:
-        """Resolve a name read in `scope` (LEGB; class bodies are not visible from methods)."""
+    def binding_scope(self, scope: Scope, name: str, shadowed: list[set[str]] = ()) -> Scope | None:
+        """The scope whose binding a name read in `scope` sees (LEGB; class bodies are not visible
+        from methods); the module when only its star imports may bind it."""
         if any(name in names for names in shadowed):
             return None
         current, first = scope, True
         while current is not None:
             if first or current.kind != "class":
                 if name in current.global_names:
-                    return self.module_binding(self.module_scope(current), name)
-                if name in current.bindings and name not in current.nonlocal_names:
-                    return self.resolve(current.bindings[name])
-                if current.parent is None:
-                    return self.module_binding(current, name)
+                    return self.module_scope(current)
+                if (name in current.bindings and name not in current.nonlocal_names) or current.parent is None:
+                    return current
             current, first = current.parent, False
         return None
+
+    def lookup(self, scope: Scope, name: str, shadowed: list[set[str]] = ()) -> str | None:
+        """Resolve a name read in `scope`."""
+        found = self.binding_scope(scope, name, shadowed)
+        if found is None:
+            return None
+        return self.module_binding(found, name) if found.kind == "module" else self.resolve(found.bindings[name])
+
+    def is_imported(self, scope: Scope, name: str, shadowed: list[set[str]] = ()) -> bool:
+        """A name read in `scope` is bound by an import (resolved or not)."""
+        found = self.binding_scope(scope, name, shadowed)
+        binding = found.bindings.get(name, False) if found else False
+        return binding is None or isinstance(binding, Import)
 
     def ref(self, scope: Scope, node: ast.expr, shadowed: list[set[str]] = ()) -> str | None:
         """Resolve a name or dotted attribute chain to a node id, without recording edges."""
@@ -813,7 +825,7 @@ class FlowVisitor:
             by_name = False
             if isinstance(node, ast.Attribute) and target is None:
                 target = self.typed_member(node)
-                if target is None and self.an.value_class(self.scope, node.value) is None:
+                if target is None and self.an.value_class(self.scope, node.value) is None and not self.from_module(node.value):
                     target = self.an.only_method_named(node.attr)
                     by_name = target is not None
             if self.an.is_property(target):  # reading `obj.prop` runs its getter, maybe a subclass's
@@ -887,6 +899,22 @@ class FlowVisitor:
         cls = self.an.value_class(self.scope, node.value)
         return self.an.class_member(cls, node.attr) if cls else None
 
+    def from_module(self, node: ast.expr) -> bool:
+        """A module, or attributes on one that the project doesn't define (`os.path`, `json` or a
+        name imported from outside the project): no instance of a project class, so `node.m` is
+        never matched by method name."""
+        while isinstance(node, ast.Attribute):
+            found = self.ref(node)
+            if found is not None:
+                return self.an.kind(found) == "module"
+            node = node.value
+        if not isinstance(node, ast.Name):
+            return False
+        found = self.lookup(node.id)
+        if found is not None:
+            return self.an.kind(found) == "module"
+        return self.an.is_imported(self.scope, node.id, self.shadowed)
+
     def instance_class(self, func: ast.expr) -> str | None:
         """`type(x)` or `x.__class__`, called to make another instance of `x`'s class."""
         if isinstance(func, ast.Attribute) and func.attr == "__class__":
@@ -902,7 +930,7 @@ class FlowVisitor:
             target = self.typed_member(node.func)
         target = target or self.instance_class(node.func)
         by_name = False
-        if target is None and isinstance(node.func, ast.Attribute) and self.an.value_class(self.scope, node.func.value) is None:
+        if target is None and isinstance(node.func, ast.Attribute) and self.an.value_class(self.scope, node.func.value) is None and not self.from_module(node.func.value):
             target = self.an.only_method_named(node.func.attr)
             by_name = target is not None
         if target is None and isinstance(node.func, ast.Name) and node.func.id in BUILTIN_DUNDERS and node.args:
