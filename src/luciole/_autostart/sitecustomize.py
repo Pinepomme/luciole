@@ -3,8 +3,9 @@
 This folder goes on PYTHONPATH (Luciole's switch in VS Code, or `luciole env`), so Python imports
 this file at startup, as it would the environment's own sitecustomize. When the Luciole engine
 runs (its port in LUCIOLE_LIVE_PORT, else in its file, see luciole/protocol.py), the process
-reports its calls to it; when no engine answers, nothing is started. Turning Luciole off is
-removing the folder from PYTHONPATH.
+reports its calls to it; when no engine answers, nothing is started, unless LUCIOLE_TRACE names
+a directory to write a trace of each process in (see docs/trace-format.md). Turning Luciole off
+is removing the folder from PYTHONPATH.
 
 Programs must run the same with Luciole on: Luciole's errors are swallowed, and the sitecustomize
 this file hides (Ubuntu's Python ships one, for instance) still runs.
@@ -90,16 +91,19 @@ def start_luciole():
         return
     import socket
 
+    trace = os.environ.get("LUCIOLE_TRACE")  # a directory: one trace file per process
     port = os.environ.get("LUCIOLE_LIVE_PORT") or engine_port()
-    if not port:
+    connection = None
+    if port:
+        # Connect before importing the recorder: with no engine, starting costs nothing more.
+        try:
+            connection = socket.create_connection(("127.0.0.1", int(port)), timeout=2)
+            connection.settimeout(None)
+        except (OSError, ValueError):
+            connection = None
+    if connection is None and not trace:
         return
-    # Connect before importing the recorder: with no engine, starting costs nothing more.
-    try:
-        connection = socket.create_connection(("127.0.0.1", int(port)), timeout=2)
-    except (OSError, ValueError):
-        return
-    connection.settimeout(None)
-    import_bundled("recorder").start(port=port, quiet=True, connection=connection)
+    import_bundled("recorder").start(port=port if connection else None, quiet=True, connection=connection, trace=trace)
 
 
 drop_working_directory()
