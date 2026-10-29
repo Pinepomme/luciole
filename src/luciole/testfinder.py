@@ -4,7 +4,8 @@ their own, so "run this file" means running the tests that import it.
 A test file is `test_*.py` or `*_test.py` under the project root (pytest's default names). It uses
 a module when it imports it, directly (`import pkg.mod`, `from pkg.mod import x`,
 `from pkg import mod`, relative imports too) or through one of its submodules when the module is a
-package's `__init__.py`.
+package's `__init__.py`. When no test imports a module directly, the ones that import it through
+other project modules are used, closest first.
 
 A module has a dotted name for each directory it can be imported from (the import roots): the
 project root, `src/`, and the directories pytest puts test files' packages under. Namespace
@@ -20,18 +21,24 @@ from pathlib import Path
 
 from luciole.analyzer import SKIP_DIRS, module_name
 
+MAX_DEPTH = 10  # project modules followed from a test to the module
+
 
 def is_test_file(path: Path) -> bool:
     return path.suffix == ".py" and (path.name.startswith("test_") or path.stem.endswith("_test"))
 
 
-def find_test_files(root: Path):
+def python_files(root: Path):
+    """The .py files under `root`, in a stable order, leaving out the directories the analyzer skips."""
     for directory, subdirectories, files in os.walk(root):
         subdirectories[:] = sorted(d for d in subdirectories if not d.startswith(".") and d not in SKIP_DIRS)
         for name in sorted(files):
-            path = Path(directory, name)
-            if is_test_file(path):
-                yield path
+            if name.endswith(".py"):
+                yield Path(directory, name)
+
+
+def find_test_files(root: Path):
+    return (path for path in python_files(root) if is_test_file(path))
 
 
 def import_root(file: Path) -> Path:
@@ -88,29 +95,58 @@ def imported_modules(tree: ast.AST, packages: set[str]) -> set[str]:
     return modules
 
 
+def packages_of(file: Path, roots: set[Path]) -> set[str]:
+    """Names of the package a file's relative imports start from."""
+    names = import_names(file, roots)
+    return names if file.name == "__init__.py" else {name.rpartition(".")[0] for name in names}
+
+
 def tests_for(file: Path, root: Path) -> list[Path]:
-    """Test files under `root` that import the module in `file`, sorted."""
-    tests = [test for test in find_test_files(root) if test.resolve() != file.resolve()]
+    """Test files under `root` that import the module in `file`, sorted. When none does, the
+    closest ones that import it through other project modules (`MAX_DEPTH` of them at most)."""
+    target = file.resolve()
+    files = [path for path in python_files(root) if path.resolve() != target]
+    tests = [path for path in files if is_test_file(path)]
+    others = [path for path in files if not is_test_file(path)]
     roots = {root.resolve(), (root / "src").resolve()} | {import_root(test) for test in tests}
-    modules = import_names(file, roots)
-    if not modules:
-        return []
-    is_package = file.name == "__init__.py"
-    lasts = {module.rpartition(".")[2] for module in modules}
-    found = []
-    for test in tests:
+    parsed: dict[Path, set[str]] = {}
+
+    def imports(path: Path, lasts: set[str]) -> set[str]:
+        if path in parsed:
+            return parsed[path]
         try:
-            source = test.read_text(encoding="utf-8")
+            source = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
-            continue
+            source = ""
         if not any(last in source for last in lasts) and "from ." not in source:
-            continue  # cheap filter before parsing
+            return set()  # cheap filter before parsing, and nothing cached: other names may match
         try:
-            tree = ast.parse(source, str(test))
+            tree = ast.parse(source, str(path))
         except SyntaxError:
-            continue
-        packages = {name.rpartition(".")[0] for name in import_names(test, roots)}
-        imports = imported_modules(tree, packages)
-        if modules & imports or (is_package and any(name.startswith(module + ".") for name in imports for module in modules)):
-            found.append(test)
-    return found
+            tree = None
+        parsed[path] = imported_modules(tree, packages_of(path, roots)) if tree else set()
+        return parsed[path]
+
+    def users(paths: list[Path], modules: set[str], packages: set[str]) -> list[Path]:
+        """The files that import one of `modules`, or a submodule of one of `packages`."""
+        lasts = {module.rpartition(".")[2] for module in modules}
+        return [
+            path
+            for path in paths
+            if modules & (found := imports(path, lasts)) or any(name.startswith(package + ".") for name in found for package in packages)
+        ]
+
+    modules = import_names(file, roots)
+    packages = modules if file.name == "__init__.py" else set()
+    seen: set[Path] = set()
+    for _ in range(MAX_DEPTH):
+        if not modules:
+            return []
+        found = users(tests, modules, packages)
+        if found:
+            return found
+        reached = [path for path in users(others, modules, packages) if path not in seen]
+        seen.update(reached)
+        modules = {name for path in reached for name in import_names(path, roots)}
+        packages = {name for path in reached if path.name == "__init__.py" for name in import_names(path, roots)}
+    return []
