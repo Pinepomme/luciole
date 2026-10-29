@@ -2,12 +2,18 @@
  * Renders the webview in headless Chromium, outside VS Code, and saves screenshots.
  * Uses the real webview bundle and Content Security Policy, with a stub of the VS Code API.
  *
- *   node out/dev/screenshot.js [path] [--events FILE] [--breakpoint FILE:LINE] [--stopped FILE:LINE] [--out dir]
+ *   node out/dev/screenshot.js [path] [--events FILE [--frames N] [--every MS] [--zoom F]]
+ *                              [--breakpoint FILE:LINE] [--stopped FILE:LINE] [--out dir] [--fps]
+ *                              [--theme light]
  *
- * --fps also prints how many frames per second the overview draws.
+ * --theme light uses VS Code's Light Modern colors instead of Dark Modern.
+ * --fps also prints how many frames per second the overview draws (and, with --frames, the replay).
  *
  * --events replays a recording made with `luciole run --events FILE ...` and captures the
- * moment with the deepest call stack. --breakpoint and --stopped (FILE relative to the graph's
+ * moment with the deepest call stack. --frames N then keeps replaying it in real time (looping)
+ * and captures N more shots, --every MS apart (default 200): 2-live-1.png ... 2-live-N.png, to see
+ * how the light moves. --zoom F brings the camera F times closer for these shots.
+ * --breakpoint and --stopped (FILE relative to the graph's
  * root) show a breakpoint and the debugger stopped there, as VS Code would send them.
  *
  * Needs a Chromium: set CHROME_PATH, or have one in the Playwright cache (~/.cache/ms-playwright).
@@ -23,13 +29,22 @@ import { webviewHtml } from "../src/html";
 const extensionDir = path.resolve(__dirname, "../..");
 const repo = path.resolve(extensionDir, "..");
 
-// A few VS Code dark theme variables, so colors look as they do in the editor.
-const THEME = `<style>:root {
+// A few VS Code theme variables (Dark Modern, or Light Modern), so colors look as they do in the editor.
+const DARK = `
   --vscode-editor-background: #1f1f1f; --vscode-editor-foreground: #cccccc; --vscode-foreground: #cccccc;
   --vscode-descriptionForeground: #9d9d9d; --vscode-editorWidget-background: #202020;
-  --vscode-focusBorder: #0078d4; --vscode-panel-border: #2b2b2b; --vscode-errorForeground: #f85149;
+  --vscode-focusBorder: #0078d4; --vscode-textLink-foreground: #4daafc; --vscode-panel-border: #2b2b2b;
+  --vscode-errorForeground: #f85149; --vscode-button-background: #0078d4; --vscode-button-foreground: #ffffff;
   --vscode-button-secondaryBackground: #313131; --vscode-button-secondaryForeground: #cccccc;
-  --vscode-button-secondaryHoverBackground: #3c3c3c;
+  --vscode-button-secondaryHoverBackground: #3c3c3c; --vscode-debugIcon-breakpointForeground: #e51400;`;
+const LIGHT = `
+  --vscode-editor-background: #ffffff; --vscode-editor-foreground: #3b3b3b; --vscode-foreground: #3b3b3b;
+  --vscode-descriptionForeground: #3b3b3b; --vscode-editorWidget-background: #f8f8f8;
+  --vscode-focusBorder: #005fb8; --vscode-textLink-foreground: #005fb8; --vscode-panel-border: #e5e5e5;
+  --vscode-errorForeground: #f85149; --vscode-button-background: #005fb8; --vscode-button-foreground: #ffffff;
+  --vscode-button-secondaryBackground: #e5e5e5; --vscode-button-secondaryForeground: #3b3b3b;
+  --vscode-button-secondaryHoverBackground: #cccccc; --vscode-debugIcon-breakpointForeground: #e51400;`;
+const THEME = `<style>:root {${option("--theme") === "light" ? LIGHT : DARK}
   --vscode-font-family: system-ui, sans-serif; --vscode-font-size: 13px;
   --vscode-editor-font-family: "DejaVu Sans Mono", monospace;
   --vscode-charts-blue: #3794ff; --vscode-charts-green: #89d185; --vscode-charts-orange: #d18616;
@@ -117,23 +132,26 @@ async function main(): Promise<void> {
 
   await page.evaluate((graph) => window.postMessage({ type: "graph", target: "harness", graph, warnings: [] }, "*"), JSON.parse(json));
   await shot("1-overview");
-  if (process.argv.includes("--fps")) {
-    // Frames drawn in 3 s (software WebGL here: compare runs, not with a real GPU).
-    const fps = await page.evaluate(
-      () =>
-        new Promise<number>((resolve) => {
-          let frames = 0;
-          const start = performance.now();
-          const count = () => (performance.now() - start < 3000 ? (frames++, requestAnimationFrame(count)) : resolve(frames / 3));
-          requestAnimationFrame(count);
-        }),
-    );
-    console.log(`frames/s: ${fps.toFixed(1)}`);
-  }
+  // Frames drawn in 3 s (software WebGL here: compare runs, not with a real GPU).
+  const fps = async (what: string) => {
+    if (process.argv.includes("--fps")) {
+      const rate = await page.evaluate(
+        () =>
+          new Promise<number>((resolve) => {
+            let frames = 0;
+            const start = performance.now();
+            const count = () => (performance.now() - start < 3000 ? (frames++, requestAnimationFrame(count)) : resolve(frames / 3));
+            requestAnimationFrame(count);
+          }),
+      );
+      console.log(`frames/s${what}: ${rate.toFixed(1)}`);
+    }
+  };
+  await fps("");
 
   // Live lighting: replay recorded events (luciole run --events FILE), or a made-up frame for shop.py.
   const eventsFile = option("--events");
-  const frames: { stacks?: { stack: string[] }[] }[] = eventsFile
+  const frames: { t?: number; stacks?: { stack: string[] }[] }[] = eventsFile
     ? fs.readFileSync(eventsFile, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)).filter((f) => !f.done)
     : target.endsWith("shop.py")
       ? [{ stacks: [{ thread: "MainThread", stack: ["shop", "shop:main", "shop:Cart.total", "shop:with_tax"] }], calls: { "shop:Cart.add": 2, "shop:with_tax": 1 }, links: { "shop:main>shop:Cart.add": 2 } }]
@@ -149,7 +167,45 @@ async function main(): Promise<void> {
       await page.waitForTimeout(50);
     }
     await page.waitForTimeout(150);
+    const zoom = Number(option("--zoom") ?? 1);
+    if (zoom !== 1) {
+      // Closer to the middle of the view, to see the light on a big graph.
+      await page.evaluate((zoom) => {
+        const graph = (window as any).luciole.graph;
+        const target = graph.controls().target;
+        const p = graph.camera().position;
+        const at = (k: "x" | "y" | "z") => target[k] + (p[k] - target[k]) / zoom;
+        graph.cameraPosition({ x: at("x"), y: at("y"), z: at("z") }, { x: target.x, y: target.y, z: target.z }, 0);
+      }, zoom);
+    }
     await shot("2-live");
+    const count = Number(option("--frames") ?? 0);
+    if (count > 0) {
+      // Replay in the page, at the recording's pace and looping, while the shots are taken.
+      await page.evaluate(
+        ({ frames, from }) => {
+          let i = from;
+          const next = () => {
+            const frame = frames[i];
+            window.postMessage({ type: "live", frame }, "*");
+            i = (i + 1) % frames.length;
+            const gap = i > 0 && frames[i].t !== undefined && frame.t !== undefined ? (frames[i].t! - frame.t!) * 1000 : 50;
+            setTimeout(next, Math.max(gap, 10));
+          };
+          next();
+        },
+        { frames, from: (deepest + 1) % frames.length },
+      );
+      await fps(" during the replay");
+      const every = Number(option("--every") ?? 200);
+      const start = Date.now();
+      for (let i = 1; i <= count; i++) {
+        await page.waitForTimeout(Math.max(0, start + i * every - Date.now()));
+        const file = path.join(outDir, `2-live-${i}.png`);
+        await page.screenshot({ path: file });
+        console.log(`${file} (+${Date.now() - start} ms)`);
+      }
+    }
   }
 
   // The debugger: a breakpoint, and where it stopped.

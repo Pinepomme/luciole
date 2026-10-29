@@ -1,6 +1,6 @@
 # Luciole
 
-See a Python project as a 3D brain: one glowing neuron per function, and lines between them for
+See a Python project as a 3D brain: one neuron per function, and lines between them for
 the variables that flow from one function to another (arguments in, return values out, and
 globals or attributes one function writes and another reads). Run your program live and watch
 the functions light up as they run.
@@ -10,10 +10,11 @@ the functions light up as they run.
 - **Run Live** (⚡ in the title bar of a Python editor) runs the file under VS Code's Python
   debugger and lights up the brain. A test file runs with pytest; a script (it has
   `if __name__ == "__main__":`) runs as itself; any other module, which is not meant to run on its
-  own, runs through the test files that import it. In the brain: functions on the current call path
-  glow, functions that just ran flash and fade, pulses travel along the lines as calls happen. The
-  bar at the bottom shows what is running now. Functions that ran stay softly lit afterwards.
-  Calls the static analysis missed appear as orange lines.
+  own, runs through the test files that import it. In the brain, activity shows in one accent
+  color, your theme's: functions on the current call path are filled with it and ringed, functions
+  that just ran fade back to grey, and each call traces its line from the caller to the callee.
+  The bar at the bottom shows what is running now. Calls the static analysis missed appear as new
+  lines.
 - Since the run is an ordinary debug session, everything of VS Code's debugger works on it:
   breakpoints, stopping on exceptions, Pause, Step over / into / out (F10 / F11 / Shift+F11),
   the Variables, Watch and Call Stack views, hovering a variable, the Debug Console. The program's
@@ -39,8 +40,8 @@ the functions light up as they run.
   Breakpoints view); functions with a breakpoint on any of their lines have a red dot, and
   right-clicking them again removes those breakpoints.
 - Threads and asyncio: each thread gets its own line in the bottom bar. Coroutines paused on an
-  `await` glow blue, so you can tell running work (amber) from work waiting on I/O. Teal lines
-  show where a thread or task was started from. Try it on `examples/workers.py`.
+  `await` get a ring but no fill, so you can tell running work from work waiting on I/O. New
+  lines show where a thread or task was started from (hover one to see). Try it on `examples/workers.py`.
 - The graph button graphs the current file and follows you between Python files. To graph a
   whole project, right-click its folder in the Explorer, or run
   **Luciole: Show Graph (Whole Folder)**.

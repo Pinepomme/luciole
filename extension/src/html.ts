@@ -26,13 +26,6 @@ export function webviewHtml({ cspSource, nonce, scriptUri, styleUri }: PageOptio
     <button id="refresh" title="Run the analyzer again">Refresh</button>
     <button id="fit" title="Fit the brain in the window">Fit</button>
     <span id="status"></span>
-    <span id="legend">
-      <span class="key call">call: arguments in, return values out</span>
-      <span class="key state">shared state</span>
-      <span class="key runtime">seen only at runtime</span>
-      <span class="key spawn">starts a thread or task</span>
-      <span class="key waiting">waiting on await</span>
-    </span>
   </div>
   <div id="message" hidden></div>
   <div id="brain"></div>

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Each file's functions get a muted tint of their own (Apple's system hues, half-way to grey), so you see which module a function is in; activity stays in the accent.
+- A calmer, minimal look: neutral greys at rest and one accent color for activity, the theme's
+  own (its link color), with red only for breakpoints and the debugger. Smaller matte neurons,
+  hairline links, names in the system font with no outlines; no colors per region, no glows.
+  A running function fills with the accent and gets a thin ring, a coroutine waiting on an
+  `await` gets the ring only. Works in light and dark themes. The legend is gone: hover a line to
+  see what it is.
+- Live mode: a call traces its line from the caller to the callee in the accent color, like a
+  route drawing itself on a map (instead of bubbles), then eases back to grey. A busy line stays
+  drawn until its calls stop.
 - The brain is a map: packages, modules and classes are regions inside regions, placed by how
   much they call each other, with their names at their centres. The same project always gives
   the same map, and editing a file leaves the rest in place. Calls between regions travel
