@@ -10,7 +10,7 @@
 import * as net from "net";
 import * as path from "path";
 import * as vscode from "vscode";
-import { PROTOCOL, ensureEngine, viewerRoots } from "./engine";
+import { PROTOCOL, ensureEngine, parseEngineLine, viewerRoots } from "./engine";
 import type { LiveFrame, LiveState, PausedThread, RecorderReply, StepMode, Variable } from "./messages";
 import { Handles, ProcessInfo, Processes, processLabel } from "./processes";
 import type { ResolvedRun } from "./runs";
@@ -371,13 +371,14 @@ export class LiveSession implements vscode.Disposable {
       for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
-        let message: EngineMessage;
-        try {
-          message = JSON.parse(line) as EngineMessage;
-        } catch {
-          this.log.appendLine(`ignored a malformed live event: ${line.slice(0, 200)}`);
+        const parsed = parseEngineLine(line);
+        if (!parsed || parsed.recovered) {
+          this.log.appendLine(`${parsed ? "kept the end of" : "ignored"} a malformed live event: ${line.slice(0, 200)}`);
+        }
+        if (!parsed) {
           continue;
         }
+        const message = parsed.message as EngineMessage;
         handled = handled.then(() => this.receive(message)).catch((error) => this.log.appendLine(`live event failed: ${error}`));
       }
     });

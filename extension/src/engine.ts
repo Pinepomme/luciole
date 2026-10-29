@@ -52,6 +52,45 @@ export function viewerRoots(folders: string[]): string[] {
   return [...new Set(roots)];
 }
 
+/** Starts of objects tried when recovering a message from a broken line, last first. */
+const MAX_RECOVERY_TRIES = 50;
+
+/**
+ * One line from the engine: a JSON object, else undefined. A line can be broken: a recorder that
+ * died mid-line left `{"from":3,"sta{"exit":3}` (its partial frame, then the engine's notice that
+ * it exited). Losing that exit would keep the process running in the view forever, so a broken
+ * line yields the complete object it ends with, if any: an exit notice first, else the last object
+ * that parses to the end of the line.
+ */
+export function parseEngineLine(line: string): { message: Record<string, unknown>; recovered: boolean } | undefined {
+  const parse = (text: string) => {
+    try {
+      const value: unknown = JSON.parse(text);
+      return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const whole = parse(line);
+  if (whole) {
+    return { message: whole, recovered: false };
+  }
+  const exit = line.lastIndexOf('{"exit":');
+  const starts = exit > 0 ? [exit] : [];
+  for (let start = line.lastIndexOf('{"'); start > 0 && starts.length < MAX_RECOVERY_TRIES; start = line.lastIndexOf('{"', start - 1)) {
+    if (start !== exit) {
+      starts.push(start);
+    }
+  }
+  for (const start of starts) {
+    const message = parse(line.slice(start));
+    if (message) {
+      return { message, recovered: true };
+    }
+  }
+  return undefined;
+}
+
 function answers(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = net.connect(port, "127.0.0.1");
