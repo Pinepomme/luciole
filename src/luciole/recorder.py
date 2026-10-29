@@ -104,7 +104,7 @@ class Recorder:
         self.waiting: dict[str, int] = {}
         self.started = time.perf_counter()
         self.thread_stacks: dict[int, list[str]] = {}  # thread ident -> project stack, replaced (never mutated)
-        self.last_state: tuple = ()
+        self.last_state: tuple = ([], {})  # nothing runs yet: no frame until something does
         # Pausing: set from the control thread; each paused thread waits on its own queue.
         self.line_events: Callable[[bool], None] = lambda on: None
         self.pausing = False
@@ -502,6 +502,11 @@ class Session:
         if tool is None:
             raise ValueError("no free sys.monitoring tool id")
         recorder = self.recorder
+        if self.connection:
+            # Before the pump thread starts: the engine refuses a connection that does not start
+            # with a hello.
+            hello = protocol.hello("recorder", pid=os.getpid(), argv=sys.orig_argv, root=str(recorder.root))
+            self.write(hello, self.view_sinks)
         events = monitoring.events
         callbacks = {
             events.PY_START: recorder.on_start,
@@ -527,8 +532,6 @@ class Session:
         sys.set_coroutine_origin_tracking_depth(ORIGIN_DEPTH)
         monitoring.set_events(tool, always)
         if self.connection:
-            hello = protocol.hello("recorder", pid=os.getpid(), argv=sys.orig_argv, root=str(recorder.root))
-            self.write(hello, self.view_sinks)
             # After set_events above, which would undo an early pause's LINE events.
             threading.Thread(target=self.control, name="luciole-control", daemon=True).start()
 
