@@ -327,6 +327,7 @@ def test_the_hello_comes_before_the_first_frame(tmp_path):
     assert json.loads(result.stdout)["hello"]["role"] == "recorder"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="no SIGTERM handler on Windows")
 def test_a_process_ending_at_once_still_delivers_its_calls(tmp_path):
     # A process that ends before reading the engine's welcome closes a socket holding unread
     # data: the connection is reset, and the engine loses the calls it had not read yet. Pool
