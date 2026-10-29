@@ -111,6 +111,9 @@ share the same session.
   - semantic zoom: regions open into modules, then functions, as you get closer;
   - size and brightness by importance (callers, runtime calls), entry points marked;
   - search, focus (the functions N calls around a selection) and filters (tests, private helpers).
+- [x] A minimal look: neutral greys, one accent (the theme's), a muted tint per file; calls trace
+  their line from caller to callee; no legend.
+- A Luciole sidebar: actions, running programs, a map outline with search (PR #13).
 
 ### Phase 3: History and agents (one track)
 
