@@ -275,7 +275,9 @@ without it. When the last viewer leaves, the engine resumes paused programs.
   as processes of their own. The VS Code switch ("Luciole: on" in the status bar, setting
   `luciole.autoStart`) sets `PYTHONPATH` and `LUCIOLE_ROOT` in new terminals; `luciole env` prints
   them for a shell (`--off` to undo). The `sitecustomize` it hides still runs, and `luciole run`
-  processes are left to their own recorder.
+  processes are left to their own recorder. A program that imports a `luciole` of its own (another
+  version, or this repository's tests) gets its own: auto-start keeps its copy out of
+  `sys.modules`, and `luciole.start()` from another copy leaves the process to it.
 
 The recorder uses `sys.monitoring` tool id 4 (or 3): the debugger, coverage and profiler ids stay
 free.

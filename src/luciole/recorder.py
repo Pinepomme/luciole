@@ -619,6 +619,8 @@ def start(root: Path | str | None = None, port: int | str | None = None, events:
         if not quiet:
             log.warning("live mode needs Python 3.12 or newer (sys.monitoring); this is %s", sys.version.split()[0])
         return False
+    if events is None and "luciole" in map(sys.monitoring.get_tool, (3, 4)):
+        return True  # another copy of luciole (auto-start's, see import_bundled) already reports it
     port = port or os.environ.get("LUCIOLE_LIVE_PORT") or protocol.engine_port()
     if connection is None and port:
         connection = connect(port, quiet)
