@@ -114,6 +114,40 @@ def test_a_second_engine_leaves_the_running_one(engine):
     assert protocol.engine_port() == engine.port
 
 
+def test_engines_started_together_leave_one_running():
+    engines = [Engine(idle=0) for _ in range(4)]
+    barrier = threading.Barrier(len(engines))
+
+    def serve_together(engine):
+        barrier.wait()
+        engine.serve()
+
+    threads = [threading.Thread(target=serve_together, args=(engine,), daemon=True) for engine in engines]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + 10
+    while sum(thread.is_alive() for thread in threads) > 1 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    [running] = [engine for engine, thread in zip(engines, threads) if thread.is_alive()]
+    assert protocol.engine_port() == running.port
+    viewer = Client(running.port, "viewer")
+    assert "welcome" in viewer.receive()
+    viewer.close()
+    running.stop()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert not protocol.engine_file().exists()
+
+
+def test_luciole_engine_leaves_a_running_engine(engine):
+    while protocol.engine_port() != engine.port:
+        time.sleep(0.01)
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    result = subprocess.run([sys.executable, "-m", "luciole", "engine", "--idle", "1"], env=env, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0 and "already runs" in result.stderr
+    assert protocol.engine_port() == engine.port
+
+
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="sys.monitoring needs Python 3.12")
 def test_luciole_run_reports_to_the_running_engine(engine, tmp_path):
     while protocol.engine_port() != engine.port:

@@ -17,13 +17,15 @@ root contains the other's, symbolic links resolved (a viewer without roots shows
 two VS Code windows on two projects each see their own programs. When a viewer leaves, the programs
 no remaining viewer shows resume.
 
-The engine writes its port to ~/.luciole/engine-v<protocol>.json for the others to find it, and
+The engine writes its port to ~/.luciole/engine-v<protocol>.json for the others to find it
+(unless an engine there answers: then it exits, so one remains of engines started together), and
 exits after `idle` seconds with nobody connected. Standard library only, one thread per
 connection: a handful of processes and viewers, each sending a line every 50 ms at most.
 """
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import logging
@@ -34,7 +36,7 @@ import time
 from pathlib import Path
 
 from luciole import __version__
-from luciole.protocol import PROTOCOL, engine_file, engine_port, send
+from luciole.protocol import PROTOCOL, engine_file, engine_port, hello, send
 
 log = logging.getLogger(__name__)
 
@@ -75,9 +77,12 @@ class Engine:
 
     # Running
 
-    def serve(self) -> None:
-        """Accept connections until stop(), or `idle` seconds with nobody connected."""
-        self.register()
+    def serve(self) -> bool:
+        """Accept connections until stop(), or `idle` seconds with nobody connected. Returns False
+        at once, without serving, when another engine already runs (see register)."""
+        if not self.register():
+            self.server.close()
+            return False
         self.server.settimeout(0.5)
         try:
             while not self.stopping.is_set():
@@ -86,7 +91,7 @@ class Engine:
                 except TimeoutError:
                     with self.lock:
                         if self.idle and not self.peers and time.monotonic() - self.quiet_since > self.idle:
-                            return
+                            return True
                     continue
                 connection.settimeout(None)
                 with self.lock:
@@ -95,20 +100,30 @@ class Engine:
         finally:
             self.server.close()
             self.unregister()
+        return True
 
     def stop(self) -> None:
         self.stopping.set()
 
-    def register(self) -> None:
+    def register(self) -> bool:
+        """Write this engine's file, unless the one there names an engine that answers: then
+        return False. Engines started together (two VS Code windows) check and write in turn."""
         file = engine_file()
         file.parent.mkdir(parents=True, exist_ok=True)
-        temporary = file.with_name(f"{file.name}.{os.getpid()}")
-        temporary.write_text(json.dumps({"port": self.port, "pid": os.getpid(), "protocol": PROTOCOL, "version": __version__}))
-        os.replace(temporary, file)
+        with engine_lock():
+            running = engine_port()
+            if running and running != self.port and answers(running):
+                return False
+            temporary = file.with_name(f"{file.name}.{os.getpid()}.{self.port}")
+            temporary.write_text(json.dumps({"port": self.port, "pid": os.getpid(), "protocol": PROTOCOL, "version": __version__}))
+            os.replace(temporary, file)
+        return True
 
     def unregister(self) -> None:
-        if engine_port() == self.port:
-            engine_file().unlink(missing_ok=True)
+        """Remove this engine's file, if it still names this engine."""
+        with engine_lock():
+            if engine_port() == self.port:
+                engine_file().unlink(missing_ok=True)
 
     # Connections
 
@@ -129,6 +144,9 @@ class Engine:
             role, protocol = hello["role"], hello["protocol"]
         except (ValueError, KeyError, TypeError):
             peer.send({"refused": "expected a hello"})
+            return False
+        if role == "probe":  # another engine, checking that this one runs
+            peer.send({"welcome": {"protocol": PROTOCOL, "version": __version__}})
             return False
         if protocol != PROTOCOL or role not in ("recorder", "viewer"):
             peer.send({"refused": f"this engine speaks protocol {PROTOCOL} (Luciole {__version__}), not {protocol}"})
@@ -211,6 +229,42 @@ class Engine:
         return any(root.is_relative_to(shown) or shown.is_relative_to(root) for shown in viewer.roots)
 
 
+def answers(port: int) -> bool:
+    """Whether an engine answers a hello on `port` (a refusal too: an engine of this protocol, of
+    another version, without probes). A port left by a dead engine may now be anything else's."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1) as connection:
+            send(connection, hello("probe"))
+            with connection.makefile(encoding="utf-8") as lines:
+                answer = json.loads(lines.readline())
+        return "welcome" in answer or "refused" in answer
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+@contextlib.contextmanager
+def engine_lock(stale: float = 5):
+    """Hold the engine file's lock (a file created exclusively, which works on Windows too).
+    A lock older than `stale` seconds was left by an engine that died holding it."""
+    lock = engine_file().with_name(engine_file().name + ".lock")
+    while True:
+        try:
+            os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            break
+        except FileExistsError:
+            try:
+                if time.time() - lock.stat().st_mtime > stale:
+                    lock.unlink(missing_ok=True)
+                    continue
+            except OSError:
+                continue
+            time.sleep(0.01)
+    try:
+        yield
+    finally:
+        lock.unlink(missing_ok=True)
+
+
 def real_path(path: str) -> Path:
     """`path` with symbolic links resolved, so that a workspace opened through a link shows the
     programs running in its target (recorders resolve their root). Paths need not exist."""
@@ -220,14 +274,11 @@ def real_path(path: str) -> Path:
 def serve(port: int = 0, idle: float = 600) -> int:
     """`luciole engine`: run an engine unless one already answers. Returns the exit code."""
     running = engine_port()
-    if running and running != port:
-        try:
-            socket.create_connection(("127.0.0.1", running), timeout=1).close()
-            log.warning("an engine already runs on port %s", running)
-            return 0
-        except OSError:
-            pass  # a stale file: the engine that wrote it is gone
+    if running and running != port and answers(running):
+        log.warning("an engine already runs on port %s", running)
+        return 0
     engine = Engine(port, idle)
     log.warning("engine on port %s (protocol %s)", engine.port, PROTOCOL)
-    engine.serve()
+    if not engine.serve():  # another one started at the same time: callers find it in its file
+        log.warning("an engine already runs on port %s", engine_port())
     return 0

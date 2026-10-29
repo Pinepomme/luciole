@@ -235,7 +235,8 @@ that recording Python processes connect to and viewers (the VS Code extension; l
 other editors) subscribe to. The extension starts it when none runs; it exits after 10 minutes
 with nobody connected. It writes its port to `~/.luciole/engine-v1.json` (`LUCIOLE_HOME` moves
 the folder), where recorders and viewers find it; `--port` or `LUCIOLE_LIVE_PORT` name one
-explicitly.
+explicitly. An engine starting while another answers there exits (with status 0): engines started
+together check and write the file in turn, so one remains.
 
 Every connection starts with a hello, answered before anything else
 ([`src/luciole/protocol.py`](../src/luciole/protocol.py)):
@@ -247,6 +248,9 @@ Every connection starts with a hello, answered before anything else
 {"welcome": {"protocol": 1, "version": "0.1.0"}}
 {"refused": "this engine speaks protocol 1 (Luciole 0.1.0), not 2"}
 ```
+
+A starting engine checks that the engine in the file runs with `{"hello": {"role": "probe", ...}}`,
+which is welcomed, then closed.
 
 `protocol` changes when a message changes meaning; the engine's file is per protocol, so engines
 of two protocols can run side by side. The engine numbers each recorder and tells the viewers that
