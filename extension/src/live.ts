@@ -10,7 +10,7 @@
 import * as net from "net";
 import * as path from "path";
 import * as vscode from "vscode";
-import { PROTOCOL, ensureEngine } from "./engine";
+import { PROTOCOL, ensureEngine, viewerRoots } from "./engine";
 import type { LiveFrame, LiveState, PausedThread, RecorderReply, StepMode, Variable } from "./messages";
 import { Handles, ProcessInfo, Processes, processLabel } from "./processes";
 import type { ResolvedRun } from "./runs";
@@ -97,7 +97,7 @@ export class LiveSession implements vscode.Disposable {
       const socket: net.Socket = net.connect(port, "127.0.0.1", () => resolve(socket));
       socket.on("error", reject);
     });
-    const roots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+    const roots = viewerRoots((vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath));
     socket.write(JSON.stringify({ hello: { role: "viewer", protocol: PROTOCOL, version: this.options.version, name: "vscode", roots } }) + "\n");
     this.read(socket);
     this.log.appendLine(`watching the Luciole engine on port ${port}`);
