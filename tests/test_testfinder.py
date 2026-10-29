@@ -62,6 +62,24 @@ def test_cli_prints_json(tmp_path, capsys):
     assert [path.replace("\\", "/").rsplit("/", 2)[-2:] for path in printed] == [["tests", "test_from_package.py"], ["tests", "test_plain_import.py"]]
 
 
+def test_follows_imports_through_project_modules(tmp_path):
+    root = project(tmp_path, {
+        "pkg/__init__.py": "",
+        "pkg/catalog.py": "ITEMS = []\n",
+        "pkg/prices.py": "from .catalog import ITEMS\n",
+        "pkg/page.py": "from pkg import prices\n",
+        "pkg/core.py": "",
+        "pkg/app.py": "import pkg.core\nimport pkg.page\n",
+        "tests/test_page.py": "from pkg.page import render\n",
+        "tests/test_app.py": "import pkg.app\n",
+        "tests/test_core.py": "from pkg import core\n",
+    })
+    # Two modules away, the closest tests first: test_app is three away.
+    assert names(testfinder.tests_for(root / "pkg" / "catalog.py", root), root) == ["tests/test_page.py"]
+    # Direct importers only, when there are some.
+    assert names(testfinder.tests_for(root / "pkg" / "core.py", root), root) == ["tests/test_core.py"]
+
+
 def test_namespace_packages(tmp_path):
     root = project(tmp_path, {
         "src/ns/types.py": "X = 1\n",  # ns has no __init__.py: a namespace package
