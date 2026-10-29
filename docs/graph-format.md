@@ -138,6 +138,11 @@ They decide what ends up in the graph.
   resolves to the project's only method named `m`, if there is exactly one and no built-in type has
   a method of that name (`split`, `get`, `close`… never match). The edge gets `"by_name": true`:
   likely, not certain. Anything else is unresolved.
+- **Callbacks**: a project function or method passed, not called, as an argument
+  (`Thread(target=crunch)`, `pool.submit(work)`, `sorted(items, key=self.rank)`,
+  `button.on_click(handler)`) is called later by what receives it. The passing function gets a
+  `calls` edge to it with `"callback": true`, at the argument. If the code also calls it directly,
+  the edge is a plain call.
 - **Unresolved calls** (builtins, third-party code, unknown receivers), like `y = round(x, 2)` or
   `t = s.upper()`, produce no `calls` edge. Their arguments and receiver `flows_to` the assignment
   target directly, which is a conservative approximation.

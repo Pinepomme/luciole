@@ -40,6 +40,8 @@ export interface Synapse {
   count: number;
   /** Calls the analyzer matched by method name only: likely, not certain. */
   byName?: boolean;
+  /** Calls to a function passed as an argument (`Thread(target=f)`), made later by what receives it. */
+  callback?: boolean;
 }
 
 export interface Brain {
@@ -133,9 +135,9 @@ export function buildBrain(graph: Graph): Brain {
     const target = nodes.get(edge.target)?.kind;
     if (edge.kind === "calls" && (target === "function" || target === "module")) {
       link("call", edge.source, edge.target, undefined, edge.sites?.length ?? 1);
-      if (edge.by_name) {
-        synapses.get(synapseId("call", edge.source, edge.target))!.byName = true;
-      }
+      const synapse = synapses.get(synapseId("call", edge.source, edge.target))!;
+      synapse.byName = edge.by_name || undefined;
+      synapse.callback = edge.callback || undefined;
     }
   }
 

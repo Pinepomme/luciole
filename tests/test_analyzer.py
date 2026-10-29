@@ -438,7 +438,7 @@ def test_no_calls_by_name_through_modules(tmp_path):
             os.path.isdir(x)
             path.isdir(x)
             struct.pack("i", 1)
-            functools.partial(main)
+            functools.partial(print)
             client.fetch()
             return sys.maxsize
 
@@ -608,3 +608,67 @@ def test_star_import_cycles_are_fast(tmp_path):
     graph = analyze(tmp_path, files)
     assert time.perf_counter() - start < 1
     assert ("pkg.d:f_d", "pkg.a:g") in calls(graph)  # still found through the star imports
+
+
+def test_functions_passed_to_be_called_later(tmp_path):
+    graph = analyze(tmp_path, {"app.py": """
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+
+        def crunch(job):
+            return job
+
+
+        def rank(item):
+            return item
+
+
+        def total(items):
+            return sum(items)
+
+
+        class Panel:
+            def on_click(self):
+                pass
+
+            @property
+            def size(self):
+                return 1
+
+            def build(self, button):
+                button.bind(self.on_click)
+                button.resize(self.size)  # a property's value, not a callback
+
+
+        alias = crunch
+
+
+        def start(jobs, pool: ThreadPoolExecutor):
+            threading.Thread(target=crunch, args=(1,)).start()
+            pool.submit(alias, 2)
+            sorted(jobs, key=rank)
+            total(jobs)  # a plain call: no callback mark
+            return total
+    """})
+    callbacks = {(e["source"], e["target"]) for e in graph["edges"] if e["kind"] == "calls" and e.get("callback")}
+    assert callbacks == {("app:start", "app:crunch"), ("app:start", "app:rank"), ("app:Panel.build", "app:Panel.on_click")}
+    assert ("app:start", "app:total") in calls(graph)  # returned, not passed: only the plain call
+    assert ("app:Panel.build", "app:Panel.size") in calls(graph)  # reading the property runs its getter
+
+
+def test_a_callback_also_called_directly_is_a_plain_call(tmp_path):
+    graph = analyze(tmp_path, {"app.py": """
+        import threading
+
+
+        def crunch():
+            pass
+
+
+        def start():
+            threading.Thread(target=crunch).start()
+            crunch()
+    """})
+    [edge] = [e for e in graph["edges"] if e["kind"] == "calls" and e["target"] == "app:crunch"]
+    assert "callback" not in edge and len(edge["sites"]) == 2

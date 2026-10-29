@@ -209,6 +209,7 @@ class Analyzer:
         self.aliases: dict[str, str] = {}  # variable id -> function it holds (`parse = staticmethod(parse_header)`)
         self.method_names: dict[str, list[str]] | None = None  # method name -> functions defined in classes
         self.by_name: set[tuple[str, str, str]] = set()  # edges resolved by method name alone
+        self.callbacks: set[tuple[str, str, str]] = set()  # functions passed to be called later
         self.module_bindings: dict[tuple[str, str], str | None] = {}  # (module id, name) -> resolved, see module_binding
 
     # Nodes and edges
@@ -224,14 +225,15 @@ class Analyzer:
     def add_variable(self, scope: Scope, name: str, role: str, node: ast.AST, **extra) -> str:
         return self.add_node("variable", name, scope, scope.file, loc(node), f"{scope.node_id}#{name}", role=role, **extra)
 
-    def add_edge(self, kind: str, source: str, target: str, site: tuple[int, int], by_name: bool = False) -> None:
-        """Record an edge. `by_name`: a call resolved by method name alone; any other way of
-        finding the same edge makes it certain."""
+    def add_edge(self, kind: str, source: str, target: str, site: tuple[int, int], by_name: bool = False, callback: bool = False) -> None:
+        """Record an edge. `by_name`: a call resolved by method name alone; `callback`: a function
+        passed to be called later. Finding the same edge as a plain call makes it a plain call."""
         key = (kind, source, target)
-        if by_name and key not in self.edges:
-            self.by_name.add(key)
-        elif not by_name:
+        if not by_name and not callback:
             self.by_name.discard(key)
+            self.callbacks.discard(key)
+        elif key not in self.edges:
+            (self.by_name if by_name else self.callbacks).add(key)
         sites = self.edges.setdefault(key, [])
         if site not in sites:
             sites.append(site)
@@ -267,6 +269,7 @@ class Analyzer:
                     "target": target,
                     "sites": [{"line": l, "col": c} for l, c in sorted(sites)],
                     **({"by_name": True} if (kind, source, target) in self.by_name else {}),
+                    **({"callback": True} if (kind, source, target) in self.callbacks else {}),
                 }
                 for (kind, source, target), sites in self.edges.items()
             ],
@@ -975,6 +978,7 @@ class FlowVisitor:
 
     def call(self, node: ast.Call) -> list[Flow]:
         site = pos(node)
+        self.callback_args(node)
         target = self.ref(node.func)
         if target is None and isinstance(node.func, ast.Attribute):
             target = self.typed_member(node.func)
@@ -1034,6 +1038,21 @@ class FlowVisitor:
             param = by_name.get(keyword.arg, kwarg) if keyword.arg else kwarg
             self.pass_value(self.expr(keyword.value), param, keyword.value)
         return [(callee.return_var, site)] if callee.return_var else []
+
+    def callback_args(self, node: ast.Call) -> None:
+        """A project function passed, not called, as an argument (`Thread(target=crunch)`,
+        `pool.submit(work)`, `sorted(key=self.rank)`) is called later by what receives it: a
+        `calls` edge marked `callback`."""
+        for arg in [*node.args, *(keyword.value for keyword in node.keywords)]:
+            if not isinstance(arg, (ast.Name, ast.Attribute)):
+                continue
+            target = self.ref(arg)
+            if target is None and isinstance(arg, ast.Attribute):
+                target = self.typed_member(arg)
+            if self.an.kind(target) == "variable":
+                target = self.an.aliases.get(target)
+            if self.an.kind(target) == "function" and not self.an.is_property(target):
+                self.an.add_edge("calls", self.actor, target, pos(arg), callback=True)
 
     def binding(self, func: ast.expr, callee: Scope) -> tuple[int, ast.expr | None]:
         """How a call binds the callee's first parameter: (argument offset, receiver expression)."""
