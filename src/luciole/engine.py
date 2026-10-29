@@ -156,6 +156,8 @@ class Engine:
     def from_recorder(self, peer: Peer, lines) -> None:
         prefix = '{"from":%d,' % peer.id
         for line in lines:
+            if not line.endswith("\n"):
+                break  # cut off by the recorder's end: its exit must reach viewers on a line of its own
             if not line.startswith("{") or line.startswith("{}"):
                 continue
             tagged = prefix + line[1:]  # the recorder's number goes in without parsing the line again
