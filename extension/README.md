@@ -1,6 +1,6 @@
 # Luciole
 
-See a Python project as a 3D brain: one glowing neuron per function, and lines between them for
+See a Python project as a 3D brain: one neuron per function, and lines between them for
 the variables that flow from one function to another (arguments in, return values out, and
 globals or attributes one function writes and another reads). Run your program live and watch
 the functions light up as they run.
@@ -10,11 +10,10 @@ the functions light up as they run.
 - **Run Live** (⚡ in the title bar of a Python editor) runs the file in a terminal and lights up
   the brain. A test file runs with pytest; a script (it has `if __name__ == "__main__":`) runs as
   itself; any other module, which is not meant to run on its own, runs through the test files that
-  import it. In the brain: functions on the current call path glow, functions that just ran flash and fade,
-  waves of light flow along the lines as calls happen, at their own slow pace (cyan for calls,
-  sea green for calls seen only at runtime, blue for spawns). The bar at the bottom shows what is running now.
-  Functions that ran stay softly lit afterwards. Calls the static analysis missed appear as
-  orange lines.
+  import it. In the brain, activity shows in one accent color, your theme's: functions on the
+  current call path are filled with it and ringed, functions that just ran fade back to grey, and
+  each call traces its line from the caller to the callee. The bar at the bottom shows what is
+  running now. Calls the static analysis missed appear as new lines.
 - **Auto-start** (**Luciole: off** / **on** in the status bar): when on, every Python program
   you start in a new VS Code terminal lights up the brain, run the way you always run it: a
   script, `pytest`, a server, and the processes they start. Nothing changes in how programs run,
@@ -38,14 +37,14 @@ the functions light up as they run.
   then everything stops again. F5 resumes. What you expanded in the Variables view stays expanded
   from one step to the next.
 - **Debugging**: debug a Python program the usual way (F5, VS Code's Python debugger) and the
-  brain follows: when the debugger stops, its function glows red and the view flies to it. With
+  brain follows: when the debugger stops, its function turns red and the view flies to it. With
   auto-start on, the debugged program also lights up as it runs. **Right-click a neuron** to stop
   each time that function is called (a normal breakpoint, on its first line, listed in the
   Breakpoints view); functions with a breakpoint on any of their lines have a red dot, and
   right-clicking them again removes those breakpoints.
 - Threads and asyncio: each thread gets its own line in the bottom bar. Coroutines paused on an
-  `await` glow blue, so you can tell running work (amber) from work waiting on I/O. Teal lines
-  show where a thread or task was started from. Try it on `examples/workers.py`.
+  `await` get a ring but no fill, so you can tell running work from work waiting on I/O. New
+  lines show where a thread or task was started from (hover one to see). Try it on `examples/workers.py`.
 - The graph button graphs the current file and follows you between Python files. To graph a
   whole project, right-click its folder in the Explorer, or run
   **Luciole: Show Graph (Whole Folder)**.

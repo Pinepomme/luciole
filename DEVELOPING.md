@@ -98,6 +98,7 @@ npm run screenshot -- ../examples                         # a static graph
 npm run screenshot -- ../examples --events ../run.jsonl   # replay a recording
 npm run screenshot -- ../examples --events ../run.jsonl --frames 8   # and 8 shots of it moving
 npm run screenshot -- ../examples --fps                   # also print frames per second
+npm run screenshot -- ../examples --theme light           # in Light Modern instead of Dark Modern
 node out/dev/layout-stats.js graph.json                   # how the region layout turns out
 ```
 
@@ -240,7 +241,7 @@ extension/
   src/live.ts        live runs (terminal + socket); src/engine.ts finds or starts the engine
   src/debugging.ts   following the VS Code debugger
   src/webview/       the 3D view (brain.ts = model, layout.ts = map of regions and bundled
-                     links, main.ts = rendering and lighting)
+                     links, flow.ts = calls tracing their lines, main.ts = rendering and lighting)
   test/              unit tests (npm test)
   package.mjs        builds luciole.vsix with a copy of src/luciole
 tests/             Python tests (uv run pytest)

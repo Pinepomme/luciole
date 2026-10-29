@@ -2,10 +2,15 @@
 
 ## Unreleased
 
-- Live mode: calls send a wave of light along their synapse instead of bubbles, a soft glow that
-  glides from caller to callee at its own slow pace, brightest at its head with a fading tail.
-  Waves on a busy synapse merge into a steady glow, and many lit at once dim together instead of
-  blowing out. Cyan for calls, sea green for calls seen only at runtime, blue for spawns.
+- A calmer, minimal look: neutral greys at rest and one accent color for activity, the theme's
+  own (its link color), with red only for breakpoints and the debugger. Smaller matte neurons,
+  hairline links, names in the system font with no outlines; no colors per region, no glows.
+  A running function fills with the accent and gets a thin ring, a coroutine waiting on an
+  `await` gets the ring only. Works in light and dark themes. The legend is gone: hover a line to
+  see what it is.
+- Live mode: a call traces its line from the caller to the callee in the accent color, like a
+  route drawing itself on a map (instead of bubbles), then eases back to grey. A busy line stays
+  drawn until its calls stop.
 - The brain is a map: packages, modules and classes are regions inside regions, placed by how
   much they call each other, with their names at their centres. The same project always gives
   the same map, and editing a file leaves the rest in place. Calls between regions travel
