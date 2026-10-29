@@ -163,3 +163,19 @@ def test_a_recorder_cut_off_mid_line_still_exits_cleanly(engine):
     assert viewer.receive() == {"from": number, "t": 0.1, "calls": {"app:main": 1}}
     assert viewer.receive() == {"exit": number}  # on a line of its own
     viewer.close()
+
+
+def test_programs_resume_when_no_viewer_shows_them_any_more(engine, tmp_path):
+    app_viewer = Client(engine.port, "viewer", roots=[str(tmp_path / "app")])
+    other_viewer = Client(engine.port, "viewer", roots=[str(tmp_path / "other")])
+    app = Client(engine.port, "recorder", pid=11, argv=[], root=str(tmp_path / "app"))
+    other = Client(engine.port, "recorder", pid=12, argv=[], root=str(tmp_path / "other"))
+    for client in (app_viewer, other_viewer, app, other):
+        assert "welcome" in client.receive()
+    assert other_viewer.receive()["process"]["pid"] == 12
+    app_viewer.close()
+    assert app.receive() == {"cmd": "resume"}  # nobody left to resume it
+    other_viewer.send({"cmd": "pause"})
+    assert other.receive() == {"cmd": "pause"}  # still shown: left paused
+    for client in (other_viewer, app, other):
+        client.close()

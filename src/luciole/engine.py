@@ -14,7 +14,8 @@ show its project, with the recorder's number:
 and passes viewers' commands on to the recorders: {"to": 3, "cmd": "step", ...} to one, a
 command without "to" to every recorder the viewer shows. A viewer shows a recorder when one's
 root contains the other's, symbolic links resolved (a viewer without roots shows them all), so
-two VS Code windows on two projects each see their own programs. When the last viewer leaves, paused programs resume.
+two VS Code windows on two projects each see their own programs. When a viewer leaves, the programs
+no remaining viewer shows resume.
 
 The engine writes its port to ~/.luciole/engine-v<protocol>.json for the others to find it, and
 exits after `idle` seconds with nobody connected. Standard library only, one thread per
@@ -193,7 +194,8 @@ class Engine:
             elif peer.role == "viewer":
                 self.viewers.remove(peer)
                 viewers = []
-                orphans = [] if self.viewers else list(self.recorders.values())
+                # Paused programs that no viewer shows any more (one may have paused it with "to").
+                orphans = [recorder for recorder in self.recorders.values() if not any(self.shows(viewer, recorder) for viewer in self.viewers)]
             else:
                 return
         for viewer in viewers:

@@ -260,7 +260,8 @@ shows all) about it, then passes on everything it sends with its number:
 ```
 
 Viewers' commands (below) go to one recorder with `"to": 3`, or to every recorder the viewer shows
-without it. When the last viewer leaves, the engine resumes paused programs.
+without it. When a viewer leaves, the engine resumes the programs no remaining viewer shows (a
+paused program would stay frozen otherwise).
 
 ### Starting the recorder
 
