@@ -62,7 +62,7 @@ separators), and `loc`.
 |---|---|---|---|
 | `module` | `null` | — | whole file |
 | `class` | module, class or function | `bases`, `decorators` (source text) | `class` statement, without decorators |
-| `function` | module, class or function | `is_async`, `decorators` (source text) | `def` statement, without decorators |
+| `function` | module, class or function | `body_line`, `is_async`, `decorators` (source text) | `def` statement, without decorators |
 | `variable` | module, class or function | `role`, and `param_index` when `role` is `param` | first binding |
 
 Variable roles:
@@ -85,7 +85,7 @@ Variable roles:
 
 | Kind | Source → target | Meaning | Site points at |
 |---|---|---|---|
-| `calls` | module/function → function/class | source calls target | the call expression |
+| `calls` | module/function → function/class/module | source calls target (or imports the module, which runs its code) | the call expression, or the import |
 | `reads` | variable → module/function | code reads the variable | the name |
 | `writes` | module/function → variable | code assigns the variable | the assignment target |
 | `flows_to` | variable → variable | source's value is used to compute target | the assignment target |
@@ -116,15 +116,41 @@ They decide what ends up in the graph.
   methods skip `cls`. `Class.m(obj, a)` passes `obj` to `self` like any other argument.
 - **Arguments** map to parameters by position, then by keyword. Extra ones go to `*args` or
   `**kwargs`. Positions after a `*iterable` argument are unknown, so those arguments go to `*args`.
-- **`obj.m()` resolves** only when the analyzer knows `obj`'s class. That's the case for `self`,
-  for a variable assigned from a constructor (`c = Cart()`), and for a parameter annotated with a
-  project class. Methods are looked up through base classes too. Anything else is unresolved, until
-  roadmap step 4 adds a real type checker.
+- **`obj.m()` resolves** when the analyzer knows `obj`'s class: `self` and `cls`; a variable or
+  attribute assigned from a constructor (`c = Cart()`) or from a call whose return type is plain (a
+  return annotation, or `return Cart(...)` / `return self` in the function); a parameter, variable
+  or class attribute annotated with a project class (`Cart`, `"Cart"`, `Cart | None`,
+  `Optional[Cart]`); `with make() as c` (what `__enter__` returns); and receivers that are calls
+  themselves (`make().total()`). Methods are looked up through base classes too.
+- **Overrides**: `obj.m()` may run the `m` of any subclass of `obj`'s class, so each override gets
+  a `calls` edge too (30 at most), as does a method defined only in subclasses (`self.render()` in a
+  base class). `super().m()` resolves through the bases of the method's class, without overrides.
+- **Properties**: reading `obj.p` calls `p`'s getter (`@property`, `@cached_property`), and the
+  getters overriding it; a `@p.setter` never hides the getter.
+- **Special methods** run by operations on a value of known class get `calls` edges: `x[i]`
+  (`__getitem__`, `__setitem__`, `__delitem__`), `with x` (`__enter__`/`__exit__`, async too),
+  `for … in x` (`__iter__`), `in`, comparisons, arithmetic operators, f-strings (`__format__` or
+  `__str__`), `len`/`str`/`repr`/`iter`/`next`/`bool`/`hash`/`abs`, calling an instance
+  (`__call__`), and `type(x)(…)` / `x.__class__(…)` (the class's `__init__`).
+- **Functions held in variables**: `parse = staticmethod(parse_date)` (or `= parse_date`), then
+  `self.parse(v)` calls `parse_date`.
+- **By name**: when the receiver's class is unknown, `x.m()` (or reading the property `x.m`)
+  resolves to the project's only method named `m`, if there is exactly one and no built-in type has
+  a method of that name (`split`, `get`, `close`… never match). The edge gets `"by_name": true`:
+  likely, not certain. Anything else is unresolved.
+- **Callbacks**: a project function or method passed, not called, as an argument
+  (`Thread(target=crunch)`, `pool.submit(work)`, `sorted(items, key=self.rank)`,
+  `button.on_click(handler)`) is called later by what receives it. The passing function gets a
+  `calls` edge to it with `"callback": true`, at the argument. If the code also calls it directly,
+  the edge is a plain call.
 - **Unresolved calls** (builtins, third-party code, unknown receivers), like `y = round(x, 2)` or
   `t = s.upper()`, produce no `calls` edge. Their arguments and receiver `flows_to` the assignment
   target directly, which is a conservative approximation.
 - **Resolved calls** `y = f(x)` produce no direct `x → y` flow. The value goes
   `passes_arg` x → `f#param`, then `returns` `f#return` → y.
+- **Imports** run the imported module, and the packages around it first: `import a.b` and
+  `from a.b import c` give `calls` edges to the project modules `a` and `a.b` (and `a.b.c` when it
+  is a submodule). `from m import *` makes `m`'s public names resolvable in the importing module.
 - **Decorators** that are project functions get a `calls` edge from the code that defines the
   decorated function.
 
@@ -153,7 +179,9 @@ They decide what ends up in the graph.
   imports are supported.
 - **Module names** come from the package structure: walk up while the directory has an
   `__init__.py`. So `src/luciole/cli.py` is `luciole.cli`. Directories starting with `.`, and
-  `__pycache__`, `venv`, `site-packages` and `node_modules` are skipped.
+  `__pycache__`, `venv`, `site-packages` and `node_modules` are skipped, and so are the
+  directories the top-level `.gitignore` lists by name or simple glob (`runs/`, `/data`,
+  `*.egg-info`; not used when it has a `!` pattern).
 - **`@overload` stubs** are left out: they never run, and the implementation keeps the plain id.
 - **Files that don't parse** are skipped with a warning.
 
@@ -203,27 +231,68 @@ Every 50 ms the recorder sends one JSON line, to the port and/or the file:
 - `waiting`: project coroutines suspended on an `await` right now, per function. A coroutine
   awaiting another one counts too (`main` waiting on `crawl` waiting on `download`).
 
-A line is only sent when something changed. The last line is `{"done": true}`. The view also
-gets, first, the process it is watching (not the `--events` file):
-`{"process": {"pid": 4242, "argv": ["python", "-m", "pytest"]}}`.
+A line is only sent when something changed. The last line is `{"done": true}`.
+
+### The engine
+
+`luciole engine` ([`src/luciole/engine.py`](../src/luciole/engine.py)) is the one local process
+that recording Python processes connect to and viewers (the VS Code extension; later agents and
+other editors) subscribe to. The extension starts it when none runs; it exits after 10 minutes
+with nobody connected. It writes its port to `~/.luciole/engine-v1.json` (`LUCIOLE_HOME` moves
+the folder), where recorders and viewers find it; `--port` or `LUCIOLE_LIVE_PORT` name one
+explicitly. An engine starting while another answers there exits (with status 0): engines started
+together check and write the file in turn, so one remains.
+
+Every connection starts with a hello, answered before anything else
+([`src/luciole/protocol.py`](../src/luciole/protocol.py)):
+
+```json
+{"hello": {"role": "recorder", "protocol": 1, "version": "0.1.0", "pid": 4242,
+           "argv": ["python", "-m", "pytest"], "root": "/work/app"}}
+{"hello": {"role": "viewer", "protocol": 1, "version": "0.1.0", "name": "vscode", "roots": ["/work/app"]}}
+{"welcome": {"protocol": 1, "version": "0.1.0"}}
+{"refused": "this engine speaks protocol 1 (Luciole 0.1.0), not 2"}
+```
+
+A starting engine checks that the engine in the file runs with `{"hello": {"role": "probe", ...}}`,
+which is welcomed, then closed.
+
+`protocol` changes when a message changes meaning; the engine's file is per protocol, so engines
+of two protocols can run side by side. The engine numbers each recorder and tells the viewers that
+show its project (one's root contains the other's, symbolic links resolved; a viewer without roots
+shows all) about it, then passes on everything it sends with its number:
+
+```json
+{"process": {"id": 3, "pid": 4242, "argv": ["python", "-m", "pytest"], "root": "/work/app"}}
+{"from": 3, "t": 1.25, "stacks": [...], "calls": {...}}
+{"exit": 3}
+```
+
+Viewers' commands (below) go to one recorder with `"to": 3`, or to every recorder the viewer shows
+without it. When a viewer leaves, the engine resumes the programs no remaining viewer shows (a
+paused program would stay frozen otherwise).
 
 ### Starting the recorder
 
-- `luciole run`, as above.
+- `luciole run`, as above. Without `--port`, it reports to the running engine, if any.
 - `luciole.start(root=None, port=None, events=None)` and `luciole.stop()`, from the program
   itself (a server, a notebook). `root` defaults to `LUCIOLE_ROOT`, else the working directory, and
-  `port` to `LUCIOLE_LIVE_PORT`. Nothing is recorded, and `start` returns `False`, when nothing
-  would see the events: no view listens and there is no events file.
+  `port` to the running engine's. Nothing is recorded, and `start` returns `False`, when nothing
+  would see the events: no engine runs and there is no events file.
 - Auto-start: with the folder `luciole/_autostart` on `PYTHONPATH`, its `sitecustomize.py` starts
-  the recorder in any Python process whose `LUCIOLE_LIVE_PORT` reaches a listening view, and does
-  nothing otherwise (not even importing the recorder). Child processes inherit the environment;
-  forked children connect again as processes of their own. The VS Code switch ("Luciole: on" in
-  the status bar, setting `luciole.autoStart`) sets these variables in new terminals;
-  `luciole env --port PORT` prints them for a shell (`--off` to undo). The `sitecustomize` it
-  hides still runs, and `luciole run` processes are left to their own recorder.
+  the recorder in any Python process when the engine runs, and does nothing otherwise (not even
+  importing the recorder). Child processes inherit the environment; forked children connect again
+  as processes of their own. The VS Code switch ("Luciole: on" in the status bar, setting
+  `luciole.autoStart`) sets `PYTHONPATH` and `LUCIOLE_ROOT` in new terminals; `luciole env` prints
+  them for a shell (`--off` to undo). The `sitecustomize` it hides still runs, and `luciole run`
+  processes are left to their own recorder. A program that imports a `luciole` of its own (another
+  version, or this repository's tests) gets its own: auto-start keeps its copy out of
+  `sys.modules`, and `luciole.start()` from another copy leaves the process to it.
 
-Every connection is one process; the view lights up all of them at once. The recorder uses
-`sys.monitoring` tool id 4 (or 3): the debugger, coverage and profiler ids stay free.
+The recorder uses `sys.monitoring` tool id 4 (or 3): the debugger, coverage and profiler ids stay
+free. A process ended by SIGTERM (multiprocessing's `Pool` terminates its workers) still sends
+its last frame: unless the program has a SIGTERM handler of its own, the recorder installs one that
+sends it, then lets the signal end the process as before (not on Windows).
 
 The recorder sends aggregates rather than one event per call. That keeps the stream small however
 fast the program runs (pytest makes about 30,000 calls per second through it), which is all the
@@ -236,7 +305,7 @@ threads' frames: `sys._current_frames()` breaks `torch.export` tracing.
 
 ### Pausing and variables
 
-The socket also carries commands from the view to the recorder, one JSON object per line:
+The connection also carries commands from viewers to the recorder, one JSON object per line:
 `{"cmd": "pause"}`, `{"cmd": "resume"}`, `{"cmd": "expand", "ref": 7}` and
 `{"cmd": "step", "thread": 1401, "mode": "over"}` (`mode`: `over`, `into` or `out`). On pause, the
 recorder turns on `LINE` events and each thread stops at its next line of project code. It sends

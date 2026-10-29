@@ -38,9 +38,12 @@ directory) is reported.
 Without changing how a program is started, any Python process can light up the view too:
 
 ```sh
-eval "$(luciole env --port PORT)"     # this shell's Python programs report to the view on PORT
+eval "$(luciole env)"                 # this shell's Python programs light up the view
 eval "$(luciole env --off)"           # back to normal
 ```
+
+They report to the Luciole engine, a small local process that the VS Code extension starts
+(or `luciole engine`); when it doesn't run, nothing happens.
 
 ```python
 import luciole

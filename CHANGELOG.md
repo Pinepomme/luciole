@@ -6,7 +6,29 @@
   Python program started in a new VS Code terminal lights up the view, child processes included
   (forked ones too). Nothing is started when the view is not listening. `luciole env` does the
   same for any shell, and `luciole.start()` / `luciole.stop()` from inside a program.
+- Run Live on a library module (no `if __name__ == "__main__":`) runs the test files that import
+  it with pytest, and on a test file runs pytest on it. `luciole tests FILE` lists those tests.
+- The Luciole engine (`luciole engine`): one local process that recording programs connect to and
+  views subscribe to, started by the extension when none runs and found through
+  `~/.luciole/engine-v1.json`. Every connection starts with a handshake that checks the protocol
+  version. Each VS Code window sees the programs of its own folders. `luciole run` and
+  `luciole env` no longer need a port.
+- Debugging: the brain follows VS Code's Python debugger (the function it stopped in glows red),
+  right-click a neuron to stop on each call of its function, and with auto-start on, debugged
+  programs light up too. Function nodes gain `body_line`, the first line each call runs.
+- Better call resolution: imports (which run the imported module), star imports, properties,
+  `super()`, overrides in subclasses, return types and annotations, special methods (`x[i]`,
+  `with`, `len`, f-strings…), functions held in variables, and, as a marked guess (`by_name`), the
+  project's only method of a name. On the standard library's `email` and `asyncio` packages, the
+  share of runtime calls missing from the graph went from 52% to 27%.
+- Callbacks: a function passed, not called, as an argument (`Thread(target=crunch)`,
+  `pool.submit(work)`, `sorted(key=rank)`, `button.bind(self.on_click)`) is linked to the function
+  passing it (`calls` edges with `"callback": true`), so threads and handlers no longer float apart.
 - The view shows several processes at once; Pause and Stop apply to all of them.
+- The graph and `luciole tests` skip the folders the project's `.gitignore` lists (data, runs,
+  outputs), and `luciole tests` also finds tests that reach a module through other modules.
+- A process ended by SIGTERM (a `multiprocessing` pool's workers) still reports its last calls.
+- Labels sit above their neuron, and overlapping labels give way to the more important one.
 - The recorder uses a `sys.monitoring` tool id of its own, so `cProfile`, coverage and debuggers
   keep working with it.
 
