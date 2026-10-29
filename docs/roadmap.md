@@ -11,8 +11,10 @@ and time travel), and only then widen to other editors and languages.
   between functions are the lines connecting them. It graphs the current file or a whole folder.
 - **Live mode** (`luciole run`, ⚡ Run Live): functions light up as they run, with the current
   call path, pulses along calls, threads and asyncio tasks, and calls found only at runtime.
-- **Debugger controls in live mode**: Stop, Pause/Resume, Step over/into/out, and a Variables
-  view (threads, call stack, expandable values, the stopped line highlighted).
+- **Run Live under VS Code's Python debugger**: breakpoints, stepping, variables and the debug
+  console are the debugger's while the recorder lights up the view (a plain terminal run without
+  the Python Debugger extension). The recorder also has its own pause/step/variables protocol,
+  for engine clients.
 - **The engine** (`luciole engine`) and **auto-start**: any Python process (terminal runs, test
   runners, child processes, debug sessions) lights up the view, with no change to how it starts.
 - **Debugging with the graph**: VS Code's Python debugger and the brain together (the stopped
@@ -98,7 +100,7 @@ share the same session.
   `type()`).
 - [x] Callbacks: a function passed as an argument (`Thread(target=f)`, `pool.submit(f)`,
   `key=f`, event handlers) is linked to the function passing it (`"callback": true`).
-- Run Live under VS Code's debugger: every run starts through debugpy with the recorder on, so
+- [x] Run Live under VS Code's debugger: every run starts through debugpy with the recorder on, so
   live control (breakpoints, stepping, Variables, Call Stack, console) is the debugger's. Decided:
   Luciole's own pause/step buttons and Variables view go; the recorder keeps its value snapshots
   and pause/step protocol for engine clients and for phase 4.

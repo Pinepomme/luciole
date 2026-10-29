@@ -61,13 +61,7 @@ button:disabled {
   cursor: default;
 }
 
-#stepping {
-  display: inline-flex;
-  gap: 6px;
-}
-
-button[hidden],
-#stepping[hidden] {
+button[hidden] {
   display: none;
 }
 
