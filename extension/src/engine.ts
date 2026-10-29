@@ -107,6 +107,41 @@ function answers(port: number): Promise<boolean> {
   });
 }
 
+export interface WaitOptions {
+  /** Port named by the engine's file now, if any. */
+  readPort: () => number | undefined;
+  /** True when an engine answers on `port`. */
+  answers: (port: number) => Promise<boolean>;
+  /** True once the engine this window started has exited. */
+  exited: () => boolean;
+  intervalMs?: number;
+  timeoutMs?: number;
+  /** Reads of the file still made once the started engine has exited. */
+  triesAfterExit?: number;
+}
+
+/**
+ * Port of the engine the file names once one answers there, else undefined. Not necessarily the
+ * engine this window started: when two windows start one at the same time, the second engine to
+ * come up finds the first one's file and exits, and both windows connect to the first. So the
+ * file is read again a few times after the started engine exits, before giving up.
+ */
+export async function waitForEngine(options: WaitOptions): Promise<number | undefined> {
+  const { readPort, answers, exited, intervalMs = 100, timeoutMs = 10_000, triesAfterExit = 10 } = options;
+  let triesLeft = triesAfterExit;
+  for (let waited = 0; waited < timeoutMs; waited += intervalMs) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    const port = readPort();
+    if (port !== undefined && (await answers(port))) {
+      return port;
+    }
+    if (exited() && --triesLeft <= 0) {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Port of the running engine; starts one (detached: it outlives this window, and exits by itself
  * once nobody uses it) when none answers.
@@ -126,14 +161,16 @@ export async function ensureEngine(python: string, analyzerDir: string, log: (li
     stdio: ["ignore", output, output],
   });
   fs.closeSync(output); // the engine has its own copy
-  child.on("error", (error) => log(`could not start the engine: ${error.message}`));
+  let exited = false;
+  child.on("error", (error) => {
+    exited = true;
+    log(`could not start the engine: ${error.message}`);
+  });
+  child.on("exit", () => (exited = true));
   child.unref();
-  for (let waited = 0; waited < 10_000; waited += 100) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    const port = readEnginePort();
-    if (port !== undefined && port !== running && (await answers(port))) {
-      return port;
-    }
+  const port = await waitForEngine({ readPort: () => readEnginePort(), answers, exited: () => exited });
+  if (port !== undefined) {
+    return port;
   }
   let said = "";
   try {

@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { PROTOCOL, engineFile, parseEngineLine, readEnginePort, viewerRoots } from "../src/engine";
+import { PROTOCOL, engineFile, parseEngineLine, readEnginePort, viewerRoots, waitForEngine } from "../src/engine";
 
 test("the engine's file is per protocol, under LUCIOLE_HOME or ~/.luciole", () => {
   assert.equal(engineFile({ LUCIOLE_HOME: "/tmp/home" }), path.join("/tmp/home", `engine-v${PROTOCOL}.json`));
@@ -41,4 +41,32 @@ test("a broken line from the engine still yields the message it ends with", () =
   assert.equal(parseEngineLine('{"from":3,"stacks":[{"thread":"Ma'), undefined);
   assert.equal(parseEngineLine("garbage"), undefined);
   assert.equal(parseEngineLine("[1, 2]"), undefined);
+});
+
+test("after starting an engine, the window connects to whichever engine the file names", async () => {
+  const fast = { intervalMs: 1, timeoutMs: 1000, triesAfterExit: 3 };
+  // Another window's engine won the race: ours exited, and the file names the other one.
+  const reads = [undefined, 7001, 7002, 7002];
+  let read = 0;
+  const port = await waitForEngine({
+    ...fast,
+    readPort: () => reads[Math.min(read++, reads.length - 1)],
+    answers: async (port) => port === 7002, // 7001: a stale file, nothing answers there
+    exited: () => read > 1,
+  });
+  assert.equal(port, 7002);
+});
+
+test("the file is read a few more times after the started engine exits, then the wait gives up", async () => {
+  let reads = 0;
+  const port = await waitForEngine({
+    intervalMs: 1,
+    timeoutMs: 1000,
+    triesAfterExit: 3,
+    readPort: () => (reads++, undefined),
+    answers: async () => true,
+    exited: () => true,
+  });
+  assert.equal(port, undefined);
+  assert.equal(reads, 3);
 });
