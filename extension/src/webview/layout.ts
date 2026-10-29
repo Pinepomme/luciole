@@ -13,6 +13,9 @@
  * Calls between regions are drawn as bundles (`route`, `bundle`): a curve from the caller up
  * through the centres of its enclosing regions and down through the callee's, so calls between
  * two regions travel together like nerve tracts.
+ *
+ * Small brains (a file or two) have too few regions for a map to help: `layoutByCalls` puts
+ * them in rows instead, each function above the functions it calls, read like an outline.
  */
 
 import type { GraphNode } from "../graph";
@@ -48,6 +51,8 @@ export interface Layout {
   /** Region ids from the root to the innermost region holding each neuron. */
   chains: Map<string, string[]>;
   positions: Map<string, Vec3>;
+  /** Rows by call order (`layoutByCalls`), this far apart: lines bend only to miss functions, no region names. */
+  byCalls?: { rowSpan: number };
 }
 
 /** Room between two neurons of the same region, by default. */
@@ -213,6 +218,119 @@ export function layoutBrain(brain: Brain, nodes: Map<string, GraphNode>, neuronG
   return { regions, chains, positions };
 }
 
+/** Most functions in a row of `layoutByCalls`; more go on the rows below. */
+const ROW_MAX = 6;
+
+/**
+ * Rows by call order: functions that nothing calls on top, each function a row below its
+ * lowest caller (calls that loop back up, as in recursion, are left out of the ranking). Each
+ * row is ordered to keep calls from crossing, starting from the order of the source; functions
+ * with no calls at all go on the last rows. Flat, facing the camera.
+ */
+export function layoutByCalls(brain: Brain, nodes: Map<string, GraphNode>, neuronGap = NEURON_GAP): Layout {
+  const { regions, chains } = buildRegions(brain, nodes);
+  const source = (n: Neuron) => `${n.node.file}\n${String(n.node.loc.line).padStart(8, "0")}\n${n.id}`;
+  const neurons = [...brain.neurons].sort((a, b) => (source(a) < source(b) ? -1 : source(a) > source(b) ? 1 : 0));
+  const index = new Map(neurons.map((n, i) => [n.id, i]));
+  const callees = neurons.map(() => new Set<number>());
+  for (const synapse of brain.synapses) {
+    const a = index.get(synapse.source);
+    const b = index.get(synapse.target);
+    if (synapse.kind === "call" && a !== undefined && b !== undefined && a !== b) {
+      callees[a].add(b);
+    }
+  }
+  const callers = neurons.map(() => new Set<number>());
+  callees.forEach((set, a) => set.forEach((b) => callers[b].add(a)));
+  // Drop the calls that close a loop: a depth-first walk from the functions nothing calls.
+  const state = neurons.map(() => 0); // 0 unseen, 1 on the walk, 2 done
+  const forward = neurons.map(() => [] as number[]);
+  const walk = (a: number) => {
+    state[a] = 1;
+    for (const b of [...callees[a]].sort((x, y) => x - y)) {
+      if (state[b] === 1) {
+        continue; // back to a caller: a loop
+      }
+      forward[a].push(b);
+      if (state[b] === 0) {
+        walk(b);
+      }
+    }
+    state[a] = 2;
+  };
+  neurons.forEach((_, a) => !callers[a].size && state[a] === 0 && walk(a));
+  neurons.forEach((_, a) => state[a] === 0 && walk(a)); // loops that nothing outside calls
+  // Each function a row below its lowest caller (longest path, in topological order).
+  const rank = neurons.map(() => 0);
+  const order: number[] = [];
+  const seen = neurons.map(() => false);
+  const visit = (a: number) => {
+    seen[a] = true;
+    forward[a].forEach((b) => !seen[b] && visit(b));
+    order.push(a);
+  };
+  neurons.forEach((_, a) => !seen[a] && visit(a));
+  for (const a of order.reverse()) {
+    forward[a].forEach((b) => (rank[b] = Math.max(rank[b], rank[a] + 1)));
+  }
+  const alone = neurons.map((_, a) => !callees[a].size && !callers[a].size);
+  const deepest = Math.max(0, ...rank.filter((_, a) => !alone[a]));
+  const ranks: number[][] = [];
+  neurons.forEach((_, a) => {
+    const r = alone[a] ? deepest + 1 : rank[a];
+    (ranks[r] ??= []).push(a);
+  });
+  // Order each rank by where its callers (going down) and callees (going up) are: fewer crossings.
+  const place = new Map<number, number>();
+  const rows = ranks.filter((row) => row?.length);
+  rows.forEach((row) => row.forEach((a, i) => place.set(a, i / Math.max(row.length - 1, 1))));
+  const reorder = (row: number[], by: (a: number) => Set<number>) => {
+    const centre = (a: number) => {
+      const others = [...by(a)].filter((b) => place.has(b) && rank[b] !== rank[a]);
+      return others.length ? others.reduce((sum, b) => sum + place.get(b)!, 0) / others.length : place.get(a)!;
+    };
+    const keyed = row.map((a, i) => ({ a, key: centre(a), i }));
+    keyed.sort((x, y) => x.key - y.key || x.i - y.i);
+    keyed.forEach(({ a }, i) => {
+      row[i] = a;
+      place.set(a, i / Math.max(row.length - 1, 1));
+    });
+  };
+  for (let sweep = 0; sweep < 4; sweep++) {
+    rows.forEach((row) => reorder(row, (a) => callers[a]));
+    [...rows].reverse().forEach((row) => reorder(row, (a) => callees[a]));
+  }
+  // Long rows wrap onto the rows below them.
+  const lines = rows.flatMap((row) => Array.from({ length: Math.ceil(row.length / ROW_MAX) }, (_, i) => row.slice(i * ROW_MAX, (i + 1) * ROW_MAX)));
+  const radius = (a: number) => neuronRadius(neurons[a].degree);
+  const positions = new Map<string, Vec3>();
+  let y = 0;
+  lines.forEach((line, i) => {
+    const height = Math.max(...line.map(radius));
+    if (i > 0) {
+      y -= height + neuronGap * 1.5;
+    }
+    // Room for each name too: names are shown on small brains, and overlapping ones get hidden.
+    const widths = line.map((a) => Math.max(2 * radius(a) + neuronGap * 1.5, neurons[a].label.length * neuronGap * 0.2));
+    let x = -widths.reduce((sum, w) => sum + w, 0) / 2;
+    line.forEach((a, j) => {
+      positions.set(neurons[a].id, { x: x + widths[j] / 2, y, z: 0 });
+      x += widths[j];
+    });
+    y -= height;
+  });
+  // Centred on the origin; regions around their neurons (for flying to them).
+  const middle = y / 2;
+  positions.forEach((p) => (p.y -= middle));
+  for (const [id, region] of regions) {
+    const inside = [...chains].filter(([, chain]) => chain.includes(id)).map(([neuron]) => positions.get(neuron)!);
+    const centre = inside.reduce((c, p) => add(c, scale(p, 1 / inside.length)), origin());
+    region.center = centre;
+    region.radius = inside.reduce((r, p) => Math.max(r, length(sub(p, centre))), 0) + neuronGap;
+  }
+  return { regions, chains, positions, byCalls: { rowSpan: lines.length > 1 ? -y / (lines.length - 1) : 1 } };
+}
+
 /**
  * Where a synapse sits in the hierarchy: the innermost region holding both ends, and the item
  * of that region each end is in (a child region, or `n:<id>` for a neuron directly inside).
@@ -329,6 +447,9 @@ export function packItems(items: Item[], links: { a: string; b: string; weight: 
  * to the target. Empty when both are in the same innermost region: a straight line.
  */
 export function route(layout: Layout, source: string, target: string): Vec3[] {
+  if (layout.byCalls) {
+    return bowed(layout.positions.get(source), layout.positions.get(target), layout.byCalls.rowSpan);
+  }
   const ca = layout.chains.get(source);
   const cb = layout.chains.get(target);
   if (!ca || !cb) {
@@ -337,6 +458,24 @@ export function route(layout: Layout, source: string, target: string): Vec3[] {
   const common = commonLength(ca, cb);
   const centre = (id: string) => layout.regions.get(id)!.center;
   return [...ca.slice(common).reverse().map(centre), ...cb.slice(common).map(centre)];
+}
+
+/**
+ * In rows by call order, where a line bends: one between two functions of a row arcs above it
+ * (straight, it would run behind the functions between them), and one that skips rows bows to
+ * the side (straight, it could run through a function on a row it skips). Other lines are straight.
+ */
+function bowed(a: Vec3 | undefined, b: Vec3 | undefined, rowSpan: number): Vec3[] {
+  if (!a || !b) {
+    return [];
+  }
+  const d = sub(b, a);
+  const middle = lerp(a, b, 0.5);
+  if (Math.abs(d.y) < 1e-6) {
+    return Math.abs(d.x) > 1e-6 ? [add(middle, { x: 0, y: Math.abs(d.x) * 0.35, z: 0 })] : [];
+  }
+  const rows = Math.abs(d.y) / rowSpan;
+  return rows > 1.5 ? [add(middle, { x: Math.abs(d.y) * 0.25 * (d.x >= 0 ? 1 : -1), y: 0, z: 0 })] : [];
 }
 
 /**

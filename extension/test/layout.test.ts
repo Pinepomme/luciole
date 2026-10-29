@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { test } from "node:test";
 import type { Graph, GraphEdge, GraphNode } from "../src/graph";
 import { buildBrain } from "../src/webview/brain";
-import { bundle, buildRegions, hash, labelAnchor, layoutBrain, length, neuronRadius, packItems, regionMembers, route, seedPoint, Vec3 } from "../src/webview/layout";
+import { bundle, buildRegions, hash, labelAnchor, layoutBrain, layoutByCalls, length, neuronRadius, packItems, regionMembers, route, seedPoint, Vec3 } from "../src/webview/layout";
 
 // out/test/layout.test.js -> repo root
 const shop: Graph = JSON.parse(readFileSync(resolve(__dirname, "../../../examples/shop.graph.json"), "utf8"));
@@ -217,4 +217,65 @@ test("a region's name goes just above its neurons, not above its packed sphere",
   // Turned: the camera's up is the world's x.
   const turned = labelAnchor(points, { x: 0, y: -1, z: 0 }, { x: 1, y: 0, z: 0 }, 5);
   assert.ok(Math.abs(turned.x - 145) < 1e-9 && Math.abs(turned.y + 50) < 1e-9 && Math.abs(turned.z) < 1e-9);
+});
+
+// Rows by call order (small brains).
+
+function rows(graph: Graph) {
+  return layoutByCalls(buildBrain(graph), nodesOf(graph));
+}
+
+test("rows by call order: each function above the functions it calls", () => {
+  const { positions } = rows(app);
+  const y = (id: string) => positions.get(id)!.y;
+  const chain = ["src.app.cli:main", "src.app.core.engine:Engine.run", "src.app.core.engine:Engine.step", "src.app.core.store:Store.get", "src.app.core.store:load"];
+  chain.slice(1).forEach((id, i) => assert.ok(y(chain[i]) > y(id), `${chain[i]} above ${id}`));
+  // A function called from two rows goes below the lower caller.
+  assert.ok(y("tests.test_engine:test_run") > y("src.app.core.engine:Engine.run"));
+  for (const p of positions.values()) {
+    assert.equal(p.z, 0); // flat, facing the camera
+  }
+});
+
+test("rows by call order: loops and recursion do not loop the layout", () => {
+  const graph = project({ "m.py": ["a", "b", "c"] }, ["m:a > m:b", "m:b > m:c", "m:c > m:a", "m:b > m:b"]);
+  const { positions } = rows(graph);
+  const ys = ["m:a", "m:b", "m:c"].map((id) => positions.get(id)!.y);
+  assert.equal(new Set(ys).size, 3); // the loop is cut once: a chain of three rows
+});
+
+test("rows by call order: functions with no calls go on the last row", () => {
+  const graph = project({ "m.py": ["main", "work", "unused"] }, ["m:main > m:work"]);
+  const { positions } = rows(graph);
+  const lowest = Math.min(...[...positions.values()].map((p) => p.y));
+  assert.equal(positions.get("m:unused")!.y, lowest);
+  assert.ok(positions.get("m:work")!.y > lowest);
+});
+
+test("rows by call order: long rows wrap, nothing overlaps, the same graph gives the same rows", () => {
+  const callees = Array.from({ length: 14 }, (_, i) => `f${i}`);
+  const graph = project({ "m.py": ["main", ...callees] }, callees.map((f) => `m:main > m:${f}`));
+  const first = rows(graph);
+  const counts = new Map<number, number>();
+  first.positions.forEach((p) => counts.set(p.y, (counts.get(p.y) ?? 0) + 1));
+  assert.ok(Math.max(...counts.values()) <= 6);
+  const points = [...first.positions.values()];
+  points.forEach((a, i) => points.slice(i + 1).forEach((b) => assert.ok(distance(a, b) > 1)));
+  assert.deepEqual([...rows(graph).positions], [...first.positions]);
+});
+
+test("rows by call order: lines bend only to miss the functions between their ends", () => {
+  const graph = project({ "m.py": ["top", "left", "right", "bottom"] }, ["m:top > m:left", "m:top > m:right", "m:left > m:right", "m:left > m:bottom", "m:right > m:bottom", "m:top > m:bottom"]);
+  const brain = buildBrain(graph);
+  const result = layoutByCalls(brain, nodesOf(graph));
+  const p = (id: string) => result.positions.get(id)!;
+  assert.deepEqual(route(result, "m:top", "m:left"), []); // next row: straight
+  const siblings = project({ "s.py": ["top", "a", "b"] }, ["s:top > s:a", "s:top > s:b"]);
+  const flat = layoutByCalls(buildBrain(siblings), nodesOf(siblings));
+  assert.equal(flat.positions.get("s:a")!.y, flat.positions.get("s:b")!.y);
+  const [via] = route(flat, "s:a", "s:b"); // shared state between two functions of a row
+  assert.ok(via.y > flat.positions.get("s:a")!.y); // arcs above its row
+  const skip = route(result, "m:top", "m:bottom");
+  assert.equal(skip.length, 1); // skips rows: bows to the side
+  assert.notEqual(skip[0].x, (p("m:top").x + p("m:bottom").x) / 2);
 });
