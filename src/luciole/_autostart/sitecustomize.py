@@ -44,30 +44,62 @@ def is_luciole_run():
     return any(os.path.basename(arg).removesuffix(".exe") == "luciole" and next_arg == "run" for arg, next_arg in zip(argv, argv[1:]))
 
 
+# Same as luciole/protocol.py, which is not imported to read it: see import_bundled().
+PROTOCOL = 1
+
+
+def engine_port():
+    """Port of the running engine, from its file (luciole.protocol.engine_port); None when none."""
+    import json
+
+    home = os.environ.get("LUCIOLE_HOME") or os.path.join(os.path.expanduser("~"), ".luciole")
+    try:
+        with open(os.path.join(home, f"engine-v{PROTOCOL}.json"), encoding="utf-8") as file:
+            return int(json.load(file)["port"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def import_bundled(name):
+    """Import luciole.<name> from the package around this folder (the same version as the view
+    that turned auto-start on), without leaving it as `luciole` in sys.modules: the program may
+    import a luciole of its own (another version, or the luciole repository's tests), which must
+    be the one it gets. The modules imported keep working: they hold their own references."""
+
+    def ours(key):
+        return key == "luciole" or key.startswith("luciole.")
+
+    saved = {key: module for key, module in sys.modules.items() if ours(key)}
+    for key in saved:
+        del sys.modules[key]
+    package_parent = os.path.dirname(os.path.dirname(HERE))
+    sys.path.insert(0, package_parent)
+    try:
+        from importlib import import_module
+
+        return import_module(f"luciole.{name}")
+    finally:
+        sys.path.remove(package_parent)
+        for key in [key for key in sys.modules if ours(key)]:
+            del sys.modules[key]
+        sys.modules.update(saved)
+
+
 def start_luciole():
     if sys.version_info < (3, 12) or is_luciole_run():
         return
     import socket
 
-    # The luciole package around this folder: the same version as the view that turned it on.
-    package_parent = os.path.dirname(os.path.dirname(HERE))
-    sys.path.insert(0, package_parent)
+    port = os.environ.get("LUCIOLE_LIVE_PORT") or engine_port()
+    if not port:
+        return
+    # Connect before importing the recorder: with no engine, starting costs nothing more.
     try:
-        from luciole import protocol
-
-        port = os.environ.get("LUCIOLE_LIVE_PORT") or protocol.engine_port()
-        if not port:
-            return
-        # Connect before importing the recorder: with no engine, starting costs nothing more.
-        try:
-            connection = socket.create_connection(("127.0.0.1", int(port)), timeout=2)
-        except (OSError, ValueError):
-            return
-        connection.settimeout(None)
-        from luciole import recorder
-    finally:
-        sys.path.remove(package_parent)
-    recorder.start(port=port, quiet=True, connection=connection)
+        connection = socket.create_connection(("127.0.0.1", int(port)), timeout=2)
+    except (OSError, ValueError):
+        return
+    connection.settimeout(None)
+    import_bundled("recorder").start(port=port, quiet=True, connection=connection)
 
 
 drop_working_directory()

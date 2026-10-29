@@ -87,7 +87,8 @@ PROGRAM = """
         return 42
 
     work()
-    print("recorder loaded:", "luciole.recorder" in sys.modules)
+    recording = "luciole" in map(sys.monitoring.get_tool, range(6))
+    print("recorder loaded:", recording or any(name.endswith("recorder") for name in sys.modules))
 """
 
 
@@ -240,3 +241,53 @@ def test_env_commands(tmp_path, monkeypatch):
     assert off == {"PYTHONPATH": "/somewhere", "LUCIOLE_LIVE_PORT": None, "LUCIOLE_ROOT": None}
     assert env_commands(off, "sh") == "export PYTHONPATH=/somewhere\nunset LUCIOLE_LIVE_PORT\nunset LUCIOLE_ROOT"
     assert env_commands({"A": "it's"}, "powershell") == "$env:A = 'it''s'"
+
+
+OWN_LUCIOLE = """
+    import luciole
+
+    def work():
+        return 42
+
+    work()
+    print("luciole:", luciole.WHO)
+"""
+
+
+def own_luciole(tmp_path):
+    (tmp_path / "luciole").mkdir()
+    (tmp_path / "luciole" / "__init__.py").write_text("WHO = 'own'\n")
+
+
+def test_a_program_imports_its_own_luciole_without_an_engine(tmp_path):
+    own_luciole(tmp_path)
+    result = python(tmp_path, OWN_LUCIOLE, "prog.py")
+    assert result.returncode == 0, result.stderr
+    assert "luciole: own" in result.stdout
+
+
+def test_a_program_imports_its_own_luciole_with_an_engine(tmp_path):
+    own_luciole(tmp_path)
+    view = View()
+    result = python(tmp_path, OWN_LUCIOLE, "prog.py")
+    assert result.returncode == 0, result.stderr
+    assert "luciole: own" in result.stdout
+    [process] = view.processes()  # the recorder still reports
+    assert calls(process["messages"])["prog:work"] == 1
+
+
+def test_luciole_start_leaves_auto_start_reporting(tmp_path):
+    view = View()
+    result = python(tmp_path, """
+        import luciole
+
+        def work():
+            pass
+
+        print("started:", luciole.start())
+        work()
+    """, "prog.py", extra_path=[REPO / "src"])
+    assert result.returncode == 0, result.stderr
+    assert "started: True" in result.stdout
+    [process] = view.processes()  # one recorder, not one per copy of luciole
+    assert calls(process["messages"])["prog:work"] == 1
