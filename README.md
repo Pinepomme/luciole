@@ -7,7 +7,7 @@ Luciole turns a Python project into a graph you can explore, and lights it up as
   function to another: arguments in, return values out, and globals or attributes one function
   writes and another reads.
 - **Live mode.** Run a program, a module or your tests under the recorder: running functions glow,
-  pulses travel along calls, and every thread and asyncio task shows its call path.
+  light flows along calls, and every thread and asyncio task shows its call path.
 - **Debugger controls.** Pause, step over/into/out, and look at every function's variables.
 
 Luciole has two parts: this Python package (the analyzer and the live recorder), and a VS Code

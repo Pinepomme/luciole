@@ -11,7 +11,8 @@ the functions light up as they run.
   the brain. A test file runs with pytest; a script (it has `if __name__ == "__main__":`) runs as
   itself; any other module, which is not meant to run on its own, runs through the test files that
   import it. In the brain: functions on the current call path glow, functions that just ran flash and fade,
-  pulses travel along the lines as calls happen. The bar at the bottom shows what is running now.
+  waves of light flow along the lines as calls happen, at their own slow pace (cyan for calls,
+  sea green for calls seen only at runtime, blue for spawns). The bar at the bottom shows what is running now.
   Functions that ran stay softly lit afterwards. Calls the static analysis missed appear as
   orange lines.
 - **Auto-start** (**Luciole: off** / **on** in the status bar): when on, every Python program

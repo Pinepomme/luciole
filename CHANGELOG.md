@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Live mode: calls send a wave of light along their synapse instead of bubbles, a soft glow that
+  glides from caller to callee at its own slow pace, brightest at its head with a fading tail.
+  Waves on a busy synapse merge into a steady glow, and many lit at once dim together instead of
+  blowing out. Cyan for calls, sea green for calls seen only at runtime, blue for spawns.
 - The brain is a map: packages, modules and classes are regions inside regions, placed by how
   much they call each other, with their names at their centres. The same project always gives
   the same map, and editing a file leaves the rest in place. Calls between regions travel
