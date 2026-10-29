@@ -451,6 +451,19 @@ def test_no_calls_by_name_through_modules(tmp_path):
     assert ("tools:other", "tools:Runner.run") in found  # an unknown object, not a module
 
 
+def test_a_method_matched_by_name_keeps_the_receivers_flow(tmp_path):
+    graph = analyze(tmp_path, {"m.py": """
+        class Handler:
+            def handle(self):
+                pass
+
+
+        def cb(obj):
+            return obj.handle
+    """})
+    assert ("m:cb#obj", "m:cb#return") in edges(graph, "flows_to")
+
+
 def test_star_import_cycles_are_fast(tmp_path):
     names = ["a", "b", "c", "d"]
     files = {"pkg/__init__.py": ""}
