@@ -22,6 +22,10 @@
   project's only method of a name. On the standard library's `email` and `asyncio` packages, the
   share of runtime calls missing from the graph went from 52% to 27%.
 - The view shows several processes at once; Pause and Stop apply to all of them.
+- The graph and `luciole tests` skip the folders the project's `.gitignore` lists (data, runs,
+  outputs), and `luciole tests` also finds tests that reach a module through other modules.
+- A process ended by SIGTERM (a `multiprocessing` pool's workers) still reports its last calls.
+- Labels sit above their neuron, and overlapping labels give way to the more important one.
 - The recorder uses a `sys.monitoring` tool id of its own, so `cProfile`, coverage and debuggers
   keep working with it.
 
