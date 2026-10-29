@@ -280,6 +280,41 @@ def test_streams_to_a_socket(tmp_path):
     assert received[-1] == {"done": True}
 
 
+def test_the_hello_comes_before_the_first_frame(tmp_path):
+    # The engine refuses a connection whose first line is not a hello: the pump thread, which
+    # sends frames, must not run before it is written.
+    (tmp_path / "prog.py").write_text(textwrap.dedent("""
+        import socket, threading
+        from luciole import protocol, recorder
+
+        pumped = threading.Event()
+
+        def pump(self):  # the first tick at once
+            self.recorder.flush()
+            pumped.set()
+            while not self.stopping.wait(recorder.FRAME):
+                self.recorder.flush()
+
+        def slow_hello(*args, hello=protocol.hello, **kwargs):
+            pumped.wait(0.5)  # a pump started before the hello sends its frame first
+            return hello(*args, **kwargs)
+
+        recorder.Session.pump = pump
+        protocol.hello = slow_hello
+        server = socket.create_server(("127.0.0.1", 0))
+        connection = socket.create_connection(server.getsockname())
+        engine, _ = server.accept()
+        recorder.start(root=".", connection=connection)
+        recorder.stop()
+        print(engine.makefile().readline())
+    """))
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    env.pop("LUCIOLE_LIVE_PORT", None)
+    result = subprocess.run([sys.executable, "prog.py"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["hello"]["role"] == "recorder"
+
+
 PAUSABLE_APP = """\
     import time
 
