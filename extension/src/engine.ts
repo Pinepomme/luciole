@@ -36,6 +36,22 @@ export function readEnginePort(file: string = engineFile()): number | undefined 
   }
 }
 
+/**
+ * A viewer's roots as the engine compares them: with symlinks resolved, as recorders resolve
+ * theirs (a workspace opened through a symlink would otherwise show none of its programs). A
+ * folder that cannot be resolved is sent as it is.
+ */
+export function viewerRoots(folders: string[]): string[] {
+  const roots = folders.map((folder) => {
+    try {
+      return fs.realpathSync(folder);
+    } catch {
+      return folder;
+    }
+  });
+  return [...new Set(roots)];
+}
+
 function answers(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = net.connect(port, "127.0.0.1");
