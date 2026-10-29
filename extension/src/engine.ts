@@ -153,7 +153,10 @@ export async function ensureEngine(python: string, analyzerDir: string, log: (li
   }
   log(`$ ${python} -m luciole engine  (from ${analyzerDir}, output in ${engineLog()})`);
   fs.mkdirSync(path.dirname(engineLog()), { recursive: true });
-  const output = fs.openSync(engineLog(), "w");
+  // Appended to: two windows starting engines together would empty each other's log. Started
+  // afresh once it grows past 1 MB.
+  const big = fs.existsSync(engineLog()) && fs.statSync(engineLog()).size > 1 << 20;
+  const output = fs.openSync(engineLog(), big ? "w" : "a");
   const child = spawn(python, ["-m", "luciole", "engine"], {
     cwd: analyzerDir,
     env: { ...process.env, PYTHONPATH: analyzerDir },
