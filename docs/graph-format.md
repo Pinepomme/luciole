@@ -305,6 +305,9 @@ threads' frames: `sys._current_frames()` breaks `torch.export` tracing.
 
 ### Pausing and variables
 
+The VS Code extension no longer sends these commands (Run Live runs under VS Code's Python
+debugger, which pauses and steps); they are kept for engine clients.
+
 The connection also carries commands from viewers to the recorder, one JSON object per line:
 `{"cmd": "pause"}`, `{"cmd": "resume"}`, `{"cmd": "expand", "ref": 7}` and
 `{"cmd": "step", "thread": 1401, "mode": "over"}` (`mode`: `over`, `into` or `out`). On pause, the

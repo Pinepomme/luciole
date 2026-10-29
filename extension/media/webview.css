@@ -6,7 +6,7 @@ body {
   overflow: hidden;
   background: var(--vscode-editor-background);
   color: var(--vscode-foreground);
-  font-family: var(--vscode-font-family);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", var(--vscode-font-family), sans-serif;
   font-size: var(--vscode-font-size);
 }
 
@@ -27,7 +27,7 @@ body {
 button {
   border: none;
   padding: 3px 10px;
-  border-radius: 2px;
+  border-radius: 4px;
   cursor: pointer;
   color: var(--vscode-button-secondaryForeground);
   background: var(--vscode-button-secondaryBackground);
@@ -61,13 +61,7 @@ button:disabled {
   cursor: default;
 }
 
-#stepping {
-  display: inline-flex;
-  gap: 6px;
-}
-
-button[hidden],
-#stepping[hidden] {
+button[hidden] {
   display: none;
 }
 
@@ -75,34 +69,6 @@ button[hidden],
   flex: 1;
   min-width: 120px;
   color: var(--vscode-descriptionForeground);
-}
-
-#legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  color: var(--vscode-descriptionForeground);
-}
-
-.key::before {
-  content: "";
-  display: inline-block;
-  width: 18px;
-  margin-right: 5px;
-  vertical-align: middle;
-  border-top: 2px solid var(--key-color);
-}
-
-.key.call { --key-color: #6f8bb3; }
-.key.state { --key-color: #8a6fb3; }
-.key.runtime { --key-color: #d18616; }
-.key.spawn { --key-color: #4fb3a9; }
-.key.waiting::before {
-  width: 9px;
-  height: 9px;
-  border: none;
-  border-radius: 50%;
-  background: #5aa9ff;
 }
 
 #brain {
@@ -126,7 +92,8 @@ button[hidden],
   min-height: 1.4em;
   padding: 4px 8px;
   font-family: var(--vscode-editor-font-family);
-  color: #ffc94d;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
   border-top: 1px solid var(--vscode-panel-border);
   white-space: pre;
   overflow: hidden;
@@ -137,8 +104,8 @@ button[hidden],
 .float-tooltip-kap,
 .scene-tooltip {
   padding: 4px 8px;
-  border-radius: 3px;
-  font-family: var(--vscode-editor-font-family);
+  border-radius: 6px;
+  font-family: inherit;
   font-size: 12px;
   color: var(--vscode-editorHoverWidget-foreground, #ccc);
   background: var(--vscode-editorHoverWidget-background, #252526);

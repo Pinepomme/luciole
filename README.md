@@ -6,9 +6,11 @@ Luciole turns a Python project into a graph you can explore, and lights it up as
 - **One neuron per function.** The lines between them are the variables that flow from one
   function to another: arguments in, return values out, and globals or attributes one function
   writes and another reads.
-- **Live mode.** Run a program, a module or your tests under the recorder: running functions glow,
-  pulses travel along calls, and every thread and asyncio task shows its call path.
-- **Debugger controls.** Pause, step over/into/out, and look at every function's variables.
+- **Live mode.** Run a program, a module or your tests under the recorder: running functions
+  light up, each call traces its line, and every thread and asyncio task shows its call path.
+- **With the debugger.** In VS Code, Run Live starts the program under VS Code's Python debugger:
+  breakpoints, stepping, variables and the debug console work as usual while the graph lights up,
+  and the graph follows where the debugger stops.
 
 Luciole has two parts: this Python package (the analyzer and the live recorder), and a VS Code
 extension that shows the graph in 3D. The extension bundles the package, so in VS Code there is

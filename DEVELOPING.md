@@ -61,7 +61,10 @@ they do.
    code from `src/` as it is on disk. Nothing gets installed.
 3. In that second window, use Luciole: the graph button in a Python file's editor title bar,
    ⚡ Run Live, and so on. `examples/` has small programs to try (`examples/workers.py` exercises
-   threads and asyncio).
+   threads and asyncio). ⚡ Run Live starts a debug session of VS Code's Python debugger: the
+   second window needs the Python Debugger extension (`ms-python.debugpy`), else runs go to a
+   plain terminal. While you debug the program in the second window, the first window's debugger
+   stays on the extension itself.
 4. After a change:
    - **Python** (`src/luciole/`): no rebuild needed. The next graph or run uses the new code.
      If you changed the engine (`engine.py`, `protocol.py`), stop the running engine first
@@ -96,6 +99,10 @@ To see the webview without VS Code (renders it in headless Chromium and saves PN
 cd extension
 npm run screenshot -- ../examples                         # a static graph
 npm run screenshot -- ../examples --events ../run.jsonl   # replay a recording
+npm run screenshot -- ../examples --events ../run.jsonl --frames 8   # and 8 shots of it moving
+npm run screenshot -- ../examples --fps                   # also print frames per second
+npm run screenshot -- ../examples --theme light           # in Light Modern instead of Dark Modern
+node out/dev/layout-stats.js graph.json                   # how the region layout turns out
 ```
 
 On WSL, Chromium needs `libasound.so.2`: `sudo apt install libasound2t64`.
@@ -229,14 +236,15 @@ src/luciole/
   engine.py        the local engine that recorders connect to and viewers subscribe to
   protocol.py      protocol version and engine discovery (~/.luciole/engine-v1.json)
   _autostart/      sitecustomize.py: starts the recorder in any Python process when enabled
-  values.py        variable snapshots for the Variables view
+  values.py        variable snapshots for the recorder's pause protocol (engine clients)
   testfinder.py    finds the test files that import a module
   cli.py           the `luciole` command
 extension/
   src/extension.ts   entry point, commands
-  src/live.ts        live runs (terminal + socket); src/engine.ts finds or starts the engine
-  src/debugging.ts   following the VS Code debugger
-  src/webview/       the 3D view (brain.ts = model, main.ts = rendering and lighting)
+  src/live.ts        live runs (debug session or terminal); src/engine.ts finds or starts the engine
+  src/debugging.ts   following the VS Code debugger; src/runs.ts what Run Live launches
+  src/webview/       the 3D view (brain.ts = model, layout.ts = map of regions and bundled
+                     links, flow.ts = calls tracing their lines, main.ts = rendering and lighting)
   test/              unit tests (npm test)
   package.mjs        builds luciole.vsix with a copy of src/luciole
 tests/             Python tests (uv run pytest)
