@@ -52,6 +52,9 @@ Spec: `docs/graph-format.md`. JSON Schema: `schema/graph.schema.json`. Example: 
 
 ## Development setup
 
+Step-by-step guide for developers (setup, F5 loop, branches, release, troubleshooting): `DEVELOPING.md`.
+
+
 - WSL, repo at `~/dev/luciole`.
 - Python environment managed with **uv**: `uv sync`, `uv run ...`, `uv add <pkg>`, `uv add --dev <pkg>`.
 - `src/` layout, version in `src/luciole/__init__.py` (`__version__`), read dynamically by hatchling.
