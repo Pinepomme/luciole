@@ -105,10 +105,10 @@ share the same session.
   Luciole's own pause/step buttons and Variables view go; the recorder keeps its value snapshots
   and pause/step protocol for engine clients and for phase 4.
 - Scale, a structured layout instead of one force-directed cloud:
-  - regions inside regions (packages → modules → classes → functions): nearness means "same
+  - [x] regions inside regions (packages → modules → classes → functions): nearness means "same
     module";
-  - stable positions, seeded from paths: the same project always gives the same map;
-  - calls between regions bundled into tracts; region labels, so the overview reads like a map;
+  - [x] stable positions, seeded from paths: the same project always gives the same map;
+  - [x] calls between regions bundled into tracts; region labels, so the overview reads like a map;
   - semantic zoom: regions open into modules, then functions, as you get closer;
   - size and brightness by importance (callers, runtime calls), entry points marked;
   - search, focus (the functions N calls around a selection) and filters (tests, private helpers).

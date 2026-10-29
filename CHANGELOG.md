@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The brain is a map: packages, modules and classes are regions inside regions, placed by how
+  much they call each other, with their names at their centres. The same project always gives
+  the same map, and editing a file leaves the rest in place. Calls between regions travel
+  together in tracts instead of thousands of crossing lines.
 - Run Live (⚡, Run Live…, run configurations, tests for a file, Run again) runs the program under
   VS Code's Python debugger, lit up by the recorder: breakpoints, stopping on exceptions, stepping,
   the Variables, Watch and Call Stack views, hover and the Debug Console all work on it. Without

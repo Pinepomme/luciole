@@ -4,6 +4,8 @@
  *
  *   node out/dev/screenshot.js [path] [--events FILE] [--breakpoint FILE:LINE] [--stopped FILE:LINE] [--out dir]
  *
+ * --fps also prints how many frames per second the overview draws.
+ *
  * --events replays a recording made with `luciole run --events FILE ...` and captures the
  * moment with the deepest call stack. --breakpoint and --stopped (FILE relative to the graph's
  * root) show a breakpoint and the debugger stopped there, as VS Code would send them.
@@ -115,6 +117,19 @@ async function main(): Promise<void> {
 
   await page.evaluate((graph) => window.postMessage({ type: "graph", target: "harness", graph, warnings: [] }, "*"), JSON.parse(json));
   await shot("1-overview");
+  if (process.argv.includes("--fps")) {
+    // Frames drawn in 3 s (software WebGL here: compare runs, not with a real GPU).
+    const fps = await page.evaluate(
+      () =>
+        new Promise<number>((resolve) => {
+          let frames = 0;
+          const start = performance.now();
+          const count = () => (performance.now() - start < 3000 ? (frames++, requestAnimationFrame(count)) : resolve(frames / 3));
+          requestAnimationFrame(count);
+        }),
+    );
+    console.log(`frames/s: ${fps.toFixed(1)}`);
+  }
 
   // Live lighting: replay recorded events (luciole run --events FILE), or a made-up frame for shop.py.
   const eventsFile = option("--events");
