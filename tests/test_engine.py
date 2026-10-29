@@ -149,3 +149,17 @@ def test_roots_reached_through_a_symlink_match(engine, tmp_path):
     assert other.receive()["process"]["pid"] == 12
     for client in (viewer, recorder, other, linked):
         client.close()
+
+
+def test_a_recorder_cut_off_mid_line_still_exits_cleanly(engine):
+    viewer = Client(engine.port, "viewer")
+    viewer.receive()
+    recorder = Client(engine.port, "recorder", pid=11, argv=[])
+    recorder.receive()
+    number = viewer.receive()["process"]["id"]
+    recorder.send({"t": 0.1, "calls": {"app:main": 1}})
+    recorder.connection.sendall(b'{"t":0.2,"calls":{"app:ma')  # killed mid-line
+    recorder.close()
+    assert viewer.receive() == {"from": number, "t": 0.1, "calls": {"app:main": 1}}
+    assert viewer.receive() == {"exit": number}  # on a line of its own
+    viewer.close()
