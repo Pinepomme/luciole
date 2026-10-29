@@ -552,6 +552,36 @@ def test_f_string_conversions(tmp_path):
     assert found == {("r", "__repr__"), ("a", "__repr__"), ("s", "__str__"), ("plain", "__format__")}
 
 
+def test_the_latest_assignment_types_a_variable(tmp_path):
+    graph = analyze(tmp_path, {"m.py": """
+        class A:
+            def m(self):
+                pass
+
+
+        class B:
+            def m(self):
+                pass
+
+            def n(self):
+                pass
+
+
+        def f():
+            x = A()
+            x = B()
+            x.m()
+
+
+        def g():
+            y: A = B()  # the value's class, more precise than the annotation
+            y.n()
+    """})
+    found = calls(graph)
+    assert ("m:f", "m:B.m") in found and ("m:f", "m:A.m") not in found
+    assert ("m:g", "m:B.n") in found
+
+
 def test_star_import_cycles_are_fast(tmp_path):
     names = ["a", "b", "c", "d"]
     files = {"pkg/__init__.py": ""}
