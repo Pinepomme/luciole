@@ -11,8 +11,10 @@ and time travel), and only then widen to other editors and languages.
   between functions are the lines connecting them. It graphs the current file or a whole folder.
 - **Live mode** (`luciole run`, ⚡ Run Live): functions light up as they run, with the current
   call path, pulses along calls, threads and asyncio tasks, and calls found only at runtime.
-- **Debugger controls in live mode**: Stop, Pause/Resume, Step over/into/out, and a Variables
-  view (threads, call stack, expandable values, the stopped line highlighted).
+- **Run Live under VS Code's Python debugger**: breakpoints, stepping, variables and the debug
+  console are the debugger's while the recorder lights up the view (a plain terminal run without
+  the Python Debugger extension). The recorder also has its own pause/step/variables protocol,
+  for engine clients.
 - **The engine** (`luciole engine`) and **auto-start**: any Python process (terminal runs, test
   runners, child processes, debug sessions) lights up the view, with no change to how it starts.
 - **Debugging with the graph**: VS Code's Python debugger and the brain together (the stopped
@@ -100,9 +102,11 @@ share the same session.
   `key=f`, event handlers) is linked to the function passing it (`"callback": true`).
 - Scale: whole-folder graphs of 30k+ lines that stay readable (search, filtering, modules that
   collapse and expand).
-- Decide the future of live mode's own pause/step/Variables view. Partly decided: under VS Code's
-  debugger, pausing and stepping are the debugger's (Luciole's buttons hide and drive it); live
-  mode's own pause remains for ⚡ Run Live.
+- [x] Decide the future of live mode's own pause/step/Variables view: ⚡ Run Live runs under VS
+  Code's Python debugger, which does all live control (breakpoints, stepping, variables, debug
+  console); the extension's own pause/step and Variables view are gone. The recorder keeps its
+  pause/step/expand commands for engine clients (agents, phase 3), and becomes the history engine
+  (phase 4).
 
 ### Phase 3: Agents
 
