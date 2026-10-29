@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The brain is a map: packages, modules and classes are regions inside regions, placed by how
+  much they call each other, with their names at their centres. The same project always gives
+  the same map, and editing a file leaves the rest in place. Calls between regions travel
+  together in tracts instead of thousands of crossing lines.
 - Auto-start: with the **Luciole: on** switch (status bar, setting `luciole.autoStart`), every
   Python program started in a new VS Code terminal lights up the view, child processes included
   (forked ones too). Nothing is started when the view is not listening. `luciole env` does the

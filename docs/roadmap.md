@@ -99,7 +99,9 @@ share the same session.
 - [x] Callbacks: a function passed as an argument (`Thread(target=f)`, `pool.submit(f)`,
   `key=f`, event handlers) is linked to the function passing it (`"callback": true`).
 - Scale: whole-folder graphs of 30k+ lines that stay readable (search, filtering, modules that
-  collapse and expand).
+  collapse and expand). First step done: a map of regions (packages > modules > classes) with
+  stable positions, region names, and calls between regions bundled into tracts. Next: semantic
+  zoom (regions open into modules and functions as you get closer), search, filtering.
 - Decide the future of live mode's own pause/step/Variables view. Partly decided: under VS Code's
   debugger, pausing and stepping are the debugger's (Luciole's buttons hide and drive it); live
   mode's own pause remains for ⚡ Run Live.

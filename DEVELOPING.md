@@ -96,6 +96,8 @@ To see the webview without VS Code (renders it in headless Chromium and saves PN
 cd extension
 npm run screenshot -- ../examples                         # a static graph
 npm run screenshot -- ../examples --events ../run.jsonl   # replay a recording
+npm run screenshot -- ../examples --fps                   # also print frames per second
+node out/dev/layout-stats.js graph.json                   # how the region layout turns out
 ```
 
 On WSL, Chromium needs `libasound.so.2`: `sudo apt install libasound2t64`.
@@ -236,7 +238,8 @@ extension/
   src/extension.ts   entry point, commands
   src/live.ts        live runs (terminal + socket); src/engine.ts finds or starts the engine
   src/debugging.ts   following the VS Code debugger
-  src/webview/       the 3D view (brain.ts = model, main.ts = rendering and lighting)
+  src/webview/       the 3D view (brain.ts = model, layout.ts = map of regions and bundled
+                     links, main.ts = rendering and lighting)
   test/              unit tests (npm test)
   package.mjs        builds luciole.vsix with a copy of src/luciole
 tests/             Python tests (uv run pytest)

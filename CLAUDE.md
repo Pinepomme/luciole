@@ -48,7 +48,7 @@ Spec: `docs/graph-format.md`. JSON Schema: `schema/graph.schema.json`. Example: 
 - Graph model: plain dicts for now; `networkx` if graph algorithms (slicing, layout prep) need it.
 - Call resolution (later): Pyright or `jedi`, much better than raw AST matching for methods, imports, aliases.
 - Runtime recording: `sys.monitoring` (Python 3.12+), low overhead, can be enabled per function.
-- Rendering: VS Code webview with `3d-force-graph` (three.js). Brain model in `extension/src/webview/brain.ts`, rendering and live lighting in `extension/src/webview/main.ts`, live session (terminal + local socket) in `extension/src/live.ts`.
+- Rendering: VS Code webview with `3d-force-graph` (three.js). Brain model in `extension/src/webview/brain.ts`, map layout (regions: packages > modules > classes, seeded packing, bundled links) in `extension/src/webview/layout.ts`, rendering and live lighting in `extension/src/webview/main.ts`, live session (terminal + local socket) in `extension/src/live.ts`.
 
 ## Development setup
 
