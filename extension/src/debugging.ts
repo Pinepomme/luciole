@@ -22,7 +22,25 @@ export interface DebugHooks {
   stopped(file: string, line: number): void;
   /** The debugger went on, or the session ended. */
   continued(): void;
+  /** A line for the Luciole output, to tell why the brain did or did not follow the debugger. */
+  log(line: string): void;
 }
+
+/** The running Python debug session, if any: Luciole's pause and step commands then drive it. */
+export function pythonDebugSession(): vscode.DebugSession | undefined {
+  const session = vscode.debug.activeDebugSession;
+  return session && PYTHON_DEBUG_TYPES.includes(session.type) ? session : undefined;
+}
+
+/** VS Code's debugger command doing what a Luciole live command does. */
+export const DEBUGGER_COMMANDS = {
+  pause: "workbench.action.debug.pause",
+  resume: "workbench.action.debug.continue",
+  over: "workbench.action.debug.stepOver",
+  into: "workbench.action.debug.stepInto",
+  out: "workbench.action.debug.stepOut",
+  stop: "workbench.action.debug.stop",
+} as const;
 
 export function registerDebugging(hooks: DebugHooks): vscode.Disposable[] {
   const provider: vscode.DebugConfigurationProvider = {
@@ -38,6 +56,7 @@ export function registerDebugging(hooks: DebugHooks): vscode.Disposable[] {
   };
   const trackers: vscode.DebugAdapterTrackerFactory = {
     createDebugAdapterTracker(session) {
+      hooks.log(`debugger: following session "${session.name}" (${session.type})`);
       return {
         onDidSendMessage(message: { type?: string; event?: string; body?: { threadId?: number } }) {
           if (message.type !== "event") {
@@ -62,6 +81,7 @@ export function registerDebugging(hooks: DebugHooks): vscode.Disposable[] {
 /** Where the stopped thread is: the top frame of its stack, asked of the debugger. */
 async function reportStop(session: vscode.DebugSession, threadId: number | undefined, hooks: DebugHooks): Promise<void> {
   if (threadId === undefined) {
+    hooks.log("debugger stopped, with no thread named");
     return;
   }
   try {
@@ -71,9 +91,11 @@ async function reportStop(session: vscode.DebugSession, threadId: number | undef
     const frame = reply.stackFrames?.[0];
     if (frame?.source?.path) {
       hooks.stopped(frame.source.path, frame.line);
+    } else {
+      hooks.log(`debugger stopped in thread ${threadId}, in a frame with no source file`);
     }
-  } catch {
-    // the session ended meanwhile
+  } catch (error) {
+    hooks.log(`debugger stopped in thread ${threadId}, but its stack could not be read: ${error}`); // the session may have ended
   }
 }
 

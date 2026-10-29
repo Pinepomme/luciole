@@ -5,7 +5,7 @@ import { randomBytes } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { addBreakpoint, registerDebugging, removeBreakpoints, sourceBreakpoints } from "./debugging";
+import { addBreakpoint, DEBUGGER_COMMANDS, pythonDebugSession, registerDebugging, removeBreakpoints, sourceBreakpoints } from "./debugging";
 import type { Graph } from "./graph";
 import { webviewHtml } from "./html";
 import { LiveSession } from "./live";
@@ -70,14 +70,15 @@ export function activate(context: vscode.ExtensionContext): void {
     live,
     variables,
     vscode.commands.registerCommand("luciole.revealFrame", (frame: PausedFrame, thread: PausedThread) => revealFrame(frame, thread)),
-    vscode.commands.registerCommand("luciole.stepOver", () => step("over")),
-    vscode.commands.registerCommand("luciole.stepInto", () => step("into")),
-    vscode.commands.registerCommand("luciole.stepOut", () => step("out")),
+    // Under VS Code's Python debugger, pausing and stepping are the debugger's: one pause, not two.
+    vscode.commands.registerCommand("luciole.stepOver", () => viaDebugger("over") || step("over")),
+    vscode.commands.registerCommand("luciole.stepInto", () => viaDebugger("into") || step("into")),
+    vscode.commands.registerCommand("luciole.stepOut", () => viaDebugger("out") || step("out")),
     vscode.commands.registerCommand("luciole.runLive", () => runFile(context, fileTarget())),
     vscode.commands.registerCommand("luciole.runLiveWith", () => pickRun(context)),
-    vscode.commands.registerCommand("luciole.stopLive", () => live.stop()),
-    vscode.commands.registerCommand("luciole.pauseLive", () => live.pause(true)),
-    vscode.commands.registerCommand("luciole.resumeLive", () => live.pause(false)),
+    vscode.commands.registerCommand("luciole.stopLive", () => viaDebugger("stop") || live.stop()),
+    vscode.commands.registerCommand("luciole.pauseLive", () => viaDebugger("pause") || live.pause(true)),
+    vscode.commands.registerCommand("luciole.resumeLive", () => viaDebugger("resume") || live.pause(false)),
     vscode.commands.registerCommand("luciole.showGraph", () => showGraph(context, workspaceTarget(), false)),
     vscode.commands.registerCommand("luciole.showFileGraph", () => showGraph(context, fileTarget(), true)),
     autoStartItem,
@@ -101,8 +102,15 @@ export function activate(context: vscode.ExtensionContext): void {
         const root = folder?.uri.fsPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         return { PYTHONPATH: path.join(dir, "luciole", "_autostart"), ...(root ? { LUCIOLE_ROOT: root } : {}) };
       },
-      stopped: (file, line) => panel?.debugStopped(file, line),
+      stopped: (file, line) => {
+        if (panel) {
+          panel.debugStopped(file, line);
+        } else {
+          output.appendLine(`debugger stopped at ${file}:${line}; no graph is open to show it`);
+        }
+      },
       continued: () => panel?.post({ type: "debugStopped", at: undefined }),
+      log: (line) => output.appendLine(line),
     }),
     vscode.debug.onDidChangeBreakpoints(() => panel?.postBreakpoints()),
     // A file graph follows the editor: switching to another Python file shows that file's graph.
@@ -355,6 +363,15 @@ function activePythonFile(): string | undefined {
   return document?.languageId === "python" && document.uri.scheme === "file" ? document.uri.fsPath : undefined;
 }
 
+/** Runs VS Code's debugger command for `action` when a Python debug session runs; false otherwise. */
+function viaDebugger(action: keyof typeof DEBUGGER_COMMANDS): boolean {
+  if (!pythonDebugSession()) {
+    return false;
+  }
+  void vscode.commands.executeCommand(DEBUGGER_COMMANDS[action]);
+  return true;
+}
+
 function step(mode: StepMode): void {
   const thread = variables.current;
   if (thread) {
@@ -452,6 +469,11 @@ class GraphPanel {
   /** The debugger stopped at `line` of `file`: show its function, if it is in this graph. */
   debugStopped(file: string, line: number): void {
     const relative = this.relative(file);
+    output.appendLine(
+      relative
+        ? `debugger stopped at ${relative}:${line}, shown in the brain`
+        : `debugger stopped at ${file}:${line}, outside this graph (${this.root ?? "not analyzed yet"})`,
+    );
     this.post({ type: "debugStopped", at: relative ? { file: relative, line } : undefined });
   }
 
