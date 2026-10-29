@@ -15,26 +15,16 @@ packages (directories without `__init__.py`) are part of those names.
 from __future__ import annotations
 
 import ast
-import os
 import sys
 from pathlib import Path
 
-from luciole.analyzer import SKIP_DIRS, module_name
+from luciole.analyzer import module_name, python_files
 
 MAX_DEPTH = 10  # project modules followed from a test to the module
 
 
 def is_test_file(path: Path) -> bool:
     return path.suffix == ".py" and (path.name.startswith("test_") or path.stem.endswith("_test"))
-
-
-def python_files(root: Path):
-    """The .py files under `root`, in a stable order, leaving out the directories the analyzer skips."""
-    for directory, subdirectories, files in os.walk(root):
-        subdirectories[:] = sorted(d for d in subdirectories if not d.startswith(".") and d not in SKIP_DIRS)
-        for name in sorted(files):
-            if name.endswith(".py"):
-                yield Path(directory, name)
 
 
 def find_test_files(root: Path):

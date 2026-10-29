@@ -582,6 +582,21 @@ def test_the_latest_assignment_types_a_variable(tmp_path):
     assert ("m:g", "m:B.n") in found
 
 
+def test_skips_directories_the_gitignore_lists(tmp_path):
+    graph = analyze(tmp_path, {
+        ".gitignore": "# outputs\nruns/\n/data\noutput\n*.egg-info/\nsrc/generated/\n\n",
+        "app.py": "",
+        "runs/r.py": "",
+        "data/d.py": "",
+        "sub/data/kept.py": "",  # /data is anchored to the top
+        "sub/output/o.py": "",
+        "x.egg-info/e.py": "",
+        "src/generated/g.py": "",  # a path: too fancy, not used
+    })
+    files = {n["file"] for n in graph["nodes"] if n["kind"] == "module"}
+    assert files == {"app.py", "sub/data/kept.py", "src/generated/g.py"}
+
+
 def test_star_import_cycles_are_fast(tmp_path):
     names = ["a", "b", "c", "d"]
     files = {"pkg/__init__.py": ""}

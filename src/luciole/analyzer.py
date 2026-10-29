@@ -8,8 +8,10 @@ again, resolves names against those bindings, and records the edges.
 from __future__ import annotations
 
 import ast
+import fnmatch
 import io
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -87,18 +89,45 @@ def build_graph(path: Path) -> dict:
     if path.is_file():
         root, files = path.parent, [path]
     else:
-        root = path
-        files = sorted(
-            p
-            for p in path.rglob("*.py")
-            if not any(part.startswith(".") or part in SKIP_DIRS for part in p.relative_to(root).parent.parts)
-        )
+        root, files = path, sorted(python_files(path))
     analyzer = Analyzer(root)
     modules = [analyzer.collect_module(f) for f in files]
     for scope in modules:
         if scope is not None:
             FlowVisitor(analyzer, scope, scope.node_id).run(scope.tree.body)
     return analyzer.to_json()
+
+
+def python_files(root: Path):
+    """The .py files under `root`, in a stable order. Hidden directories, `SKIP_DIRS` and the
+    directories the top-level .gitignore lists (see `gitignored`) are left out, unvisited."""
+    ignored = gitignored(root)
+    for directory, subdirectories, files in os.walk(root):
+        top = Path(directory) == root
+        subdirectories[:] = sorted(d for d in subdirectories if not d.startswith(".") and d not in SKIP_DIRS and not ignored(d, top))
+        for name in sorted(files):
+            if name.endswith(".py"):
+                yield Path(directory, name)
+
+
+def gitignored(root: Path):
+    """A test for the directories `root`'s .gitignore lists, called with a directory's name and
+    whether it is at the top. Only plain patterns are used (`runs/`, `/data`, `output`, `*.egg-info`);
+    paths and `**` are not, and a `!` pattern, which may bring files back, disables it all."""
+    anywhere, at_top = [], []
+    try:
+        lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        lines = []
+    for line in lines:
+        line = line.strip()
+        if line.startswith("!"):
+            return lambda name, top: False
+        pattern = line.strip("/")
+        if not pattern or line.startswith("#") or "/" in pattern or "**" in pattern or "\\" in pattern:
+            continue
+        (at_top if line.startswith("/") else anywhere).append(pattern)
+    return lambda name, top: any(fnmatch.fnmatchcase(name, p) for p in anywhere) or (top and any(fnmatch.fnmatchcase(name, p) for p in at_top))
 
 
 def module_name(file: Path) -> str:

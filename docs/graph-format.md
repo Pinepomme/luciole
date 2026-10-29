@@ -174,7 +174,9 @@ They decide what ends up in the graph.
   imports are supported.
 - **Module names** come from the package structure: walk up while the directory has an
   `__init__.py`. So `src/luciole/cli.py` is `luciole.cli`. Directories starting with `.`, and
-  `__pycache__`, `venv`, `site-packages` and `node_modules` are skipped.
+  `__pycache__`, `venv`, `site-packages` and `node_modules` are skipped, and so are the
+  directories the top-level `.gitignore` lists by name or simple glob (`runs/`, `/data`,
+  `*.egg-info`; not used when it has a `!` pattern).
 - **`@overload` stubs** are left out: they never run, and the implementation keeps the plain id.
 - **Files that don't parse** are skipped with a warning.
 
