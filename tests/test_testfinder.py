@@ -91,3 +91,11 @@ def test_namespace_packages(tmp_path):
     })
     assert names(testfinder.tests_for(root / "src" / "ns" / "types.py", root), root) == ["tests/test_ns_types.py"]
     assert names(testfinder.tests_for(root / "src" / "ns" / "sub" / "mod.py", root), root) == ["tests/test_sub.py"]
+
+
+def test_skips_directories_the_gitignore_lists(tmp_path):
+    root = project(tmp_path, {**FILES, ".gitignore": "runs\n", "runs/test_copy.py": "from pkg.core import f\n"})
+    assert "runs/test_copy.py" not in names(testfinder.tests_for(root / "pkg" / "core.py", root), root)
+    # A `!` pattern may bring back files under an ignored directory: then the .gitignore is not used.
+    (root / ".gitignore").write_text("runs/\n!runs/test_copy.py\n")
+    assert "runs/test_copy.py" in names(testfinder.tests_for(root / "pkg" / "core.py", root), root)
