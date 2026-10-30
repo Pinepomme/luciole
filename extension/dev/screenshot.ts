@@ -4,7 +4,7 @@
  *
  *   node out/dev/screenshot.js [path] [--events FILE [--frames N] [--every MS] [--zoom F]]
  *                              [--breakpoint FILE:LINE] [--stopped FILE:LINE] [--out dir] [--fps] [--cpu [--slow N] [--profile]]
- *                              [--theme light] [--focus ID]
+ *                              [--theme light] [--focus ID] [--without-debugger]
  *
  * --focus shows what a click in the Map view does: the camera flies to the neuron ID
  * (`shop:Cart.add`) or the region ID (`mod:shop`, `cls:shop:Cart`, `pkg:src/app`).
@@ -22,6 +22,7 @@
  * how the light moves. --zoom F brings the camera F times closer for these shots.
  * --breakpoint and --stopped (FILE relative to the graph's
  * root) show a breakpoint and the debugger stopped there, as VS Code would send them.
+ * --without-debugger shows a Run Live running in a terminal, the Python debugger not installed.
  *
  * Needs a Chromium: set CHROME_PATH, or have one in the Playwright cache (~/.cache/ms-playwright).
  */
@@ -242,6 +243,11 @@ async function main(): Promise<void> {
     await page.evaluate((message) => window.postMessage(message, "*"), message);
     await page.waitForTimeout(1200); // the camera flies there
     await shot("4-focus");
+  }
+
+  if (process.argv.includes("--without-debugger")) {
+    await page.evaluate(() => window.postMessage({ type: "debuggerNotice", show: true }, "*"));
+    await shot("5-without-debugger");
   }
 
   const status = await page.textContent("#status");

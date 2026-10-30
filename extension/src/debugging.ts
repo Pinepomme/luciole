@@ -40,6 +40,16 @@ export function hasPythonDebugger(): boolean {
   return vscode.extensions.getExtension("ms-python.debugpy") !== undefined;
 }
 
+/** Installs the Python debugger from the Marketplace, for the next Run Live. */
+export async function installPythonDebugger(): Promise<void> {
+  try {
+    await vscode.commands.executeCommand("workbench.extensions.installExtension", "ms-python.debugpy");
+    void vscode.window.showInformationMessage("Luciole: the Python Debugger is installed. The next Run Live runs under it, with breakpoints and stepping.");
+  } catch (error) {
+    void vscode.window.showErrorMessage(`Luciole: could not install the Python Debugger: ${error instanceof Error ? error.message : error}`);
+  }
+}
+
 export function registerDebugging(hooks: DebugHooks): vscode.Disposable[] {
   const provider: vscode.DebugConfigurationProvider = {
     async resolveDebugConfigurationWithSubstitutedVariables(folder, config) {
