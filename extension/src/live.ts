@@ -14,7 +14,7 @@ import * as vscode from "vscode";
 import { PROTOCOL, ensureEngine, parseEngineLine, viewerRoots } from "./engine";
 import type { LiveFrame, LiveState } from "./messages";
 import { ProcessInfo, Processes, processLabel } from "./processes";
-import { ProcessList, RunningProcess, underDebugpy } from "./running";
+import { ProcessList, RunningProcess } from "./running";
 import type { PythonDebugConfiguration, ResolvedRun } from "./runs";
 
 export interface LiveListener {
@@ -245,9 +245,12 @@ export class LiveSession implements vscode.Disposable {
     this.changed.fire();
   }
 
-  /** True when `process` runs under VS Code's debugger (a Run Live, or the user's own debug session). */
+  /**
+   * True when `process` runs in one of VS Code's debug sessions (a Run Live, or the user's own):
+   * the debug toolbar stops it. A program started under debugpy outside VS Code keeps its Stop.
+   */
   isDebugged(process: RunningProcess): boolean {
-    return this.debuggedPids.has(process.info.pid) || underDebugpy(process.info.argv);
+    return this.debuggedPids.has(process.info.pid);
   }
 
   /** Stops one process of the Running view: SIGINT (like Ctrl+C), then SIGKILL if asked again. */

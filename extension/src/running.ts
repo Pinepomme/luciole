@@ -81,7 +81,7 @@ const DEBUGPY_FLAGS = new Set(["--wait-for-client", "--log-to-stderr"]);
  * `python -m pytest -x` reads `pytest -x`.
  */
 export function commandLine(argv: string[]): string {
-  const args = argv.slice(programStart(argv).at);
+  const args = argv.slice(programStart(argv));
   if (!args.length) {
     return "python";
   }
@@ -89,15 +89,9 @@ export function commandLine(argv: string[]): string {
   return [first.split(/[\\/]/).pop(), ...rest].join(" ");
 }
 
-/** True when the process runs under debugpy (VS Code's Python debugger): its toolbar stops it. */
-export function underDebugpy(argv: string[]): boolean {
-  return programStart(argv).debugpy;
-}
-
 /** Where the program and its arguments start in `argv`, past the interpreter and any wrapper. */
-function programStart(argv: string[]): { at: number; debugpy: boolean } {
+function programStart(argv: string[]): number {
   let i = 1;
-  let debugpy = false;
   // The interpreter's own options (-u, -X dev, -W error): up to the script or -m.
   const skipInterpreterOptions = () => {
     while (i < argv.length && argv[i].startsWith("-") && argv[i] !== "-m" && argv[i] !== "-c") {
@@ -118,14 +112,13 @@ function programStart(argv: string[]): { at: number; debugpy: boolean } {
     const isDebugpy = arg === "-m" ? argv[i + 1] === "debugpy" : arg !== undefined && /(^|[\\/])debugpy([\\/]?)$/.test(arg);
     if (isDebugpy) {
       // debugpy --connect ADDR [--configure-NAME VALUE]... [--adapter-access-token T] program...
-      debugpy = true;
       i += arg === "-m" ? 2 : 1;
       while (i < argv.length && argv[i].startsWith("--")) {
         i += DEBUGPY_FLAGS.has(argv[i]) ? 1 : 2;
       }
       continue;
     }
-    return { at: i, debugpy };
+    return i;
   }
 }
 

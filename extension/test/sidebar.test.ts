@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { actionItems } from "../src/actions";
 import type { Graph, GraphNode } from "../src/graph";
 import { MapTree, buildMap, mapDescription, mapFunctions, runningCounts } from "../src/map";
-import { MAX_EXITED, ProcessList, commandLine, processItems, underDebugpy } from "../src/running";
+import { MAX_EXITED, ProcessList, commandLine, processItems } from "../src/running";
 
 // out/test/sidebar.test.js -> repo root
 const shop: Graph = JSON.parse(readFileSync(resolve(__dirname, "../../../examples/shop.graph.json"), "utf8"));
@@ -98,10 +98,7 @@ test("command lines read as the user typed them", () => {
   assert.equal(commandLine(["C:\\Python\\python.exe", "C:\\app\\train.py"]), "train.py");
   const debugpy = ["/usr/bin/python3", "/home/u/.vscode/extensions/ms-python.debugpy/bundled/libs/debugpy", "--connect", "127.0.0.1:5678", "--configure-qt", "none", "--adapter-access-token", "abc", "/w/app.py", "--n", "3"];
   assert.equal(commandLine(debugpy), "app.py --n 3");
-  assert.ok(underDebugpy(debugpy));
-  assert.ok(underDebugpy(["python", "-m", "debugpy", "--listen", "5678", "--wait-for-client", "-m", "app"]));
   assert.equal(commandLine(["python", "-m", "debugpy", "--listen", "5678", "--wait-for-client", "-m", "app"]), "app");
-  assert.ok(!underDebugpy(["python", "app.py"]));
   assert.equal(commandLine(["python"]), "python");
 });
 
@@ -119,7 +116,7 @@ test("the Running view: lit-up processes first, then the last ones that exited",
     items.map(({ label, description, action }) => [label, description, action]),
     [
       ["train.py --small", "pid 102 · running", "stop"],
-      ["app.py", "pid 103 · running", "stop"], // the predicate decides: the extension also asks underDebugpy
+      ["app.py", "pid 103 · running", "stop"], // under debugpy, but in no VS Code debug session: it keeps its Stop
       ["pytest -x", "pid 101 · exited", "none"],
     ],
   );

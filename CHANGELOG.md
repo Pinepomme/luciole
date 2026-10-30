@@ -5,8 +5,8 @@
 - A Luciole sidebar in the activity bar, with three native views. **Actions**: Show Graph (file
   or folder), Run Live, Run Live… and the auto-start switch with its state. **Running**: the
   processes lit up now (Run Live, auto-started programs, tests, child processes) by command line,
-  pid and state, plus the last few that exited; Stop for programs in a terminal, a link to Run
-  and Debug for debugged ones. **Map**: an outline of the graph in the panel (packages, modules,
+  pid and state, plus the last few that exited; Stop for programs outside VS Code's debug
+  sessions, a link to Run and Debug for the ones in them. **Map**: an outline of the graph in the panel (packages, modules,
   classes, functions: the brain's own regions), with counts and running functions marked;
   clicking an item flies the brain to it and marks it, functions have Go to Source, and
   **Luciole: Find in Map** lists every function.
