@@ -50,6 +50,7 @@ import logging
 import os
 import queue
 import runpy
+import select
 import signal
 import socket
 import sys
@@ -64,7 +65,11 @@ from luciole.analyzer import SKIP_DIRS, module_name
 log = logging.getLogger(__name__)
 
 FRAME = 0.05  # seconds between two frames
-ANSWER_TIMEOUT = 2  # seconds to wait for the engine's answer to the hello
+# Seconds to wait for the engine's answer to the hello, before the program goes on. The engine
+# answers within a millisecond or so, and a loaded CI machine within tens of them; a port that
+# something else now holds (an engine killed without removing its file) may never answer, and
+# every process started with auto-start on would wait this long.
+ANSWER_TIMEOUT = 0.5
 OWN_PACKAGE = Path(__file__).resolve().parent
 ASYNC_FLAGS = inspect.CO_COROUTINE | inspect.CO_ITERABLE_COROUTINE | inspect.CO_ASYNC_GENERATOR
 CALLER_SEARCH = 40  # frames to look through first for the nearest project caller (asyncio adds ~10)
@@ -600,14 +605,17 @@ class Session:
     def read_answer(self) -> str:
         """The engine's welcome (or refusal), read now: a process that ended before its control
         thread read it would close a socket holding unread data, which resets the connection,
-        and the engine would lose the calls not read yet (all of them, for a short process)."""
-        self.connection.settimeout(ANSWER_TIMEOUT)
+        and the engine would lose the calls not read yet (all of them, for a short process).
+
+        Waits ANSWER_TIMEOUT at most, with select() rather than a socket timeout: a read that
+        times out leaves the socket's file unreadable for good. With no answer in time, the
+        program goes on and the control thread reads the answer, and any commands, later; only
+        a process ending before then can still lose its calls that way."""
         try:
-            return self.lines.readline()
-        except (OSError, ValueError):  # no answer in time: the control thread reads nothing more
+            ready, _, _ = select.select([self.connection], [], [], ANSWER_TIMEOUT)
+            return self.lines.readline() if ready else ""  # the engine sends whole lines at once
+        except (OSError, ValueError):
             return ""
-        finally:
-            self.connection.settimeout(None)
 
     def control(self) -> None:
         """Commands from the view, one JSON object per line."""

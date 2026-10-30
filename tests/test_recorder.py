@@ -375,6 +375,45 @@ def test_a_process_ending_at_once_still_delivers_its_calls(tmp_path):
     assert totals(received, "calls") == {"prog:work": 1} and received[-1] == {"done": True}, received
 
 
+def test_an_engine_slow_to_answer_does_not_hold_the_program(tmp_path):
+    # A port that something else holds may never answer the hello: the program waits a moment
+    # at most, and the control thread still reads the answer when it comes.
+    (tmp_path / "prog.py").write_text(textwrap.dedent("""
+        import sys, time
+        from luciole import recorder
+
+        def work():
+            pass
+
+        began = time.monotonic()
+        recorder.start(root=".", port=int(sys.argv[1]))
+        print(time.monotonic() - began)
+        work()
+        time.sleep(1.5)  # the late welcome arrives
+    """))
+    server = socket.create_server(("127.0.0.1", 0))
+    received = []
+
+    def engine():
+        connection, _ = server.accept()
+        with connection, connection.makefile(encoding="utf-8") as lines:
+            assert "hello" in json.loads(lines.readline())
+            time.sleep(1)  # past the recorder's wait
+            connection.sendall(b'{"welcome": {"protocol": %d}}\n' % protocol.PROTOCOL)
+            received.extend(json.loads(line) for line in lines)
+
+    thread = threading.Thread(target=engine, daemon=True)
+    thread.start()
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    env.pop("LUCIOLE_LIVE_PORT", None)
+    result = subprocess.run([sys.executable, "prog.py", str(server.getsockname()[1])], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
+    thread.join(timeout=10)
+    server.close()
+    assert result.returncode == 0, result.stderr
+    assert float(result.stdout) < 1, result.stdout
+    assert totals(received, "calls") == {"prog:work": 1} and received[-1] == {"done": True}, received
+
+
 PAUSABLE_APP = """\
     import time
 
