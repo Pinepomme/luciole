@@ -149,11 +149,17 @@ export class MapView implements vscode.TreeDataProvider<MapEntry>, vscode.Dispos
     return entry.parent !== undefined ? this.tree?.entries.get(entry.parent) : undefined;
   }
 
+  /** How many items share `entry`'s parent, itself included. */
+  private siblingCount(entry: MapEntry): number {
+    const parent = this.getParent(entry);
+    return parent ? parent.children.length : (this.tree?.roots.length ?? 0);
+  }
+
   getTreeItem(entry: MapEntry): vscode.TreeItem {
     const running = this.counts.get(entry.key) ?? 0;
     const collapsible = entry.children.length
       ? // Open what holds a single region, so a file's graph opens on its functions.
-        this.getChildren(this.getParent(entry)).length === 1
+        this.siblingCount(entry) === 1
         ? vscode.TreeItemCollapsibleState.Expanded
         : vscode.TreeItemCollapsibleState.Collapsed
       : vscode.TreeItemCollapsibleState.None;
