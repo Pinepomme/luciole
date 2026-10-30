@@ -208,7 +208,7 @@ def test_abandoned_generators_do_not_pile_up(tmp_path):
             writer = recorder.active.recorder.tracer.writer
             for _ in range(3):
                 for _ in range(2000):
-                    next(items())  # abandoned at a yield outside any try: closed without an event
+                    next(items())  # abandoned at a yield outside any try
                 time.sleep(0.5)  # the writer runs meanwhile
             print("open", len(writer.open))
 
@@ -216,7 +216,9 @@ def test_abandoned_generators_do_not_pile_up(tmp_path):
     """, level=0)
     assert result.returncode == 0, result.stderr
     assert int(result.stdout.split()[-1]) < 10
-    assert rows(path, "SELECT end_kind, COUNT(*) FROM frames WHERE node = 'prog:items' GROUP BY end_kind") == [("suspended", 6000)]
+    # Some Pythons close them without an event (3.12.3: `suspended`), others report it (`close`).
+    [(kind, count)] = rows(path, "SELECT end_kind, COUNT(*) FROM frames WHERE node = 'prog:items' GROUP BY end_kind")
+    assert kind in ("suspended", "close") and count == 6000
 
 
 def test_a_trace_that_cannot_be_written_stops_without_breaking_the_program(tmp_path):

@@ -161,8 +161,9 @@ comprehensions have no node, and are not recorded.
   - `unwind`: it exited with an exception raised in a project frame below it;
   - `close`: a generator or coroutine closed before it finished (`GeneratorExit` ran in it);
   - `suspended`: a generator or coroutine suspended (at a `yield` or `await`) when recording
-    stopped, or abandoned: dropped, or closed where it had nothing to run, which Python does
-    without an event. `end_ns` is when it last suspended;
+    stopped, or abandoned: dropped, or closed where it had nothing to run, which some Python
+    versions do without an event (others report it, as `close`). `end_ns` is when it last
+    suspended;
   - `running`: still running when recording stopped (a daemon thread); `end_ns` is `NULL`;
   - `lost`: it left without an event the recorder saw (rare: recording paused, stacks switched by
     a library such as greenlet).
