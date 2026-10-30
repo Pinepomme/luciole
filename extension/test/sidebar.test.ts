@@ -100,6 +100,13 @@ test("command lines read as the user typed them", () => {
   assert.equal(commandLine(debugpy), "app.py --n 3");
   assert.equal(commandLine(["python", "-m", "debugpy", "--listen", "5678", "--wait-for-client", "-m", "app"]), "app");
   assert.equal(commandLine(["python"]), "python");
+  // multiprocessing's children run `python -c CODE`.
+  const spawned = ["python", "-c", "from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=5, pipe_handle=7)", "--multiprocessing-fork"];
+  assert.equal(commandLine(spawned), "multiprocessing worker");
+  assert.equal(commandLine(["python", "-c", "from multiprocessing.forkserver import main; main(3, 4)"]), "multiprocessing forkserver");
+  assert.equal(commandLine(["python", "-c", "import app; app.main()"]), "python -c import app; app.main()");
+  assert.equal(commandLine(["python", "-c", "x = 1\n" + "y".repeat(60)]), "python -c x = 1");
+  assert.equal(commandLine(["python", "-c", "z".repeat(50)]), `python -c ${"z".repeat(40)}…`);
 });
 
 test("the Running view: lit-up processes first, then the last ones that exited", () => {

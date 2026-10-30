@@ -71,6 +71,16 @@ export class ProcessList {
   }
 }
 
+/** `python -c CODE`: multiprocessing's children by their role, other code by its start. */
+function inlineCode(code: string): string {
+  const role = /from multiprocessing\.(\w+) import/.exec(code)?.[1];
+  if (role) {
+    return `multiprocessing ${role === "spawn" ? "worker" : role.replace("_", " ")}`;
+  }
+  const start = code.trim().split("\n")[0];
+  return `python -c ${start.length > 40 ? `${start.slice(0, 40)}…` : start}`;
+}
+
 /** debugpy's options that are flags (the others take a value). */
 const DEBUGPY_FLAGS = new Set(["--wait-for-client", "--log-to-stderr"]);
 
@@ -84,6 +94,9 @@ export function commandLine(argv: string[]): string {
   const args = argv.slice(programStart(argv));
   if (!args.length) {
     return "python";
+  }
+  if (args[0] === "-c") {
+    return inlineCode(args[1] ?? "");
   }
   const [first, ...rest] = args[0] === "-m" ? args.slice(1) : args;
   return [first.split(/[\\/]/).pop(), ...rest].join(" ");
