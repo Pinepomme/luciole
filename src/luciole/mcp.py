@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -266,6 +267,10 @@ class Server:
 
     def run(self, args: dict) -> str:
         command = shlex.split(required(args, "command"))
+        assigned = {}  # `NAME=value command ...`, as a shell reads it
+        while command and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", command[0]):
+            name, _, value = command.pop(0).partition("=")
+            assigned[name] = value
         if not command:
             raise ToolError("empty command")
         cwd = Path(args.get("cwd") or self.root)
@@ -290,6 +295,9 @@ class Server:
                 env.pop(key, None)  # no port: the recorders find the engine's, if VS Code runs one
             else:
                 env[key] = value
+        for key, value in assigned.items():
+            # The recorder's folder stays first on PYTHONPATH: without it nothing is recorded.
+            env[key] = f"{env[key]}{os.pathsep}{value}" if key == "PYTHONPATH" and env.get(key) else value
         began = time.monotonic()
         timed_out = False
         try:

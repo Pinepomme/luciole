@@ -30,6 +30,21 @@ from luciole.recorder import ANSWER_TIMEOUT, FRAME, ORIGIN_DEPTH, Recorder, own_
 log = logging.getLogger(__name__)
 
 
+_tracer = None
+
+
+def tracer_module():
+    """luciole.tracer, imported the first time a trace is written (sqlite3 costs a few ms) and kept:
+    auto-start hides the luciole package once the program runs (see _autostart/sitecustomize.py),
+    so importing it later, in a forked child for instance, would fail."""
+    global _tracer
+    if _tracer is None:
+        from luciole import tracer
+
+        _tracer = tracer
+    return _tracer
+
+
 def hide_recorder_frames(error: BaseException) -> None:
     """Cut the traceback at the program's last frame.
 
@@ -100,9 +115,7 @@ class Session:
         self.write_lock = threading.RLock()
         self.recorder = Recorder(root, self.send, lambda message: self.write(message, self.view_sinks))
         if trace:
-            from luciole.tracer import Tracer
-
-            self.recorder.tracer = Tracer(trace, level, self.recorder.root, scope=scope)
+            self.recorder.tracer = tracer_module().Tracer(trace, level, self.recorder.root, scope=scope)
         self.stopping = threading.Event()
         self.tool: int | None = None
         self.thread_start = threading.Thread.start
@@ -466,10 +479,8 @@ def after_fork() -> None:
             session.connection.close()  # the child's copy: the parent's connection stays open
         trace = None
         if session.recorder.tracer is not None:
-            from luciole.tracer import child_target
-
             session.recorder.tracer.forget()  # the parent's file: the child writes its own
-            trace = child_target(session.trace)
+            trace = tracer_module().child_target(session.trace)
         if (session.connection or trace) and start(session.recorder.root, session.port, quiet=True, trace=trace, level=session.level, scope=session.scope or []):
             exit_ = os._exit
             if exit_.__name__ != "luciole_exit":

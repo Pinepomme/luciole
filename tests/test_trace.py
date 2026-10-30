@@ -941,6 +941,23 @@ def test_auto_start_writes_one_trace_per_process_without_an_engine(tmp_path):
     assert sorted(map(sorted, found.values())) == [["child", "child:in_child"], ["prog", "prog:in_parent"]]
 
 
+def test_auto_start_traces_with_a_python_that_cannot_import_luciole(tmp_path):
+    """The project's own interpreter (its virtualenv, not Luciole's): auto-start finds Luciole only
+    through its folder, and hides it once the program runs; tracing must not import it later."""
+    base = getattr(sys, "_base_executable", sys.executable)
+    if subprocess.run([base, "-c", "import luciole"], env=clean_env(PYTHONPATH=""), capture_output=True).returncode == 0:
+        pytest.skip("this interpreter can import luciole by itself")
+    fork = 'import os\n\ndef in_child():\n    pass\n\nif hasattr(os, "fork"):\n    pid = os.fork()\n    if pid == 0:\n        in_child()\n        os._exit(0)\n    os.waitpid(pid, 0)\n'
+    write(tmp_path, {"prog.py": "def work():\n    return 1\n\nwork()\n" + fork})
+    environ = clean_env(PYTHONPATH=str(AUTO_START_DIR), LUCIOLE_ROOT=str(tmp_path), LUCIOLE_TRACE=str(tmp_path / "traces") + os.sep)
+    result = subprocess.run([base, "prog.py"], cwd=tmp_path, env=environ, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    found = traces(tmp_path)
+    assert {"prog", "prog:work"} <= next(iter(found.values()))
+    if hasattr(os, "fork"):
+        assert len(found) == 2 and any("prog:in_child" in nodes for nodes in found.values())
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="no fork")
 def test_forked_and_spawned_children_write_their_own_trace(tmp_path):
     result = autostart(tmp_path, """
