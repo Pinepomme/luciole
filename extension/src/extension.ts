@@ -1,6 +1,8 @@
 /** Extension host: runs the Python analyzer, shows the graph in a webview panel, and runs live mode. */
 
 import { ChildProcess, execFile } from "child_process";
+import type { HistoryItem } from "./calls";
+import { CallsView } from "./callsview";
 import { randomBytes } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
@@ -14,6 +16,8 @@ import type { MapEntry } from "./map";
 import type { ProcessItem } from "./running";
 import { RunConfiguration, debugConfiguration, fileRunKind, packageModule, pytestRun, resolveRun, splitArgs } from "./runs";
 import { ActionsView, MapView, RunningView } from "./sidebar";
+import { NO_FILTERS } from "./webview/filters";
+import { BrainFilters } from "./focus";
 
 let panel: GraphPanel | undefined;
 let output: vscode.OutputChannel;
@@ -21,6 +25,8 @@ let live: LiveSession;
 let autoStartItem: vscode.StatusBarItem;
 let map: MapView;
 let actions: ActionsView;
+let calls: CallsView;
+let filters: BrainFilters;
 
 /** The last run started, to run it again from the panel. */
 const LAST_RUN = "luciole.lastRun";
@@ -60,6 +66,31 @@ export function activate(context: vscode.ExtensionContext): void {
   map = new MapView();
   map.view = vscode.window.createTreeView("luciole.map", { treeDataProvider: map, showCollapseAll: true });
   const running = new RunningView(live);
+  filters = new BrainFilters((message) => panel?.post(message), () => map.functions);
+  const workspacePython = () => pythonPath(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd());
+  calls = new CallsView(
+    {
+      roots: () => (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
+      focus: (root, node) => {
+        // The graph shown has it, else the run's whole folder.
+        if (!panel || (!map.locate(node) && !panel.showsFolder)) {
+          showGraph(context, root, false);
+        }
+        panel?.focusNode(node);
+      },
+      replay: (root, file, label, start, end) => {
+        if (!panel?.showsFolder) {
+          showGraph(context, root, false);
+        }
+        panel?.replay(file, label, start, end);
+      },
+      locate: (node) => map.locate(node),
+      log: (line) => output.appendLine(line),
+    },
+    workspacePython,
+    () => analyzerDir(context),
+  );
+  calls.view = vscode.window.createTreeView("luciole.calls", { treeDataProvider: calls, showCollapseAll: true });
   context.subscriptions.push(
     actions,
     running,
@@ -67,6 +98,16 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.createTreeView("luciole.actions", { treeDataProvider: actions }),
     vscode.window.createTreeView("luciole.running", { treeDataProvider: running }),
     map.view,
+    calls,
+    calls.view,
+    vscode.commands.registerCommand("luciole.refreshCalls", () => calls.refresh()),
+    vscode.commands.registerCommand("luciole.showCall", (item: HistoryItem) => calls.showCall(item)),
+    vscode.commands.registerCommand("luciole.loadMore", (item: HistoryItem) => calls.loadMore(item)),
+    vscode.commands.registerCommand("luciole.showValues", (item: HistoryItem) => calls.showValues(item)),
+    vscode.commands.registerCommand("luciole.replay", (item?: HistoryItem) => calls.replay(item)),
+    vscode.commands.registerCommand("luciole.focusAround", (target?: MapEntry | HistoryItem) => filters.focusAround(target)),
+    vscode.commands.registerCommand("luciole.filters", () => filters.pick()),
+    vscode.commands.registerCommand("luciole.clearFilters", () => filters.set(NO_FILTERS)),
     vscode.commands.registerCommand("luciole.revealInBrain", (entry: MapEntry) => panel?.focus(entry)),
     vscode.commands.registerCommand("luciole.goToSource", (entry: MapEntry) => {
       if (map.root && entry.file) {
@@ -115,6 +156,7 @@ export function activate(context: vscode.ExtensionContext): void {
       },
       continued: () => panel?.post({ type: "debugStopped", at: undefined }),
       process: (session, pid) => live.debuggedProcess(session, pid),
+      exited: (session, code) => calls.exited(session, code),
       log: (line) => output.appendLine(line),
     }),
     vscode.debug.onDidChangeBreakpoints(() => panel?.postBreakpoints()),
@@ -364,11 +406,14 @@ async function startRun(context: vscode.ExtensionContext, config: RunConfigurati
     void vscode.window.showErrorMessage("Luciole: open a folder or a Python file first.");
     return;
   }
-  const run = resolveRun(config, { workspaceFolder: folder, file });
-  if ("error" in run) {
-    void vscode.window.showErrorMessage(`Luciole: ${run.error}.`);
+  const resolved = resolveRun(config, { workspaceFolder: folder, file });
+  if ("error" in resolved) {
+    void vscode.window.showErrorMessage(`Luciole: ${resolved.error}.`);
     return;
   }
+  // Recorded at level 1 into a run folder (as agents' runs are): the Calls view lists it.
+  const recording = await calls.record(folder, resolved);
+  const run = recording ? { ...resolved, env: { ...resolved.env, ...recording.env } } : resolved;
   await Promise.all(
     vscode.workspace.textDocuments.filter((d) => d.isDirty && d.languageId === "python" && d.uri.scheme === "file").map((d) => d.save()),
   );
@@ -383,6 +428,9 @@ async function startRun(context: vscode.ExtensionContext, config: RunConfigurati
   panel?.post({ type: "liveStarted", script: run.label });
   if (!hasPythonDebugger()) {
     showDebuggerNotice(true);
+    if (recording) {
+      calls.recordingInTerminal(recording.folder);
+    }
     await live.run(run, folder, pythonPath(folder), dir);
     return;
   }
@@ -392,6 +440,9 @@ async function startRun(context: vscode.ExtensionContext, config: RunConfigurati
     python: configuredPython(folder),
     pythonPath: process.env.PYTHONPATH,
   });
+  if (recording) {
+    launch.__lucioleRun = recording.folder;
+  }
   await live.debug(launch, vscode.workspace.getWorkspaceFolder(vscode.Uri.file(folder)));
 }
 
@@ -448,6 +499,11 @@ class GraphPanel {
   private ready = false;
   private running: ChildProcess | undefined;
   private root: string | undefined;
+  /** Messages for the brain once its graph is shown (a focus, a replay asked for while it loads). */
+  private pending: ToWebview[] = [];
+  private loaded = false;
+  /** The trace being replayed: the timeline's requests for frames go to it. */
+  private replayFile: string | undefined;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -482,6 +538,27 @@ class GraphPanel {
   focus(entry: MapEntry): void {
     this.panel.reveal(undefined, true);
     this.post(entry.kind === "function" ? { type: "focus", node: entry.target } : { type: "focusRegion", region: entry.target });
+  }
+
+  /** Fly to the neuron `node` and ring it, once the graph is shown. */
+  focusNode(node: string): void {
+    this.panel.reveal(undefined, true);
+    this.postWhenLoaded({ type: "focus", node });
+  }
+
+  /** Replay the process traced in `file` on the brain, from `start` to `end` (ns). */
+  replay(file: string, label: string, start: number, end: number): void {
+    this.replayFile = file;
+    this.panel.reveal(undefined, true);
+    this.postWhenLoaded({ type: "replayStart", label, start, end });
+  }
+
+  private postWhenLoaded(message: ToWebview): void {
+    if (this.loaded) {
+      this.post(message);
+    } else {
+      this.pending.push(message);
+    }
   }
 
   show(target: string, followEditor: boolean): void {
@@ -566,6 +643,18 @@ class GraphPanel {
       removeBreakpoints(path.resolve(this.root, message.file), message.lines);
     } else if (message.type === "reveal" && this.root) {
       openSource(this.root, message.file, message.line, message.col, true);
+    } else if (message.type === "replayFetch" && this.replayFile) {
+      const { seq, from, to, every } = message;
+      calls.frames(this.replayFile, from, to, every).then(
+        (frames) => this.post({ type: "replayFrames", seq, frames }),
+        (error: Error) => this.post({ type: "replayFailed", seq, message: error.message }),
+      );
+    } else if (message.type === "replayLatest") {
+      calls.replay(undefined);
+    } else if (message.type === "replayClosed") {
+      this.replayFile = undefined;
+    } else if (message.type === "clearFilters") {
+      filters.set(NO_FILTERS);
     }
   }
 
@@ -574,6 +663,7 @@ class GraphPanel {
       return; // the webview's "ready" message starts the first run
     }
     this.running?.kill();
+    this.loaded = false;
     this.post({ type: "loading", target: path.basename(this.target) });
     map.loading(path.basename(this.target));
     this.running = runAnalyzer(this.context, this.target, (result) => {
@@ -587,6 +677,11 @@ class GraphPanel {
         this.post({ type: "graph", target: this.target, graph: result.graph, warnings: result.warnings });
         map.setGraph(result.graph, path.basename(this.target));
         this.postBreakpoints();
+        if (filters.active) {
+          this.post({ type: "filters", filters: filters.current });
+        }
+        this.loaded = true;
+        this.pending.splice(0).forEach((pending) => this.post(pending));
       }
     });
   }

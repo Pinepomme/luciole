@@ -1,6 +1,7 @@
 /** Messages between the extension host and the graph webview. */
 
 import type { Graph } from "./graph";
+import type { Filters } from "./webview/filters";
 
 export interface ThreadStack {
   thread: string;
@@ -48,7 +49,15 @@ export type ToWebview =
   | { type: "debugStopped"; at: SourceLine | undefined }
   /** The Map view chose a neuron (a function, or module code), or a region (`pkg:`, `mod:`, `cls:` id): fly there and mark it. */
   | { type: "focus"; node: string }
-  | { type: "focusRegion"; region: string };
+  | { type: "focusRegion"; region: string }
+  /** Replay a recorded process from `start` to `end` (ns since it started): the panel shows a timeline. */
+  | { type: "replayStart"; label: string; start: number; end: number }
+  /** Frames asked for with `replayFetch` (live frames made from the trace), or why there are none. */
+  | { type: "replayFrames"; seq: number; frames: LiveFrame[] }
+  | { type: "replayFailed"; seq: number; message: string }
+  | { type: "replayStop" }
+  /** Focus and filters: what stands out, what is dimmed or hidden. */
+  | { type: "filters"; filters: Filters };
 
 /** A line of a file, relative to the graph's root. */
 export interface SourceLine {
@@ -68,4 +77,10 @@ export type FromWebview =
   /** Right-click on a neuron: a breakpoint where each call of the function starts. */
   | { type: "addBreakpoint"; file: string; line: number }
   /** Right-click on a neuron that has breakpoints: remove them all. */
-  | { type: "removeBreakpoints"; file: string; lines: number[] };
+  | { type: "removeBreakpoints"; file: string; lines: number[] }
+  /** The replay's timeline needs frames from `from` to `to` (ns), one per `every`. */
+  | { type: "replayFetch"; seq: number; from: number; to: number; every: number }
+  /** The panel's Replay button: the newest recorded run. */
+  | { type: "replayLatest" }
+  | { type: "replayClosed" }
+  | { type: "clearFilters" };

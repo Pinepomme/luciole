@@ -23,6 +23,7 @@
     "onStartupFinished",
     "onView:luciole.actions",
     "onView:luciole.running",
+    "onView:luciole.calls",
     "onView:luciole.map"
   ],
   "contributes": {
@@ -100,6 +101,55 @@
         "title": "Clear Exited Processes",
         "category": "Luciole",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "luciole.refreshCalls",
+        "title": "Refresh Recorded Runs",
+        "category": "Luciole",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "luciole.replay",
+        "title": "Replay on the Brain",
+        "category": "Luciole",
+        "icon": "$(play)"
+      },
+      {
+        "command": "luciole.showCall",
+        "title": "Show Call",
+        "category": "Luciole",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "luciole.showValues",
+        "title": "Show Values",
+        "category": "Luciole",
+        "icon": "$(symbol-variable)"
+      },
+      {
+        "command": "luciole.loadMore",
+        "title": "Load More Calls",
+        "category": "Luciole"
+      },
+      {
+        "command": "luciole.focusAround",
+        "title": "Focus Around",
+        "category": "Luciole",
+        "icon": "$(target)",
+        "enablement": "luciole.graphOpen"
+      },
+      {
+        "command": "luciole.filters",
+        "title": "Filters…",
+        "category": "Luciole",
+        "icon": "$(filter)",
+        "enablement": "luciole.graphOpen"
+      },
+      {
+        "command": "luciole.clearFilters",
+        "title": "Clear Focus and Filters",
+        "category": "Luciole",
+        "icon": "$(clear-all)"
       }
     ],
     "viewsContainers": {
@@ -124,6 +174,11 @@
           "icon": "media/activity.svg"
         },
         {
+          "id": "luciole.calls",
+          "name": "Calls",
+          "icon": "media/activity.svg"
+        },
+        {
           "id": "luciole.map",
           "name": "Map",
           "icon": "media/activity.svg"
@@ -142,6 +197,16 @@
         "when": "!config.luciole.autoStart"
       },
       {
+        "view": "luciole.calls",
+        "contents": "No recorded run yet. Every Run Live records what the program did: each call with its arguments and return value, and every exception. Runs an agent makes with luciole mcp show here too.\n[Run Live](command:luciole.runLive)",
+        "when": "config.luciole.recordHistory"
+      },
+      {
+        "view": "luciole.calls",
+        "contents": "Recording is off (setting luciole.recordHistory): Run Live does not keep what the program did. Runs an agent makes with luciole mcp still show here.\n[Turn Recording On](command:workbench.action.openSettings?%22luciole.recordHistory%22)",
+        "when": "!config.luciole.recordHistory"
+      },
+      {
         "view": "luciole.map",
         "contents": "No graph is open. The Map outlines the graph in the Luciole panel: packages, modules, classes and functions.\n[Show Graph for Current File](command:luciole.showFileGraph)\n[Show Graph (Whole Folder)](command:luciole.showGraph)",
         "when": "!luciole.graphOpen"
@@ -154,6 +219,18 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "Light up the Luciole view with every Python program (3.12+) started in VS Code's terminals: scripts, `pytest`, servers, and their child processes, run as usual. Applies to terminals opened afterwards. Also in the status bar."
+        },
+        "luciole.recordHistory": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Record every Run Live (level 1: each call of project code with its arguments and return value, and every exception) so the **Calls** view can show it afterwards and the brain can replay it. Recordings are kept in `~/.luciole/runs` (the last 50 per project), next to the runs agents make with `luciole mcp`, and never leave your machine. Needs Python 3.12+ in the program; with an older Python, nothing is recorded."
+        },
+        "luciole.focusDepth": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 5,
+          "description": "Focus Around: how many calls away from the chosen function the brain still shows a function (callers and callees)."
         },
         "luciole.pythonPath": {
           "type": "string",
@@ -260,6 +337,22 @@
         {
           "command": "luciole.clearExited",
           "when": "luciole.exitedProcesses"
+        },
+        {
+          "command": "luciole.showCall",
+          "when": "false"
+        },
+        {
+          "command": "luciole.showValues",
+          "when": "false"
+        },
+        {
+          "command": "luciole.loadMore",
+          "when": "false"
+        },
+        {
+          "command": "luciole.clearFilters",
+          "when": "luciole.filtered"
         }
       ],
       "view/title": [
@@ -277,6 +370,26 @@
           "command": "luciole.findInMap",
           "when": "view == luciole.map && luciole.graphOpen",
           "group": "navigation@1"
+        },
+        {
+          "command": "luciole.replay",
+          "when": "view == luciole.calls && luciole.hasRuns",
+          "group": "navigation@1"
+        },
+        {
+          "command": "luciole.refreshCalls",
+          "when": "view == luciole.calls",
+          "group": "navigation@2"
+        },
+        {
+          "command": "luciole.filters",
+          "when": "view == luciole.map && luciole.graphOpen",
+          "group": "navigation@2"
+        },
+        {
+          "command": "luciole.clearFilters",
+          "when": "view == luciole.map && luciole.filtered",
+          "group": "navigation@3"
         }
       ],
       "view/item/context": [
@@ -304,6 +417,41 @@
           "command": "luciole.goToSource",
           "when": "view == luciole.map && viewItem == function",
           "group": "navigation@2"
+        },
+        {
+          "command": "luciole.replay",
+          "when": "view == luciole.calls && viewItem =~ /^(run|process)$/",
+          "group": "inline"
+        },
+        {
+          "command": "luciole.showValues",
+          "when": "view == luciole.calls && viewItem =~ /^(call|where)$/",
+          "group": "inline"
+        },
+        {
+          "command": "luciole.replay",
+          "when": "view == luciole.calls && viewItem =~ /^(run|process)$/",
+          "group": "navigation@1"
+        },
+        {
+          "command": "luciole.showCall",
+          "when": "view == luciole.calls && viewItem =~ /^(call|where)$/",
+          "group": "navigation@1"
+        },
+        {
+          "command": "luciole.showValues",
+          "when": "view == luciole.calls && viewItem =~ /^(call|where)$/",
+          "group": "navigation@2"
+        },
+        {
+          "command": "luciole.focusAround",
+          "when": "view == luciole.calls && viewItem =~ /^(call|where)$/",
+          "group": "navigation@3"
+        },
+        {
+          "command": "luciole.focusAround",
+          "when": "view == luciole.map && viewItem == function",
+          "group": "navigation@3"
         }
       ]
     }

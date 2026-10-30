@@ -98,6 +98,40 @@ button[hidden] {
   display: none;
 }
 
+#replay {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--vscode-panel-border);
+}
+
+#replay[hidden] {
+  display: none;
+}
+
+#replayScrub {
+  flex: 1;
+  min-width: 80px;
+  accent-color: var(--vscode-textLink-foreground);
+}
+
+#replayTime {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
+}
+
+#replaySpeed {
+  font: inherit;
+  color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
+  background: var(--vscode-dropdown-background, var(--vscode-button-secondaryBackground));
+  border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border));
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
 #path {
   min-height: 1.4em;
   padding: 4px 8px;

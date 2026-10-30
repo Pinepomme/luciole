@@ -47,12 +47,40 @@ the functions light up as they run.
   **Luciole: Show Graph (Whole Folder)**.
 - Drag to rotate, scroll to zoom. Hover a neuron or a line to see what it is. Click a neuron to
   jump to its code.
-- **The Luciole sidebar** (its icon in the activity bar) has three views. **Actions**: the graph
+- **History**: every Run Live is also recorded (level 1: each call of your project's code with its
+  arguments and return value, and every exception), so you can go back to what the program did
+  after it ran. The **Calls** view lists the runs of the workspace, newest first, with their
+  command, time and exit status: yours, and those an agent ran with `luciole mcp` (marked
+  "agent"). Under a run: its processes (or, with one, its calls directly), each with its
+  **Exceptions** (the frames each went through, and their local variables as the exception left
+  them) and its **call tree**, opened a level at a time, repeated calls collapsed into `×N`. Each
+  call shows its arguments and what it returned (`→ 18.0`) or raised (`✕ ValueError: …`, with an
+  error icon). Click a call: the brain flies to its function and rings it, and the editor opens
+  at the line that called it. **Show Values** (on a call) opens its arguments, return value or
+  exception, the locals an exception left, and, when the run recorded that function line by line
+  (`luciole run --scope`, or an agent's `run` with `scope`), each variable's values over time,
+  with links to the lines. Turn recording off with the `luciole.recordHistory` setting. It needs
+  Python 3.12+ in the program; with an older one, the run is listed as "nothing recorded".
+- **Replay**: the ▷ button on a run (or a process, or the panel's **Replay** button for the last
+  run) replays it on the brain as it ran live: functions light up, calls trace their lines, the
+  bottom bar shows the call path. A timeline under the brain plays and pauses it, the scrubber
+  jumps anywhere in the run, and the speed (1/10000× to 10×) slows down runs too fast to see;
+  it starts at a speed that makes the replay last a few seconds. Only what is on screen is read
+  from the recording, so long runs replay as fast as short ones. Coroutines waiting on an
+  `await` are not ringed in a replay (a recording has their total waiting time, not when).
+- **Focus and filters**: **Focus Around** (on a function in the Map or a call in Calls, or from
+  the command palette) shows only the functions a few calls around one, callers and callees (the
+  `luciole.focusDepth` setting, 1 by default); the others are dimmed. **Luciole: Filters…** (the
+  filter button of the Map) hides tests (test files, `test_` functions, `Test` classes) and private
+  helpers (`_name`). Filtered functions stay where they are, nearly invisible, so the map keeps its
+  shape; **Clear filters** in the panel shows everything again.
+- **The Luciole sidebar** (its icon in the activity bar) has four views. **Actions**: the graph
   and Run Live commands, and the auto-start switch with its state. **Running**: the programs lit
   up now (Run Live, programs started with auto-start on, tests, their child processes), with their
   command line, pid and state, and the last few that exited; a program in one of VS Code's debug
   sessions has a button to the Call Stack and is stopped from the debug toolbar, any other has a
-  Stop button (press it again to kill it). **Map**: an outline of the graph in the panel,
+  Stop button (press it again to kill it). **Calls**: the recorded runs (see History above).
+  **Map**: an outline of the graph in the panel,
   packages → modules → classes → functions, with how many functions each holds and which are running. Click an item and the
   view flies to it in the brain; a function also has **Go to Source**. The search button
   (**Luciole: Find in Map**) lists every function to fly to; typing in the Map filters what is
@@ -83,4 +111,5 @@ Python 3.10 or newer for the graph, 3.12 or newer for live mode. Luciole uses th
 extension). Set `luciole.pythonPath` to choose another interpreter. For Run Live under the
 debugger, the Python Debugger extension (`ms-python.debugpy`); without it, Run Live runs in a
 terminal (the brain lights up, no breakpoints or stepping) and the panel offers to install it.
-Nothing needs installing in your project.
+Nothing needs installing in your project. Recordings stay on your machine, in `~/.luciole/runs`
+(the last 50 runs of each project); nothing is sent anywhere.

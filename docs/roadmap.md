@@ -182,7 +182,7 @@ on the suspect functions. Most bugs reproduce under a test, which makes that che
 | 3 | Done: failure snapshots, the locals of every frame an exception leaves (level 1), `traceback` | — |
 | 4 | Done: scoped variable history (level 2: `--scope`, a `writes` table, `luciole trace ... history`, MCP `variable_history`), redaction, limits; coroutine suspend/resume (`suspended_ns`), so time spent awaiting is not counted as busy | — |
 | 5 | Origin queries: dynamic slicing over static edges and the trace | ~2 weeks |
-| 6 | In VS Code: the call tree in the Luciole sidebar, a timeline to scrub (the brain replays), a function's variables and their values over time, origin paths lit on the brain, focus and filters | ~2 weeks |
+| 6 | In VS Code. Done: Run Live records every run (level 1) into the MCP server's run folders; the Calls view (runs, processes, exceptions with their frames' locals, the call tree a level and a page at a time); replay on the brain with a timeline (play, scrub, speed; frames made by `luciole trace FILE frames`); Show Values (a call's values, its variables over time at level 2); focus and filters. Open: origin paths lit on the brain (step 5's queries; `OriginHook` in `extension/src/callsview.ts`), choosing level 2 scopes from the UI, `waiting` coroutines in replays | ~2 weeks |
 | 7 | Later: stepping backwards in the debugger over a recording; level 3 provenance | — |
 
 MCP tools (summarized and paginated answers): `run(command, level, scope)`, `call_tree`,

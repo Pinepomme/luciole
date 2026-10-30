@@ -25,6 +25,8 @@ export interface DebugHooks {
   continued(): void;
   /** The session runs the process `pid` (the debug adapter's "process" event). */
   process(session: vscode.DebugSession, pid: number): void;
+  /** The session's program exited with `code` (the debug adapter's "exited" event). */
+  exited(session: vscode.DebugSession, code: number): void;
   /** A line for the Luciole output, to tell why the brain did or did not follow the debugger. */
   log(line: string): void;
 }
@@ -67,12 +69,14 @@ export function registerDebugging(hooks: DebugHooks): vscode.Disposable[] {
     createDebugAdapterTracker(session) {
       hooks.log(`debugger: following session "${session.name}" (${session.type})`);
       return {
-        onDidSendMessage(message: { type?: string; event?: string; body?: { threadId?: number; systemProcessId?: number } }) {
+        onDidSendMessage(message: { type?: string; event?: string; body?: { threadId?: number; systemProcessId?: number; exitCode?: number } }) {
           if (message.type !== "event") {
             return;
           }
           if (message.event === "process" && message.body?.systemProcessId !== undefined) {
             hooks.process(session, message.body.systemProcessId);
+          } else if (message.event === "exited" && message.body?.exitCode !== undefined) {
+            hooks.exited(session, message.body.exitCode);
           } else if (message.event === "stopped") {
             void reportStop(session, message.body?.threadId, hooks);
           } else if (message.event === "continued" || message.event === "terminated") {

@@ -25,6 +25,8 @@ export function webviewHtml({ cspSource, nonce, scriptUri, styleUri }: PageOptio
     <button id="stop" class="stop" hidden title="Stop the program: its debug session, or Ctrl+C in its terminal (press again to kill it)">Stop</button>
     <button id="refresh" title="Run the analyzer again">Refresh</button>
     <button id="fit" title="Fit the brain in the window">Fit</button>
+    <button id="replayLatest" title="Replay the last recorded run on the brain (the Calls view lists them all)">Replay</button>
+    <button id="clearFilters" hidden title="Show every function again">Clear filters</button>
     <span id="status"></span>
   </div>
   <div id="notice" hidden>
@@ -33,6 +35,13 @@ export function webviewHtml({ cspSource, nonce, scriptUri, styleUri }: PageOptio
   </div>
   <div id="message" hidden></div>
   <div id="brain"></div>
+  <div id="replay" hidden>
+    <button id="replayPlay" class="primary" title="Play or pause the replay">Pause</button>
+    <input id="replayScrub" type="range" min="0" max="1000" value="0" title="Move through the run">
+    <span id="replayTime"></span>
+    <select id="replaySpeed" title="Replay speed, as a share of the run's own pace"></select>
+    <button id="replayClose" title="Close the replay">Close</button>
+  </div>
   <div id="path" title="What is running now, outermost first"></div>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
