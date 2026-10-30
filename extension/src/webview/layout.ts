@@ -286,7 +286,8 @@ export function layoutByCalls(brain: Brain, nodes: Map<string, GraphNode>, neuro
   rows.forEach((row) => row.forEach((a, i) => place.set(a, i / Math.max(row.length - 1, 1))));
   const reorder = (row: number[], by: (a: number) => Set<number>) => {
     const centre = (a: number) => {
-      const others = [...by(a)].filter((b) => place.has(b) && rank[b] !== rank[a]);
+      // Sorted: the sum does not depend on the order of the edges (floating point).
+      const others = [...by(a)].sort((x, y) => x - y).filter((b) => place.has(b) && rank[b] !== rank[a]);
       return others.length ? others.reduce((sum, b) => sum + place.get(b)!, 0) / others.length : place.get(a)!;
     };
     const keyed = row.map((a, i) => ({ a, key: centre(a), i }));

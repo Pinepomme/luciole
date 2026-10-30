@@ -279,3 +279,27 @@ test("rows by call order: lines bend only to miss the functions between their en
   assert.equal(skip.length, 1); // skips rows: bows to the side
   assert.notEqual(skip[0].x, (p("m:top").x + p("m:bottom").x) / 2);
 });
+
+test("rows by call order: the order of the graph's nodes and edges does not move anything", () => {
+  // Random graphs (a fixed seed), laid out as given and shuffled: the same positions.
+  let seed = 1;
+  const random = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const shuffled = <T>(items: T[]) => {
+    const out = [...items];
+    for (let i = out.length - 1; i > 0; i--) {
+      const j = Math.floor(random() * (i + 1));
+      [out[i], out[j]] = [out[j], out[i]];
+    }
+    return out;
+  };
+  for (let round = 0; round < 300; round++) {
+    const count = 5 + Math.floor(random() * 55);
+    const names = Array.from({ length: count }, (_, i) => `f${i}`);
+    const calls = new Set(Array.from({ length: count * 2 }, () => `m:f${Math.floor(random() * count)} > m:f${Math.floor(random() * count)}`));
+    const graph = project({ "m.py": names }, [...calls]);
+    graph.nodes.forEach((node, i) => (node.loc = { ...node.loc, line: i + 1 }));
+    const [module, ...functions] = graph.nodes;
+    const other = { ...graph, nodes: [module, ...shuffled(functions)], edges: shuffled(graph.edges) };
+    assert.deepEqual([...rows(other).positions].sort(), [...rows(graph).positions].sort(), `round ${round}`);
+  }
+});
