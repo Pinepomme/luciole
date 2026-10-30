@@ -161,7 +161,7 @@ class Tracer:
                     pass
         elif caller is None and state.origin:  # the thread's first frame: who started the thread
             origin, state.origin = state.origin, None
-        args = self.arguments(code, frame) if self.level else None
+        args = self.arguments(code, frame) if self.level and fid <= self.max_frames else None  # past it, not stored
         entry = [fid, code, id(frame), node_id, caller, origin, state.row, line, time.perf_counter_ns() - self.started, args, None, None, None, None]
         stack.append(entry)
         if code.co_flags & GENERATORS:
@@ -214,7 +214,7 @@ class Tracer:
             self.unsuspend(entry)
         entry[END_NS] = time.perf_counter_ns() - self.started
         entry[EXCEPTION] = exception
-        if self.level and kind == "return":
+        if self.level and kind == "return" and entry[FID] <= self.max_frames:
             entry[RESULT] = self.value(result)
         entry[KIND] = kind  # last: the writer reads the end once this is set
 
@@ -472,6 +472,7 @@ class Writer:
         if level:
             snapshot = self.snapshot
             args = "{" + ", ".join(f'"{name}": {snapshot(value)}' for name, value in args) + "}" if args is not None else None
+            entry[ARGS] = None  # stored: the values are not kept alive while the call runs on
         if kind is None:
             return (entry[FID], entry[NODE], entry[CALLER], entry[ORIGIN], entry[THREAD], entry[LINE], entry[START_NS], None, None, None, args, None)
         result = self.snapshot(entry[RESULT]) if level and kind == "return" else None
