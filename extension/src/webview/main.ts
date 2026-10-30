@@ -626,6 +626,8 @@ function synapseTooltip(synapse: Synapse): string {
 let last = performance.now();
 /** A neuron moved since the last frame (the layout engine ticked): spheres and labels follow. */
 let spheresMoved = true;
+/** The view was resized: labels keep one height on screen, so they are placed again. */
+let resized = false;
 /** Frames in a row where nothing changed; past STILL_FRAMES, the brain stops being drawn. */
 let stillFrames = 0;
 let paused = false;
@@ -717,8 +719,9 @@ function animate(now: number): void {
     rayVersion++; // the camera came to rest: what is under the pointer now (not during the turn)
   }
   cameraWasMoving = cameraMoved;
-  // Placing labels compares them on screen: only when the camera, a neuron or a label changed.
-  if (cameraMoved || spheresMoved || relabeled) {
+  // Placing labels compares them on screen: only when the camera, the view, a neuron or a label changed.
+  if (cameraMoved || spheresMoved || relabeled || resized) {
+    resized = false;
     declutterLabels();
   }
   if (links.length !== styledLinks) {
@@ -1078,6 +1081,7 @@ function showMessage(text: string): void {
 }
 
 function resize(): void {
+  resized = true;
   wake();
   const element = document.getElementById("brain")!;
   graph.width(element.clientWidth).height(element.clientHeight);
