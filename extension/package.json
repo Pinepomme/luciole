@@ -2,7 +2,7 @@
   "name": "luciole",
   "displayName": "Luciole",
   "description": "See a Python project as a 3D brain of functions, and watch it light up as the code runs.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "pinepomme",
   "preview": true,
   "license": "MIT",
@@ -19,6 +19,12 @@
     "Programming Languages"
   ],
   "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:luciole.actions",
+    "onView:luciole.running",
+    "onView:luciole.map"
+  ],
   "contributes": {
     "commands": [
       {
@@ -53,49 +59,102 @@
         "enablement": "luciole.liveRunning"
       },
       {
-        "command": "luciole.pauseLive",
-        "title": "Pause Live Run",
+        "command": "luciole.toggleAutoStart",
+        "title": "Turn Auto-Start On or Off",
         "category": "Luciole",
-        "icon": "$(debug-pause)",
-        "enablement": "luciole.liveRunning && !luciole.livePaused"
+        "icon": "$(zap)"
       },
       {
-        "command": "luciole.resumeLive",
-        "title": "Resume Live Run",
+        "command": "luciole.findInMap",
+        "title": "Find in Map",
         "category": "Luciole",
-        "icon": "$(debug-continue)",
-        "enablement": "luciole.liveRunning && luciole.livePaused"
+        "icon": "$(search)",
+        "enablement": "luciole.graphOpen"
       },
       {
-        "command": "luciole.stepOver",
-        "title": "Step Over",
+        "command": "luciole.revealInBrain",
+        "title": "Show in Brain",
         "category": "Luciole",
-        "icon": "$(debug-step-over)",
-        "enablement": "luciole.livePaused"
+        "icon": "$(eye)"
       },
       {
-        "command": "luciole.stepInto",
-        "title": "Step Into",
+        "command": "luciole.goToSource",
+        "title": "Go to Source",
         "category": "Luciole",
-        "icon": "$(debug-step-into)",
-        "enablement": "luciole.livePaused"
+        "icon": "$(go-to-file)"
       },
       {
-        "command": "luciole.stepOut",
-        "title": "Step Out",
+        "command": "luciole.stopProcess",
+        "title": "Stop",
         "category": "Luciole",
-        "icon": "$(debug-step-out)",
-        "enablement": "luciole.livePaused"
+        "icon": "$(debug-stop)"
       },
       {
-        "command": "luciole.revealFrame",
-        "title": "Show Frame",
-        "category": "Luciole"
+        "command": "luciole.showCallStack",
+        "title": "Show Call Stack",
+        "category": "Luciole",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "luciole.clearExited",
+        "title": "Clear Exited Processes",
+        "category": "Luciole",
+        "icon": "$(clear-all)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "luciole",
+          "title": "Luciole",
+          "icon": "media/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "luciole": [
+        {
+          "id": "luciole.actions",
+          "name": "Actions",
+          "icon": "media/activity.svg"
+        },
+        {
+          "id": "luciole.running",
+          "name": "Running",
+          "icon": "media/activity.svg"
+        },
+        {
+          "id": "luciole.map",
+          "name": "Map",
+          "icon": "media/activity.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "luciole.running",
+        "contents": "No Python program is lit up right now.\n[Run Live](command:luciole.runLive)\nPrograms started in new terminals appear here too: auto-start is on.",
+        "when": "config.luciole.autoStart"
+      },
+      {
+        "view": "luciole.running",
+        "contents": "No Python program is lit up right now.\n[Run Live](command:luciole.runLive)\nTurn [auto-start](command:luciole.toggleAutoStart) on to light up the programs you start in terminals too.",
+        "when": "!config.luciole.autoStart"
+      },
+      {
+        "view": "luciole.map",
+        "contents": "No graph is open. The Map outlines the graph in the Luciole panel: packages, modules, classes and functions.\n[Show Graph for Current File](command:luciole.showFileGraph)\n[Show Graph (Whole Folder)](command:luciole.showGraph)",
+        "when": "!luciole.graphOpen"
       }
     ],
     "configuration": {
       "title": "Luciole",
       "properties": {
+        "luciole.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Light up the Luciole view with every Python program (3.12+) started in VS Code's terminals: scripts, `pytest`, servers, and their child processes, run as usual. Applies to terminals opened afterwards. Also in the status bar."
+        },
         "luciole.pythonPath": {
           "type": "string",
           "default": "",
@@ -146,29 +205,6 @@
         }
       }
     },
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "luciole",
-          "title": "Luciole",
-          "icon": "media/activity.svg"
-        }
-      ]
-    },
-    "views": {
-      "luciole": [
-        {
-          "id": "luciole.variables",
-          "name": "Variables"
-        }
-      ]
-    },
-    "viewsWelcome": [
-      {
-        "view": "luciole.variables",
-        "contents": "Pause a live run to see the variables of every function on its call path.\n[Run Live](command:luciole.runLive)"
-      }
-    ],
     "menus": {
       "editor/title": [
         {
@@ -178,38 +214,13 @@
         },
         {
           "command": "luciole.stopLive",
-          "when": "luciole.liveRunning",
+          "when": "luciole.liveRunning && !inDebugMode",
           "group": "navigation@1"
-        },
-        {
-          "command": "luciole.pauseLive",
-          "when": "luciole.liveRunning && !luciole.livePaused",
-          "group": "navigation@0"
-        },
-        {
-          "command": "luciole.resumeLive",
-          "when": "luciole.liveRunning && luciole.livePaused",
-          "group": "navigation@0"
         },
         {
           "command": "luciole.showFileGraph",
           "when": "editorLangId == python",
           "group": "navigation@2"
-        },
-        {
-          "command": "luciole.stepOver",
-          "when": "luciole.livePaused",
-          "group": "navigation@0"
-        },
-        {
-          "command": "luciole.stepInto",
-          "when": "luciole.livePaused",
-          "group": "navigation@0"
-        },
-        {
-          "command": "luciole.stepOut",
-          "when": "luciole.livePaused",
-          "group": "navigation@0"
         },
         {
           "command": "luciole.runLiveWith",
@@ -231,65 +242,71 @@
       ],
       "commandPalette": [
         {
-          "command": "luciole.revealFrame",
+          "command": "luciole.revealInBrain",
           "when": "false"
+        },
+        {
+          "command": "luciole.goToSource",
+          "when": "false"
+        },
+        {
+          "command": "luciole.stopProcess",
+          "when": "false"
+        },
+        {
+          "command": "luciole.showCallStack",
+          "when": "false"
+        },
+        {
+          "command": "luciole.clearExited",
+          "when": "luciole.exitedProcesses"
         }
       ],
       "view/title": [
         {
-          "command": "luciole.pauseLive",
-          "when": "view == luciole.variables && luciole.liveRunning && !luciole.livePaused",
-          "group": "navigation@1"
-        },
-        {
-          "command": "luciole.resumeLive",
-          "when": "view == luciole.variables && luciole.liveRunning && luciole.livePaused",
-          "group": "navigation@1"
-        },
-        {
-          "command": "luciole.stepOver",
-          "when": "view == luciole.variables && luciole.livePaused",
-          "group": "navigation@1"
-        },
-        {
-          "command": "luciole.stepInto",
-          "when": "view == luciole.variables && luciole.livePaused",
-          "group": "navigation@1"
-        },
-        {
-          "command": "luciole.stepOut",
-          "when": "view == luciole.variables && luciole.livePaused",
-          "group": "navigation@1"
-        },
-        {
           "command": "luciole.stopLive",
-          "when": "view == luciole.variables && luciole.liveRunning",
+          "when": "view == luciole.running && luciole.liveRunning && !inDebugMode",
+          "group": "navigation@1"
+        },
+        {
+          "command": "luciole.clearExited",
+          "when": "view == luciole.running && luciole.exitedProcesses",
+          "group": "navigation@2"
+        },
+        {
+          "command": "luciole.findInMap",
+          "when": "view == luciole.map && luciole.graphOpen",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "luciole.stopProcess",
+          "when": "view == luciole.running && viewItem == process.stop",
+          "group": "inline"
+        },
+        {
+          "command": "luciole.showCallStack",
+          "when": "view == luciole.running && viewItem == process.debug",
+          "group": "inline"
+        },
+        {
+          "command": "luciole.goToSource",
+          "when": "view == luciole.map && viewItem == function",
+          "group": "inline"
+        },
+        {
+          "command": "luciole.revealInBrain",
+          "when": "view == luciole.map",
+          "group": "navigation@1"
+        },
+        {
+          "command": "luciole.goToSource",
+          "when": "view == luciole.map && viewItem == function",
           "group": "navigation@2"
         }
       ]
-    },
-    "keybindings": [
-      {
-        "command": "luciole.stepOver",
-        "key": "f10",
-        "when": "luciole.livePaused && !inDebugMode"
-      },
-      {
-        "command": "luciole.stepInto",
-        "key": "f11",
-        "when": "luciole.livePaused && !inDebugMode"
-      },
-      {
-        "command": "luciole.stepOut",
-        "key": "shift+f11",
-        "when": "luciole.livePaused && !inDebugMode"
-      },
-      {
-        "command": "luciole.resumeLive",
-        "key": "f5",
-        "when": "luciole.livePaused && !inDebugMode"
-      }
-    ]
+    }
   },
   "scripts": {
     "build": "node build.mjs",

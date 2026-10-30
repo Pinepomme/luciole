@@ -2,6 +2,7 @@
 
 import json
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -43,7 +44,7 @@ def test_matches_hand_made_example():
 def test_analyzes_own_source():
     graph = build_graph(REPO / "src")
     assert_valid(graph)
-    assert "luciole.analyzer:FlowVisitor.call" in node_ids(graph)
+    assert "luciole.flows:FlowVisitor.call" in node_ids(graph)
     assert ("luciole.cli:main", "luciole.analyzer:build_graph") in edges(graph, "calls")
 
 
@@ -227,3 +228,454 @@ def test_cli_prints_json(capsys):
 def test_cli_rejects_missing_path(tmp_path):
     with pytest.raises(SystemExit):
         main(["graph", str(tmp_path / "nope.py")])
+
+
+def test_cli_run_rejects_missing_script(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        main(["run", "--trace", str(tmp_path / "t.sqlite"), str(tmp_path / "nope.py")])
+    assert "no such file" in capsys.readouterr().err
+    assert not (tmp_path / "t.sqlite").exists()
+
+
+def test_body_line_is_where_each_call_starts(tmp_path):
+    graph = analyze(tmp_path, {"app.py": '''
+        def plain(x):
+            return x
+
+
+        @decorated
+        def documented(x):
+            """Docstring."""
+            y = x + 1
+            return y
+
+
+        def only_docstring():
+            """Nothing else."""
+    '''})
+    lines = {n["name"]: n["body_line"] for n in graph["nodes"] if n["kind"] == "function"}
+    assert lines == {"plain": 3, "documented": 9, "only_docstring": 14}
+
+
+def calls(graph):
+    return edges(graph, "calls")
+
+
+def test_star_imports_and_imports_running_modules(tmp_path):
+    graph = analyze(tmp_path, {
+        "pkg/__init__.py": "from .queues import *\n",
+        "pkg/queues.py": "class Queue:\n    def get(self):\n        return 1\n\ndef _hidden():\n    pass\n",
+        "app.py": """
+            import pkg
+            from pkg import queues
+
+            def main():
+                q = pkg.Queue()
+                return q.get()
+        """,
+    })
+    found = calls(graph)
+    assert ("app:main", "pkg.queues:Queue.get") in found  # pkg.Queue comes from the star import
+    assert {("app", "pkg"), ("app", "pkg.queues"), ("pkg", "pkg.queues")} <= found  # imports run modules
+
+
+def test_properties_super_and_overrides(tmp_path):
+    graph = analyze(tmp_path, {"shapes.py": """
+        class Shape:
+            def __init__(self, name):
+                self.name = name
+
+            @property
+            def area(self):
+                return 0
+
+            @area.setter
+            def area(self, value):
+                pass
+
+            def describe(self):
+                return self.render() + str(self.area)
+
+
+        class Square(Shape):
+            def __init__(self, side):
+                super().__init__("square")
+                self.side = side
+
+            def render(self):
+                return "[]"
+
+            @property
+            def area(self):
+                return self.side ** 2
+
+
+        def report(shape: Shape):
+            return shape.area
+    """})
+    found = calls(graph)
+    assert ("shapes:Square.__init__", "shapes:Shape.__init__") in found  # super()
+    assert ("shapes:Shape.describe", "shapes:Square.render") in found  # defined in a subclass only
+    assert ("shapes:Shape.describe", "shapes:Shape.area") in found  # the getter, not the setter
+    assert {("shapes:report", "shapes:Shape.area"), ("shapes:report", "shapes:Square.area")} <= found  # and overrides
+
+
+def test_types_from_returns_annotations_and_special_methods(tmp_path):
+    graph = analyze(tmp_path, {"store.py": """
+        class Cart:
+            def __getitem__(self, key):
+                return 1
+
+            def __setitem__(self, key, value):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                pass
+
+            def __len__(self):
+                return 0
+
+            def __str__(self):
+                return "cart"
+
+            def total(self):
+                return 0
+
+
+        def make() -> Cart:
+            return Cart()
+
+
+        def build():
+            return Cart()
+
+
+        def use():
+            cart = make()
+            cart["apple"] = 2
+            with build() as other:
+                other["pear"]
+            label = f"{cart}"
+            return len(cart), build().total()
+
+
+        class Shop:
+            cart: Cart
+
+            def checkout(self):
+                return self.cart.total()
+    """})
+    found = calls(graph)
+    for method in ("__setitem__", "__enter__", "__exit__", "__getitem__", "__len__", "__str__", "total"):
+        assert ("store:use", f"store:Cart.{method}") in found, method
+    assert ("store:Shop.checkout", "store:Cart.total") in found  # class-level annotation
+
+
+def test_functions_held_in_variables_and_calls_by_name(tmp_path):
+    graph = analyze(tmp_path, {"headers.py": """
+        def parse_date(value):
+            return value
+
+
+        class DateHeader:
+            parser = staticmethod(parse_date)
+
+            def parse(self, value):
+                return self.parser(value)
+
+
+        class Message:
+            def get_content_type(self):
+                return "text/plain"
+
+
+        def walk(part):
+            part.split()  # a str method: never matched by name
+            return part.get_content_type()
+    """})
+    graph_edges = {(e["source"], e["target"]): e for e in graph["edges"] if e["kind"] == "calls"}
+    assert ("headers:DateHeader.parse", "headers:parse_date") in graph_edges
+    guess = graph_edges[("headers:walk", "headers:Message.get_content_type")]
+    assert guess["by_name"] is True
+    assert "by_name" not in graph_edges[("headers:DateHeader.parse", "headers:parse_date")]
+
+
+def test_no_calls_by_name_through_modules(tmp_path):
+    graph = analyze(tmp_path, {"tools.py": """
+        import functools
+        import json
+        import os
+        import struct
+        import subprocess
+        import sys
+        from os import path
+        from third_party import client
+
+
+        class Runner:
+            def run(self):
+                pass
+
+            def dumps(self):
+                pass
+
+            def isdir(self):
+                pass
+
+            def pack(self):
+                pass
+
+            def partial(self):
+                pass
+
+            def fetch(self):
+                pass
+
+            @property
+            def maxsize(self):
+                return 0
+
+
+        def main(x):
+            subprocess.run(["ls"])
+            json.dumps(x)
+            os.path.isdir(x)
+            path.isdir(x)
+            struct.pack("i", 1)
+            functools.partial(print)
+            client.fetch()
+            return sys.maxsize
+
+
+        def other(obj):
+            return obj.run()
+    """})
+    found = calls(graph)
+    assert not {target for source, target in found if source == "tools:main"}
+    assert ("tools:other", "tools:Runner.run") in found  # an unknown object, not a module
+
+
+def test_a_method_matched_by_name_keeps_the_receivers_flow(tmp_path):
+    graph = analyze(tmp_path, {"m.py": """
+        class Handler:
+            def handle(self):
+                pass
+
+
+        def cb(obj):
+            return obj.handle
+    """})
+    assert ("m:cb#obj", "m:cb#return") in edges(graph, "flows_to")
+
+
+def test_property_objects_are_not_getter_calls(tmp_path):
+    graph = analyze(tmp_path, {"m.py": """
+        class C:
+            @property
+            def x(self):
+                return 1
+
+            @x.setter
+            def x(self, v):
+                pass
+
+            @x.deleter
+            def x(self):
+                pass
+
+
+        def doc():
+            return C.x.__doc__
+
+
+        def get(c: C):
+            return c.x
+    """})
+    found = calls(graph)
+    assert ("m", "m:C.x") not in found  # @x.setter, @x.deleter
+    assert ("m:doc", "m:C.x") not in found  # on the class, not an instance
+    assert ("m:get", "m:C.x") in found
+
+
+def test_type_checking_imports_do_not_run(tmp_path):
+    graph = analyze(tmp_path, {
+        "pkg/__init__.py": "",
+        "pkg/models.py": "class Model:\n    def save(self):\n        pass\n",
+        "pkg/app.py": """
+            from __future__ import annotations
+
+            import typing
+            from typing import TYPE_CHECKING
+
+            if TYPE_CHECKING:
+                from pkg.models import Model
+            if typing.TYPE_CHECKING:
+                import pkg.models
+            else:
+                import pkg
+
+            def use(m: Model):
+                m.save()
+        """,
+    })
+    graph_edges = {(e["source"], e["target"]): e for e in graph["edges"] if e["kind"] == "calls"}
+    assert ("pkg.app", "pkg.models") not in graph_edges
+    assert ("pkg.app", "pkg") in graph_edges  # the else branch runs
+    assert "by_name" not in graph_edges[("pkg.app:use", "pkg.models:Model.save")]  # the type still resolves
+
+
+def test_f_string_conversions(tmp_path):
+    graph = analyze(tmp_path, {"m.py": """
+        class P:
+            def __repr__(self):
+                return "P()"
+
+            def __str__(self):
+                return "p"
+
+            def __format__(self, spec):
+                return "p"
+
+
+        def r(p: P):
+            return f"{p!r}"
+
+
+        def a(p: P):
+            return f"{p!a}"
+
+
+        def s(p: P):
+            return f"{p!s}"
+
+
+        def plain(p: P):
+            return f"{p}"
+    """})
+    found = {(source.rpartition(":")[2], target.rpartition(".")[2]) for source, target in calls(graph)}
+    assert found == {("r", "__repr__"), ("a", "__repr__"), ("s", "__str__"), ("plain", "__format__")}
+
+
+def test_the_latest_assignment_types_a_variable(tmp_path):
+    graph = analyze(tmp_path, {"m.py": """
+        class A:
+            def m(self):
+                pass
+
+
+        class B:
+            def m(self):
+                pass
+
+            def n(self):
+                pass
+
+
+        def f():
+            x = A()
+            x = B()
+            x.m()
+
+
+        def g():
+            y: A = B()  # the value's class, more precise than the annotation
+            y.n()
+    """})
+    found = calls(graph)
+    assert ("m:f", "m:B.m") in found and ("m:f", "m:A.m") not in found
+    assert ("m:g", "m:B.n") in found
+
+
+def test_skips_directories_the_gitignore_lists(tmp_path):
+    graph = analyze(tmp_path, {
+        ".gitignore": "# outputs\nruns/\n/data\noutput\n*.egg-info/\nsrc/generated/\n\n",
+        "app.py": "",
+        "runs/r.py": "",
+        "data/d.py": "",
+        "sub/data/kept.py": "",  # /data is anchored to the top
+        "sub/output/o.py": "",
+        "x.egg-info/e.py": "",
+        "src/generated/g.py": "",  # a path: too fancy, not used
+    })
+    files = {n["file"] for n in graph["nodes"] if n["kind"] == "module"}
+    assert files == {"app.py", "sub/data/kept.py", "src/generated/g.py"}
+
+
+def test_star_import_cycles_are_fast(tmp_path):
+    names = ["a", "b", "c", "d"]
+    files = {"pkg/__init__.py": ""}
+    for name in names:
+        stars = "".join(f"from .{other} import *\n" for other in names if other != name)
+        files[f"pkg/{name}.py"] = stars + f"\ndef f_{name}(x):\n    return len(x) + g(x)\n"
+    files["pkg/a.py"] += "\ndef g(x):\n    return x\n"
+    start = time.perf_counter()
+    graph = analyze(tmp_path, files)
+    assert time.perf_counter() - start < 1
+    assert ("pkg.d:f_d", "pkg.a:g") in calls(graph)  # still found through the star imports
+
+
+def test_functions_passed_to_be_called_later(tmp_path):
+    graph = analyze(tmp_path, {"app.py": """
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+
+        def crunch(job):
+            return job
+
+
+        def rank(item):
+            return item
+
+
+        def total(items):
+            return sum(items)
+
+
+        class Panel:
+            def on_click(self):
+                pass
+
+            @property
+            def size(self):
+                return 1
+
+            def build(self, button):
+                button.bind(self.on_click)
+                button.resize(self.size)  # a property's value, not a callback
+
+
+        alias = crunch
+
+
+        def start(jobs, pool: ThreadPoolExecutor):
+            threading.Thread(target=crunch, args=(1,)).start()
+            pool.submit(alias, 2)
+            sorted(jobs, key=rank)
+            total(jobs)  # a plain call: no callback mark
+            return total
+    """})
+    callbacks = {(e["source"], e["target"]) for e in graph["edges"] if e["kind"] == "calls" and e.get("callback")}
+    assert callbacks == {("app:start", "app:crunch"), ("app:start", "app:rank"), ("app:Panel.build", "app:Panel.on_click")}
+    assert ("app:start", "app:total") in calls(graph)  # returned, not passed: only the plain call
+    assert ("app:Panel.build", "app:Panel.size") in calls(graph)  # reading the property runs its getter
+
+
+def test_a_callback_also_called_directly_is_a_plain_call(tmp_path):
+    graph = analyze(tmp_path, {"app.py": """
+        import threading
+
+
+        def crunch():
+            pass
+
+
+        def start():
+            threading.Thread(target=crunch).start()
+            crunch()
+    """})
+    [edge] = [e for e in graph["edges"] if e["kind"] == "calls" and e["target"] == "app:crunch"]
+    assert "callback" not in edge and len(edge["sites"]) == 2

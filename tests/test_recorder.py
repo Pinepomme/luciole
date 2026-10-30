@@ -8,14 +8,25 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from graphcheck import REPO
+from luciole import protocol
 from luciole.analyzer import build_graph
 
 pytestmark = pytest.mark.skipif(sys.version_info < (3, 12), reason="sys.monitoring needs Python 3.12")
+
+
+def welcomed(server):
+    """Accept a recorder and answer its hello as the engine does: its connection and lines."""
+    connection, _ = server.accept()
+    lines = connection.makefile(encoding="utf-8")
+    assert "hello" in json.loads(lines.readline())
+    connection.sendall(b'{"welcome": {"protocol": %d}}\n' % protocol.PROTOCOL)
+    return connection, lines
 
 
 def luciole_run(tmp_path, *args):
@@ -256,7 +267,7 @@ def test_ctrl_c_stops_the_program_and_its_traceback_ends_in_project_code(tmp_pat
     traceback = stderr.strip().splitlines()
     assert traceback[-1] == "KeyboardInterrupt"
     assert "busy.py" in [line for line in traceback if line.lstrip().startswith("File ")][-1]
-    assert "recorder.py" not in stderr.split("busy.py", 1)[1]
+    assert "recorder.py" not in stderr.split("busy.py", 1)[1] and "session.py" not in stderr.split("busy.py", 1)[1]
     assert json.loads(events.read_text().splitlines()[-1]) == {"done": True}
 
 
@@ -266,8 +277,8 @@ def test_streams_to_a_socket(tmp_path):
     received = []
 
     def accept():
-        connection, _ = server.accept()
-        with connection, connection.makefile() as lines:
+        connection, lines = welcomed(server)
+        with connection, lines:
             received.extend(json.loads(line) for line in lines)
 
     thread = threading.Thread(target=accept, daemon=True)
@@ -278,6 +289,129 @@ def test_streams_to_a_socket(tmp_path):
     assert result.returncode == 0
     assert totals(received, "calls") == {"hello": 1, "hello:hi": 1}
     assert received[-1] == {"done": True}
+
+
+def test_the_hello_comes_before_the_first_frame(tmp_path):
+    # The engine refuses a connection whose first line is not a hello: the pump thread, which
+    # sends frames, must not run before it is written.
+    (tmp_path / "prog.py").write_text(textwrap.dedent("""
+        import socket, threading
+        from luciole import protocol, recorder, session
+
+        pumped = threading.Event()
+
+        def pump(self):  # the first tick at once
+            self.recorder.flush()
+            pumped.set()
+            while not self.stopping.wait(recorder.FRAME):
+                self.recorder.flush()
+
+        def slow_hello(*args, hello=protocol.hello, **kwargs):
+            pumped.wait(0.5)  # a pump started before the hello sends its frame first
+            return hello(*args, **kwargs)
+
+        session.Session.pump = pump
+        protocol.hello = slow_hello
+        server = socket.create_server(("127.0.0.1", 0))
+        connection = socket.create_connection(server.getsockname())
+        engine, _ = server.accept()
+        engine.sendall(b'{"welcome": {"protocol": %d}}\\n' % protocol.PROTOCOL)  # start() waits for it
+        session.start(root=".", connection=connection)
+        session.stop()
+        print(engine.makefile().readline())
+    """))
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    env.pop("LUCIOLE_LIVE_PORT", None)
+    result = subprocess.run([sys.executable, "prog.py"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["hello"]["role"] == "recorder"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="no SIGTERM handler on Windows")
+def test_a_process_ending_at_once_still_delivers_its_calls(tmp_path):
+    # A process that ends before reading the engine's welcome closes a socket holding unread
+    # data: the connection is reset, and the engine loses the calls it had not read yet. Pool
+    # workers terminated right after their last task did (macOS CI). No control thread here,
+    # so only start() can read the welcome.
+    (tmp_path / "prog.py").write_text(textwrap.dedent("""
+        import os, signal, sys, time
+        from luciole import session
+
+        session.Session.control = lambda self: None
+
+        def work():
+            pass
+
+        session.start(root=".", port=int(sys.argv[1]))
+        time.sleep(0.2)  # the welcome has arrived
+        work()
+        os.kill(os.getpid(), signal.SIGTERM)  # as a pool terminates its workers
+    """))
+    server = socket.create_server(("127.0.0.1", 0))
+    received = []
+
+    def engine():
+        connection, _ = server.accept()
+        with connection:
+            hello = b""
+            while not hello.endswith(b"\n"):  # byte by byte: what follows stays in the socket
+                hello += connection.recv(1)
+            connection.sendall(b'{"welcome": {"protocol": %d}}\n' % protocol.PROTOCOL)
+            time.sleep(0.5)  # the process is gone by now
+            try:
+                with connection.makefile(encoding="utf-8") as lines:
+                    received.extend(json.loads(line) for line in lines)
+            except OSError as error:
+                received.append({"error": repr(error)})
+
+    thread = threading.Thread(target=engine, daemon=True)
+    thread.start()
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    env.pop("LUCIOLE_LIVE_PORT", None)
+    result = subprocess.run([sys.executable, "prog.py", str(server.getsockname()[1])], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
+    thread.join(timeout=10)
+    server.close()
+    assert result.returncode == -signal.SIGTERM, result.stderr
+    assert totals(received, "calls") == {"prog:work": 1} and received[-1] == {"done": True}, received
+
+
+def test_an_engine_slow_to_answer_does_not_hold_the_program(tmp_path):
+    # A port that something else holds may never answer the hello: the program waits a moment
+    # at most, and the control thread still reads the answer when it comes.
+    (tmp_path / "prog.py").write_text(textwrap.dedent("""
+        import sys, time
+        from luciole import session
+
+        def work():
+            pass
+
+        began = time.monotonic()
+        session.start(root=".", port=int(sys.argv[1]))
+        print(time.monotonic() - began)
+        work()
+        time.sleep(1.5)  # the late welcome arrives
+    """))
+    server = socket.create_server(("127.0.0.1", 0))
+    received = []
+
+    def engine():
+        connection, _ = server.accept()
+        with connection, connection.makefile(encoding="utf-8") as lines:
+            assert "hello" in json.loads(lines.readline())
+            time.sleep(1)  # past the recorder's wait
+            connection.sendall(b'{"welcome": {"protocol": %d}}\n' % protocol.PROTOCOL)
+            received.extend(json.loads(line) for line in lines)
+
+    thread = threading.Thread(target=engine, daemon=True)
+    thread.start()
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    env.pop("LUCIOLE_LIVE_PORT", None)
+    result = subprocess.run([sys.executable, "prog.py", str(server.getsockname()[1])], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
+    thread.join(timeout=10)
+    server.close()
+    assert result.returncode == 0, result.stderr
+    assert float(result.stdout) < 1, result.stdout
+    assert totals(received, "calls") == {"prog:work": 1} and received[-1] == {"done": True}, received
 
 
 PAUSABLE_APP = """\
@@ -312,8 +446,7 @@ def test_pause_shows_variables_and_expands_objects(tmp_path):
     command = [sys.executable, "-m", "luciole", "run", "--root", str(tmp_path), "app.py"]
     process = subprocess.Popen(command, cwd=tmp_path, env=env)
     try:
-        connection, _ = server.accept()
-        lines = connection.makefile(encoding="utf-8")
+        connection, lines = welcomed(server)
 
         def send(command):
             connection.sendall((json.dumps(command) + "\n").encode())
@@ -325,7 +458,8 @@ def test_pause_shows_variables_and_expands_objects(tmp_path):
                     return message[key]
             raise AssertionError(f"no {key!r} message")
 
-        next_message("calls")  # running
+        while "app:tick" not in next_message("calls"):
+            pass  # wait for the loop: before it, LIMIT and cart may not exist yet
         send({"cmd": "pause"})
         paused = next_message("paused")
         assert paused["thread"] == "MainThread"
@@ -378,8 +512,7 @@ def test_step_over_stays_in_the_frame_or_returns_to_the_caller(tmp_path):
     command = [sys.executable, "-m", "luciole", "run", "--root", str(tmp_path), "app.py"]
     process = subprocess.Popen(command, cwd=tmp_path, env=env)
     try:
-        connection, _ = server.accept()
-        lines = connection.makefile(encoding="utf-8")
+        connection, lines = welcomed(server)
 
         def send(command):
             connection.sendall((json.dumps(command) + "\n").encode())
@@ -426,8 +559,7 @@ def test_step_into_enters_calls_and_step_out_returns_to_the_caller(tmp_path):
     command = [sys.executable, "-m", "luciole", "run", "--root", str(tmp_path), "app.py"]
     process = subprocess.Popen(command, cwd=tmp_path, env=env)
     try:
-        connection, _ = server.accept()
-        lines = connection.makefile(encoding="utf-8")
+        connection, lines = welcomed(server)
 
         def send(command):
             connection.sendall((json.dumps(command) + "\n").encode())

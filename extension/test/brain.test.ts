@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { test } from "node:test";
 import type { Graph } from "../src/graph";
-import { buildBrain, MAX_STATE_PAIRS } from "../src/webview/brain";
+import { breakpointAction, breakpointHint, buildBrain, MAX_STATE_PAIRS, neuronAt } from "../src/webview/brain";
 
 // out/test/brain.test.js -> repo root
 const shop: Graph = JSON.parse(readFileSync(resolve(__dirname, "../../../examples/shop.graph.json"), "utf8"));
@@ -69,4 +69,51 @@ test("very shared variables are left out", () => {
     ]).flat(),
   };
   assert.deepEqual(synapses(graph, "state"), {});
+});
+
+test("a line belongs to the innermost function around it, else to its module", () => {
+  const neurons = buildBrain(shop).neurons;
+  assert.equal(neuronAt(neurons, "shop.py", 16)?.id, "shop:Cart.add"); // in Cart.add
+  assert.equal(neuronAt(neurons, "shop.py", 7)?.id, "shop:with_tax");
+  assert.equal(neuronAt(neurons, "shop.py", 2)?.id, "shop"); // module code
+  assert.equal(neuronAt(neurons, "other.py", 7), undefined);
+});
+
+test("right-click removes every breakpoint marking a function, else adds one where each call starts", () => {
+  const neurons = buildBrain(shop).neurons;
+  const neuron = (id: string) => neurons.find((n) => n.id === id)!;
+  const main = neuron("shop:main"); // lines 22-27, body_line 23
+  assert.deepEqual(breakpointAction(neurons, main, []), { add: 23 });
+  assert.deepEqual(breakpointAction(neurons, main, [{ file: "other.py", line: 25 }, { file: "shop.py", line: 7 }]), { add: 23 });
+  // A gutter breakpoint on another line of main marks it: right-click removes that one.
+  const other = breakpointAction(neurons, main, [{ file: "shop.py", line: 25 }])!;
+  assert.deepEqual(other, { remove: [25] });
+  assert.equal(breakpointHint(main, other), "remove the breakpoint (line 25)");
+  const own = breakpointAction(neurons, main, [{ file: "shop.py", line: 23 }])!;
+  assert.equal(breakpointHint(main, own), "remove the breakpoint");
+  const several = breakpointAction(neurons, main, [{ file: "shop.py", line: 26 }, { file: "shop.py", line: 23 }, { file: "shop.py", line: 26 }])!;
+  assert.deepEqual(several, { remove: [23, 26] });
+  assert.equal(breakpointHint(main, several), "remove its 2 breakpoints (lines 23, 26)");
+  assert.equal(breakpointHint(main, { add: 23 }), "stop on each call");
+  // Module code takes no breakpoints from the brain.
+  assert.equal(breakpointAction(neurons, neuron("shop"), [{ file: "shop.py", line: 30 }]), undefined);
+});
+
+test("imports and calls matched by name become call synapses", () => {
+  const graph: Graph = {
+    ...shop,
+    nodes: [...shop.nodes, { ...shop.nodes.find((n) => n.kind === "module")!, id: "other", name: "other", file: "other.py" }],
+    edges: [
+      ...shop.edges,
+      { kind: "calls", source: "other", target: "shop", sites: [{ line: 1, col: 0 }] },
+      { kind: "calls", source: "other", target: "shop:with_tax", sites: [{ line: 2, col: 0 }], by_name: true },
+      { kind: "calls", source: "other", target: "shop:main", sites: [{ line: 3, col: 0 }], callback: true },
+    ],
+  };
+  const calls = buildBrain(graph).synapses.filter((s) => s.kind === "call" && s.source === "other");
+  assert.deepEqual(calls.map((s) => [s.target, Boolean(s.byName), Boolean(s.callback)]).sort(), [
+    ["shop", false, false],
+    ["shop:main", false, true],
+    ["shop:with_tax", true, false],
+  ]);
 });

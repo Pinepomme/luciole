@@ -13,6 +13,7 @@
  */
 
 import type { Graph, GraphNode } from "../graph";
+import type { SourceLine } from "../messages";
 
 export type SynapseKind = "call" | "state" | "runtime" | "spawn";
 
@@ -37,6 +38,10 @@ export interface Synapse {
   variables: string[];
   /** Number of call sites (calls) or of variables (state). */
   count: number;
+  /** Calls the analyzer matched by method name only: likely, not certain. */
+  byName?: boolean;
+  /** Calls to a function passed as an argument (`Thread(target=f)`), made later by what receives it. */
+  callback?: boolean;
 }
 
 export interface Brain {
@@ -46,6 +51,53 @@ export interface Brain {
 
 /** A variable shared by more writer × reader pairs than this is too generic to draw. */
 export const MAX_STATE_PAIRS = 64;
+
+/**
+ * The innermost neuron whose code holds `line` of `file` (a path relative to the graph's root):
+ * a function, else its module. Where the debugger stopped, or where a breakpoint is.
+ */
+export function neuronAt(neurons: Neuron[], file: string, line: number): Neuron | undefined {
+  const span = (neuron: Neuron) => (neuron.node.kind === "module" ? Infinity : neuron.node.loc.end_line - neuron.node.loc.line);
+  let best: Neuron | undefined;
+  for (const neuron of neurons) {
+    const { node } = neuron;
+    const inside = node.kind === "module" || (node.loc.line <= line && line <= node.loc.end_line);
+    if (node.file === file && inside && (!best || span(neuron) < span(best))) {
+      best = neuron;
+    }
+  }
+  return best;
+}
+
+/** What a right-click on a function's neuron does to its breakpoints. */
+export type BreakpointAction = { add: number } | { remove: number[] };
+
+/**
+ * A right-click on a function: removes every breakpoint that marks it (any line of its code, as
+ * for the red dot: see neuronAt), else adds one where each call starts (`body_line`: not the `def`
+ * line, which runs once, at import). Undefined for module code.
+ */
+export function breakpointAction(neurons: Neuron[], neuron: Neuron, breakpoints: SourceLine[]): BreakpointAction | undefined {
+  const { node } = neuron;
+  if (node.kind !== "function") {
+    return undefined;
+  }
+  const lines = breakpoints.filter(({ file, line }) => file === node.file && neuronAt(neurons, file, line)?.id === neuron.id).map(({ line }) => line);
+  const unique = [...new Set(lines)].sort((a, b) => a - b);
+  return unique.length ? { remove: unique } : { add: node.body_line ?? node.loc.line };
+}
+
+/** The right-click hint for `action` on `neuron`. */
+export function breakpointHint(neuron: Neuron, action: BreakpointAction): string {
+  if ("add" in action) {
+    return "stop on each call";
+  }
+  const lines = action.remove;
+  if (lines.length > 1) {
+    return `remove its ${lines.length} breakpoints (lines ${lines.join(", ")})`;
+  }
+  return lines[0] === (neuron.node.body_line ?? neuron.node.loc.line) ? "remove the breakpoint" : `remove the breakpoint (line ${lines[0]})`;
+}
 
 export function synapseId(kind: SynapseKind, source: string, target: string): string {
   return `${kind}|${source}>${target}`;
@@ -79,8 +131,13 @@ export function buildBrain(graph: Graph): Brain {
   }
 
   for (const edge of graph.edges) {
-    if (edge.kind === "calls" && nodes.get(edge.target)?.kind === "function") {
+    // Calls to functions, and imports, which run the imported module.
+    const target = nodes.get(edge.target)?.kind;
+    if (edge.kind === "calls" && (target === "function" || target === "module")) {
       link("call", edge.source, edge.target, undefined, edge.sites?.length ?? 1);
+      const synapse = synapses.get(synapseId("call", edge.source, edge.target))!;
+      synapse.byName = edge.by_name || undefined;
+      synapse.callback = edge.callback || undefined;
     }
   }
 

@@ -5,62 +5,125 @@ import { randomBytes } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
+import { addBreakpoint, hasPythonDebugger, installPythonDebugger, pythonDebugSession, registerDebugging, removeBreakpoints, sourceBreakpoints } from "./debugging";
 import type { Graph } from "./graph";
 import { webviewHtml } from "./html";
 import { LiveSession } from "./live";
-import type { FromWebview, PausedFrame, PausedThread, StepMode, ToWebview } from "./messages";
-import { RunConfiguration, resolveRun, splitArgs } from "./runs";
-import { VariablesView } from "./variables";
+import type { FromWebview, ToWebview } from "./messages";
+import type { MapEntry } from "./map";
+import type { ProcessItem } from "./running";
+import { RunConfiguration, debugConfiguration, fileRunKind, packageModule, pytestRun, resolveRun, splitArgs } from "./runs";
+import { ActionsView, MapView, RunningView } from "./sidebar";
 
 let panel: GraphPanel | undefined;
 let output: vscode.OutputChannel;
 let live: LiveSession;
-let variables: VariablesView;
+let autoStartItem: vscode.StatusBarItem;
+let map: MapView;
+let actions: ActionsView;
 
 /** The last run started, to run it again from the panel. */
 const LAST_RUN = "luciole.lastRun";
+/** Run Live ran in a terminal for want of the Python debugger: the panel offers it until it is installed. */
+let debuggerNotice = false;
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("Luciole");
   live = new LiveSession(
     {
-      frame: (frame) => panel?.post({ type: "live", frame }),
-      state: (state) => {
-        if (!state.paused) {
-          variables.clear();
-        } else if (state.stepping) {
-          variables.markStale(); // fresh snapshots come when the threads stop again
-        }
-        panel?.post({ type: "liveState", state });
+      frame: (frame) => {
+        panel?.post({ type: "live", frame });
+        map.setRunning(frame.done ? [] : (frame.stacks ?? []).flatMap(({ stack }) => stack));
       },
-      paused: (thread) => {
-        const first = variables.isEmpty;
-        variables.add(thread);
-        // After a step, the stepped thread stops first: show where it went.
-        if (first && thread.frames[0]) {
-          void vscode.commands.executeCommand("luciole.variables.focus");
-          void revealFrame(thread.frames[0], thread);
+      state: (state) => panel?.post({ type: "liveState", state }),
+      started: (label) => {
+        // A program started in a terminal with auto-start on: show the project it lights up.
+        if (!panel && vscode.workspace.workspaceFolders?.length) {
+          showGraph(context, workspaceTarget(), false);
+        }
+        if (!live.current.running) {
+          panel?.post({ type: "liveStarted", script: label });
         }
       },
     },
     output,
+    {
+      python: () => pythonPath(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd()),
+      analyzerDir: () => analyzerDir(context),
+      version: String(context.extension.packageJSON.version),
+    },
   );
-  variables = new VariablesView((ref) => live.expand(ref));
+  autoStartItem = vscode.window.createStatusBarItem("luciole.autoStart", vscode.StatusBarAlignment.Left);
+  autoStartItem.name = "Luciole Auto-Start";
+  autoStartItem.command = "luciole.toggleAutoStart";
+  actions = new ActionsView();
+  map = new MapView();
+  map.view = vscode.window.createTreeView("luciole.map", { treeDataProvider: map, showCollapseAll: true });
+  const running = new RunningView(live);
   context.subscriptions.push(
+    actions,
+    running,
+    map,
+    vscode.window.createTreeView("luciole.actions", { treeDataProvider: actions }),
+    vscode.window.createTreeView("luciole.running", { treeDataProvider: running }),
+    map.view,
+    vscode.commands.registerCommand("luciole.revealInBrain", (entry: MapEntry) => panel?.focus(entry)),
+    vscode.commands.registerCommand("luciole.goToSource", (entry: MapEntry) => {
+      if (map.root && entry.file) {
+        openSource(map.root, entry.file, entry.line ?? 1, entry.col ?? 0, false);
+      }
+    }),
+    vscode.commands.registerCommand("luciole.findInMap", () => findInMap()),
+    vscode.commands.registerCommand("luciole.stopProcess", (process: ProcessItem) => live.stopProcess(process.id)),
+    vscode.commands.registerCommand("luciole.showCallStack", () => vscode.commands.executeCommand("workbench.debug.action.focusCallStackView")),
+    vscode.commands.registerCommand("luciole.clearExited", () => live.clearExited()),
     output,
     live,
-    variables,
-    vscode.commands.registerCommand("luciole.revealFrame", (frame: PausedFrame, thread: PausedThread) => revealFrame(frame, thread)),
-    vscode.commands.registerCommand("luciole.stepOver", () => step("over")),
-    vscode.commands.registerCommand("luciole.stepInto", () => step("into")),
-    vscode.commands.registerCommand("luciole.stepOut", () => step("out")),
     vscode.commands.registerCommand("luciole.runLive", () => runFile(context, fileTarget())),
     vscode.commands.registerCommand("luciole.runLiveWith", () => pickRun(context)),
-    vscode.commands.registerCommand("luciole.stopLive", () => live.stop()),
-    vscode.commands.registerCommand("luciole.pauseLive", () => live.pause(true)),
-    vscode.commands.registerCommand("luciole.resumeLive", () => live.pause(false)),
+    vscode.commands.registerCommand("luciole.stopLive", () => live.stop(pythonDebugSession())),
     vscode.commands.registerCommand("luciole.showGraph", () => showGraph(context, workspaceTarget(), false)),
     vscode.commands.registerCommand("luciole.showFileGraph", () => showGraph(context, fileTarget(), true)),
+    autoStartItem,
+    vscode.commands.registerCommand("luciole.toggleAutoStart", () => {
+      const settings = vscode.workspace.getConfiguration("luciole");
+      return settings.update("autoStart", !settings.get<boolean>("autoStart"), vscode.ConfigurationTarget.Global);
+    }),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("luciole.autoStart")) {
+        void applyAutoStart(context);
+        actions.refresh();
+      }
+    }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => applyAutoStart(context)),
+    ...registerDebugging({
+      autoStartEnv: async (folder) => {
+        const dir = analyzerDir(context);
+        if (!dir || !vscode.workspace.getConfiguration("luciole").get<boolean>("autoStart", false)) {
+          return undefined;
+        }
+        await live.connect().catch((error) => output.appendLine(`Luciole engine: ${error}`));
+        const root = folder?.uri.fsPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        return { PYTHONPATH: path.join(dir, "luciole", "_autostart"), ...(root ? { LUCIOLE_ROOT: root } : {}) };
+      },
+      stopped: (file, line) => {
+        if (panel) {
+          panel.debugStopped(file, line);
+        } else {
+          output.appendLine(`debugger stopped at ${file}:${line}; no graph is open to show it`);
+        }
+      },
+      continued: () => panel?.post({ type: "debugStopped", at: undefined }),
+      process: (session, pid) => live.debuggedProcess(session, pid),
+      log: (line) => output.appendLine(line),
+    }),
+    vscode.debug.onDidChangeBreakpoints(() => panel?.postBreakpoints()),
+    // The Python debugger installed (from the panel's notice or elsewhere): the next Run Live uses it.
+    vscode.extensions.onDidChange(() => {
+      if (debuggerNotice && hasPythonDebugger()) {
+        showDebuggerNotice(false);
+      }
+    }),
     // A file graph follows the editor: switching to another Python file shows that file's graph.
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       const document = editor?.document;
@@ -74,6 +137,41 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
   );
+  void applyAutoStart(context);
+}
+
+/**
+ * Auto-start: Python programs started in VS Code's terminals light up the view, with no change to
+ * how they are run. The switch only sets environment variables for new terminals: the auto-start
+ * folder on PYTHONPATH, whose sitecustomize starts the recorder when the engine runs (found through
+ * its file), and the project root. Off, nothing is set. Terminals already open keep what they had
+ * (VS Code flags them as stale).
+ */
+async function applyAutoStart(context: vscode.ExtensionContext): Promise<void> {
+  const on = vscode.workspace.getConfiguration("luciole").get<boolean>("autoStart", false);
+  const env = context.environmentVariableCollection;
+  env.persistent = false; // the extension's folder changes with its version
+  env.clear();
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  for (const folder of folders) {
+    env.getScoped({ workspaceFolder: folder }).clear();
+  }
+  const dir = analyzerDir(context);
+  if (on && dir) {
+    env.description = "Luciole auto-start: Python programs started here light up the Luciole view.";
+    // Prepended, so that PYTHONPATH set elsewhere (Run Live, the user's) stays; when PYTHONPATH is
+    // empty, the auto-start folder drops the empty entry this leaves.
+    env.prepend("PYTHONPATH", path.join(dir, "luciole", "_autostart") + path.delimiter);
+    void live.connect().catch((error) => output.appendLine(`Luciole engine: ${error}`)); // programs find it as they start
+    for (const folder of folders) {
+      env.getScoped({ workspaceFolder: folder }).replace("LUCIOLE_ROOT", folder.uri.fsPath);
+    }
+  }
+  autoStartItem.text = on ? "$(zap) Luciole: on" : "$(circle-slash) Luciole: off";
+  autoStartItem.tooltip = on
+    ? "Python programs started in new terminals light up the Luciole view. Click to turn off."
+    : "Click to light up the Luciole view with every Python program started in new terminals (pytest, scripts, servers).";
+  autoStartItem.show();
 }
 
 export function deactivate(): void {
@@ -100,9 +198,68 @@ function fileTarget(): string | undefined {
   return document.uri.fsPath;
 }
 
-/** Run a Python file as a script, without arguments. */
-function runFile(context: vscode.ExtensionContext, script: string | undefined): Promise<void> {
-  return script ? startRun(context, { name: path.basename(script), program: script }) : Promise.resolve();
+/**
+ * Run a Python file the way it is meant to run (see fileRunKind): a test file with pytest, a
+ * script as itself (as a module when it is in a package and imports relatively), a library
+ * module through the tests that import it, else as a script.
+ */
+async function runFile(context: vscode.ExtensionContext, file: string | undefined): Promise<void> {
+  if (!file) {
+    return;
+  }
+  const name = path.basename(file);
+  const open = vscode.workspace.textDocuments.find((document) => document.uri.fsPath === file);
+  const source = open?.getText() ?? (await fs.promises.readFile(file, "utf8").catch(() => ""));
+  const kind = fileRunKind(file, source);
+  const folder = workspaceFolderOf(file);
+  if (kind === "test") {
+    return startRun(context, pytestRun(`pytest ${name}`, [file], folder));
+  }
+  if (kind === "module") {
+    const tests = await findTests(context, file, folder);
+    if (tests.length) {
+      return startRun(context, pytestRun(`tests for ${name}`, tests, folder));
+    }
+  }
+  // A file of a package that imports relatively only runs as a module: `python -m pkg.mod`.
+  const asModule = packageModule(file, source, (dir) => fs.existsSync(path.join(dir, "__init__.py")));
+  if (kind === "module") {
+    const how = asModule ? `as a module (-m ${asModule.module})` : "as a script";
+    void vscode.window.showInformationMessage(`Luciole: no test file imports ${name}, so it runs ${how}.`);
+  }
+  if (asModule) {
+    // Importable from the folder it runs in; else from its package's folder, put first on PYTHONPATH.
+    const env = path.resolve(asModule.root) === path.resolve(folder) ? undefined : { PYTHONPATH: [asModule.root, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter) };
+    return startRun(context, { name: `-m ${asModule.module}`, module: asModule.module, folder, ...(env ? { env } : {}) });
+  }
+  return startRun(context, { name, program: file, folder });
+}
+
+function workspaceFolderOf(file: string): string {
+  return vscode.workspace.getWorkspaceFolder(vscode.Uri.file(file))?.uri.fsPath ?? path.dirname(file);
+}
+
+/** Test files under `folder` that import `file`'s module (`luciole tests`). */
+function findTests(context: vscode.ExtensionContext, file: string, folder: string): Promise<string[]> {
+  const dir = analyzerDir(context);
+  if (!dir) {
+    return Promise.resolve([]);
+  }
+  const args = ["-m", "luciole", "tests", file, "--root", folder, "--json"];
+  return new Promise((resolve) => {
+    execFile(pythonPath(file), args, { cwd: dir, env: { ...process.env, PYTHONPATH: dir } }, (error, stdout, stderr) => {
+      if (error) {
+        output.appendLine(`could not look for tests: ${stderr || error.message}`);
+        resolve([]);
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout) as string[]);
+      } catch {
+        resolve([]);
+      }
+    });
+  });
 }
 
 /** Run the last run again, else the panel's file, else ask what to run. */
@@ -128,13 +285,26 @@ async function pickRun(context: vscode.ExtensionContext): Promise<void> {
   }
   if (file) {
     picks.push(
-      { label: "$(file) Current file", description: vscode.workspace.asRelativePath(file), choose: async () => ({ name: path.basename(file), program: file }) },
+      { label: "$(file) Current file as a script", description: vscode.workspace.asRelativePath(file), choose: async () => ({ name: path.basename(file), program: file, folder: workspaceFolderOf(file) }) },
+      {
+        label: "$(beaker) Tests for the current file",
+        description: "pytest on the test files that import it",
+        choose: async () => {
+          const folder = workspaceFolderOf(file);
+          const tests = await findTests(context, file, folder);
+          if (!tests.length) {
+            void vscode.window.showInformationMessage(`Luciole: no test file imports ${path.basename(file)}.`);
+            return undefined;
+          }
+          return pytestRun(`tests for ${path.basename(file)}`, tests, folder);
+        },
+      },
       {
         label: "$(file) Current file with arguments…",
         description: vscode.workspace.asRelativePath(file),
         choose: async () => {
           const line = await vscode.window.showInputBox({ prompt: `Arguments for ${path.basename(file)}`, placeHolder: "--config configs/small.yaml" });
-          return line === undefined ? undefined : { name: `${path.basename(file)} ${line}`.trim(), program: file, args: splitArgs(line) };
+          return line === undefined ? undefined : { name: `${path.basename(file)} ${line}`.trim(), program: file, args: splitArgs(line), folder: workspaceFolderOf(file) };
         },
       },
     );
@@ -171,7 +341,10 @@ async function pickRun(context: vscode.ExtensionContext): Promise<void> {
   }
 }
 
-/** Show the brain the run will light up, then start the run under the recorder in a terminal. */
+/**
+ * Show the brain the run will light up, then start the run under VS Code's Python debugger with
+ * the recorder (auto-start), or, without the Python debugger, under `luciole run` in a terminal.
+ */
 async function startRun(context: vscode.ExtensionContext, config: RunConfiguration): Promise<void> {
   const dir = analyzerDir(context);
   if (!dir) {
@@ -180,7 +353,10 @@ async function startRun(context: vscode.ExtensionContext, config: RunConfigurati
   }
   const file = activePythonFile();
   const anchor = config.program && path.isAbsolute(config.program) ? config.program : file;
+  // The run's own folder first: the panel's Run live button leaves no active editor, and in a
+  // multi-root workspace the first folder may not be the one its paths are relative to.
   const folder =
+    config.folder ??
     (anchor && vscode.workspace.getWorkspaceFolder(vscode.Uri.file(anchor))?.uri.fsPath) ??
     vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ??
     (anchor && path.dirname(anchor));
@@ -203,9 +379,25 @@ async function startRun(context: vscode.ExtensionContext, config: RunConfigurati
   } else if (!panel?.showsFolder) {
     showGraph(context, folder, false); // a module can run anything in the project
   }
-  void context.workspaceState.update(LAST_RUN, config);
+  void context.workspaceState.update(LAST_RUN, { ...config, folder }); // runs again from the same folder
   panel?.post({ type: "liveStarted", script: run.label });
-  await live.run(run, folder, pythonPath(folder), dir);
+  if (!hasPythonDebugger()) {
+    showDebuggerNotice(true);
+    await live.run(run, folder, pythonPath(folder), dir);
+    return;
+  }
+  const launch = debugConfiguration(run, {
+    autoStartDir: path.join(dir, "luciole", "_autostart"),
+    root: folder,
+    python: configuredPython(folder),
+    pythonPath: process.env.PYTHONPATH,
+  });
+  await live.debug(launch, vscode.workspace.getWorkspaceFolder(vscode.Uri.file(folder)));
+}
+
+function showDebuggerNotice(show: boolean): void {
+  debuggerNotice = show;
+  panel?.post({ type: "debuggerNotice", show });
 }
 
 function activePythonFile(): string | undefined {
@@ -213,23 +405,31 @@ function activePythonFile(): string | undefined {
   return document?.languageId === "python" && document.uri.scheme === "file" ? document.uri.fsPath : undefined;
 }
 
-function step(mode: StepMode): void {
-  const thread = variables.current;
-  if (thread) {
-    live.step(thread.id, mode);
+/** Lists the functions of the graph in the panel; the one chosen is shown in the Map and in the brain. */
+async function findInMap(): Promise<void> {
+  const functions = map.functions;
+  if (!functions.length) {
+    void vscode.window.showInformationMessage("Luciole: show a graph first.");
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    functions.map((entry) => ({ label: `$(symbol-function) ${entry.label}`, description: entry.container, entry })),
+    { title: "Luciole: Find in Map", placeHolder: "Function to show in the brain", matchOnDescription: true },
+  );
+  if (picked) {
+    await map.view?.reveal(picked.entry, { select: true, focus: false, expand: true });
+    panel?.focus(picked.entry);
   }
 }
 
-/** Show where a paused frame is: its line in the editor, its neuron in the brain. */
-async function revealFrame(frame: PausedFrame, thread: PausedThread): Promise<void> {
-  variables.focus(thread);
-  const position = new vscode.Position(frame.line - 1, 0);
-  await vscode.window.showTextDocument(vscode.Uri.file(frame.file), {
+/** Opens `file` (relative to `root`) at `line` (1-based) and `col` in the first editor column. */
+function openSource(root: string, file: string, line: number, col: number, preserveFocus: boolean): void {
+  const position = new vscode.Position(line - 1, col);
+  void vscode.window.showTextDocument(vscode.Uri.file(path.resolve(root, file)), {
     viewColumn: vscode.ViewColumn.One,
-    preserveFocus: true,
+    preserveFocus,
     selection: new vscode.Range(position, position),
   });
-  panel?.post({ type: "focus", node: frame.node });
 }
 
 function showGraph(context: vscode.ExtensionContext, target: string | undefined, followEditor: boolean): void {
@@ -272,7 +472,16 @@ class GraphPanel {
     this.panel.onDidDispose(() => {
       this.running?.kill();
       panel = undefined;
+      map.setGraph(undefined);
+      void vscode.commands.executeCommand("setContext", "luciole.graphOpen", false);
     });
+    void vscode.commands.executeCommand("setContext", "luciole.graphOpen", true);
+  }
+
+  /** Shows a Map item in the brain: the camera flies to its neuron or region, which is marked. */
+  focus(entry: MapEntry): void {
+    this.panel.reveal(undefined, true);
+    this.post(entry.kind === "function" ? { type: "focus", node: entry.target } : { type: "focusRegion", region: entry.target });
   }
 
   show(target: string, followEditor: boolean): void {
@@ -292,6 +501,32 @@ class GraphPanel {
   }
 
   /** True when this panel shows a folder graph that includes `file`. */
+  /** `file` relative to the graph's root, as the graph writes it; undefined outside it. */
+  private relative(file: string): string | undefined {
+    const relative = this.root ? path.relative(this.root, file) : "..";
+    return relative.startsWith("..") || path.isAbsolute(relative) ? undefined : relative.split(path.sep).join("/");
+  }
+
+  /** VS Code's breakpoints in this graph's files, for the brain to mark their functions. */
+  postBreakpoints(): void {
+    const breakpoints = sourceBreakpoints().flatMap(({ file, line }) => {
+      const relative = this.relative(file);
+      return relative ? [{ file: relative, line }] : [];
+    });
+    this.post({ type: "breakpoints", breakpoints });
+  }
+
+  /** The debugger stopped at `line` of `file`: show its function, if it is in this graph. */
+  debugStopped(file: string, line: number): void {
+    const relative = this.relative(file);
+    output.appendLine(
+      relative
+        ? `debugger stopped at ${relative}:${line}, shown in the brain`
+        : `debugger stopped at ${file}:${line}, outside this graph (${this.root ?? "not analyzed yet"})`,
+    );
+    this.post({ type: "debugStopped", at: relative ? { file: relative, line } : undefined });
+  }
+
   covers(file: string): boolean {
     const relative = path.relative(this.target, file);
     return !this.target.endsWith(".py") && relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
@@ -313,6 +548,7 @@ class GraphPanel {
     if (message.type === "ready") {
       this.ready = true;
       this.post({ type: "liveState", state: live.current });
+      this.post({ type: "debuggerNotice", show: debuggerNotice });
       this.analyze();
     } else if (message.type === "refresh") {
       this.analyze();
@@ -320,19 +556,16 @@ class GraphPanel {
       void runAgain(this.context, this.target);
     } else if (message.type === "runLiveWith") {
       void pickRun(this.context);
+    } else if (message.type === "installDebugger") {
+      void installPythonDebugger();
     } else if (message.type === "stopLive") {
-      void live.stop();
-    } else if (message.type === "pauseLive") {
-      live.pause(message.paused);
-    } else if (message.type === "step") {
-      step(message.mode);
+      void live.stop(pythonDebugSession());
+    } else if (message.type === "addBreakpoint" && this.root) {
+      addBreakpoint(path.resolve(this.root, message.file), message.line);
+    } else if (message.type === "removeBreakpoints" && this.root) {
+      removeBreakpoints(path.resolve(this.root, message.file), message.lines);
     } else if (message.type === "reveal" && this.root) {
-      const position = new vscode.Position(message.line - 1, message.col);
-      void vscode.window.showTextDocument(vscode.Uri.file(path.resolve(this.root, message.file)), {
-        viewColumn: vscode.ViewColumn.One,
-        preserveFocus: true,
-        selection: new vscode.Range(position, position),
-      });
+      openSource(this.root, message.file, message.line, message.col, true);
     }
   }
 
@@ -342,13 +575,18 @@ class GraphPanel {
     }
     this.running?.kill();
     this.post({ type: "loading", target: path.basename(this.target) });
+    map.loading(path.basename(this.target));
     this.running = runAnalyzer(this.context, this.target, (result) => {
       this.running = undefined;
       if ("error" in result) {
         this.post({ type: "error", message: result.error });
+        map.setGraph(undefined);
+        map.failed();
       } else {
         this.root = result.graph.root;
         this.post({ type: "graph", target: this.target, graph: result.graph, warnings: result.warnings });
+        map.setGraph(result.graph, path.basename(this.target));
+        this.postBreakpoints();
       }
     });
   }
@@ -397,15 +635,24 @@ function runAnalyzer(context: vscode.ExtensionContext, target: string, done: (re
   );
 }
 
-/** Folder holding the `luciole` package: python/ in a packaged extension, ../src in this repo. */
+/**
+ * Folder holding the `luciole` package: python/ in a packaged extension, ../src in this repo. The
+ * development window (F5) always uses ../src: a python/ left by packaging may be out of date.
+ */
 function analyzerDir(context: vscode.ExtensionContext): string | undefined {
-  return [path.join(context.extensionPath, "python"), path.join(context.extensionPath, "..", "src")].find((dir) =>
-    fs.existsSync(path.join(dir, "luciole", "analyzer.py")),
-  );
+  const packaged = path.join(context.extensionPath, "python");
+  const source = path.join(context.extensionPath, "..", "src");
+  const order = context.extensionMode === vscode.ExtensionMode.Development ? [source, packaged] : [packaged, source];
+  return order.find((dir) => fs.existsSync(path.join(dir, "luciole", "analyzer.py")));
 }
 
 /** The configured interpreter, else the workspace's virtual environment, else python3. */
 function pythonPath(target: string): string {
+  return configuredPython(target) ?? (process.platform === "win32" ? "python" : "python3");
+}
+
+/** The configured interpreter, else the workspace's virtual environment; undefined when neither is there. */
+function configuredPython(target: string): string | undefined {
   const configured = vscode.workspace.getConfiguration("luciole").get<string>("pythonPath");
   if (configured) {
     return configured;
@@ -418,5 +665,5 @@ function pythonPath(target: string): string {
       return candidate;
     }
   }
-  return windows ? "python" : "python3";
+  return undefined;
 }

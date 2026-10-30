@@ -1,59 +1,187 @@
 /**
- * Live mode: runs a script under `luciole run` in a VS Code terminal (so its output and input
- * stay usable), and receives the recorder's events on a local socket. The same socket carries
- * commands back to the recorder: pause, resume, and expand a value of the paused program.
+ * Live mode: this window as a viewer of the Luciole engine, which every recording Python process
+ * connects to. Run Live starts the program under VS Code's Python debugger with the auto-start
+ * variables, so pausing, stepping, breakpoints and variables are the debugger's and the recorder
+ * lights up the brain; without the Python debugger, it runs under `luciole run` in a VS Code
+ * terminal (lighting only). With auto-start on, any Python program started in a terminal connects
+ * by itself, and so do the children of any of them. The engine passes on each process's frames,
+ * numbered. Only processes of this window's folders are shown.
  */
 
 import * as net from "net";
 import * as path from "path";
 import * as vscode from "vscode";
-import type { LiveFrame, LiveState, PausedThread, RecorderReply, StepMode, Variable } from "./messages";
-import type { ResolvedRun } from "./runs";
+import { PROTOCOL, ensureEngine, parseEngineLine, viewerRoots } from "./engine";
+import type { LiveFrame, LiveState } from "./messages";
+import { ProcessInfo, Processes, processLabel } from "./processes";
+import { ProcessList, RunningProcess } from "./running";
+import type { PythonDebugConfiguration, ResolvedRun } from "./runs";
 
 export interface LiveListener {
   frame(frame: LiveFrame): void;
   state(state: LiveState): void;
-  /** A thread stopped after a pause; all of them are resumed together. */
-  paused(thread: PausedThread): void;
+  /** A process ran project code for the first time. */
+  started(label: string): void;
 }
 
-const IDLE: LiveState = { running: false, paused: false, held: 0, stepping: false, stopping: false };
+export interface EngineOptions {
+  python: () => string;
+  analyzerDir: () => string | undefined;
+  version: string;
+}
+
+const IDLE: LiveState = { running: false, stopping: false, debugged: false };
+
+/** What the engine sends: its handshake, processes coming and going, and their messages. */
+type EngineMessage = LiveFrame & {
+  welcome?: { protocol: number; version: string };
+  refused?: string;
+  process?: ProcessInfo & { id: number; root?: string };
+  exit?: number;
+  from?: number;
+};
+
+/** The debug session of a Run Live: the marker in its configuration tells it from others. */
+function isLucioleSession(session: vscode.DebugSession): boolean {
+  return session.configuration.__luciole === true && !session.parentSession;
+}
 
 export class LiveSession implements vscode.Disposable {
-  private port: Promise<number> | undefined;
-  private server: net.Server | undefined;
+  private engine: Promise<{ port: number; socket: net.Socket }> | undefined;
   private terminal: vscode.Terminal | undefined;
-  private socket: net.Socket | undefined;
+  /** A terminal Run Live's process, from its start until it connects (or its terminal closes). */
+  private launching: { pid: Promise<number | undefined> } | undefined;
+  /** A debugger Run Live, from the call that starts it until its session ends. */
+  private debugRun: { session?: vscode.DebugSession } | undefined;
+  private readonly processes = new Processes<number>();
+  /** What the Running view lists: processes lit up now, and the last ones that exited. */
+  readonly running = new ProcessList();
+  private readonly changed = new vscode.EventEmitter<void>();
+  readonly onDidChangeProcesses = this.changed.event;
+  /** Processes of debug sessions, by pid (debugpy's "process" event): the debug toolbar stops them. */
+  private readonly debuggedPids = new Map<number, vscode.DebugSession>();
+  /** Processes sent SIGINT from the Running view: the next Stop kills them. */
+  private readonly interrupted = new Set<number>();
   private state: LiveState = IDLE;
-  /** Pending "expand" requests, by ref. */
-  private readonly expanding = new Map<number, (vars: Variable[]) => void>();
-  private readonly subscription: vscode.Disposable;
+  private readonly subscriptions: vscode.Disposable[];
+  private disposed = false;
 
   constructor(
     private readonly listener: LiveListener,
     private readonly log: vscode.OutputChannel,
+    private readonly options: EngineOptions,
   ) {
-    this.subscription = vscode.window.onDidCloseTerminal((terminal) => {
-      if (terminal === this.terminal) {
-        this.terminal = undefined;
-        this.finish();
-      }
-    });
+    this.subscriptions = [
+      vscode.window.onDidCloseTerminal((terminal) => {
+        if (terminal === this.terminal) {
+          this.terminal = undefined;
+          this.launching = undefined;
+          this.update();
+        }
+      }),
+      vscode.debug.onDidStartDebugSession((session) => {
+        if (this.debugRun && !this.debugRun.session && isLucioleSession(session)) {
+          this.debugRun.session = session;
+        }
+      }),
+      vscode.debug.onDidTerminateDebugSession((session) => {
+        for (const [pid, debugged] of this.debuggedPids) {
+          if (debugged === session) {
+            this.debuggedPids.delete(pid);
+          }
+        }
+        if (session === this.debugRun?.session) {
+          this.debugRun = undefined;
+          this.update();
+        }
+      }),
+      vscode.workspace.onDidChangeWorkspaceFolders(() => this.resubscribe()),
+    ];
   }
 
   get current(): LiveState {
     return this.state;
   }
 
-  /** Starts `run` in a fresh terminal, stopping the previous run if it is still going. */
+  /** Port of the engine this window watches; finds or starts the engine and subscribes on the first call. */
+  async connect(): Promise<number> {
+    if (!this.engine) {
+      this.engine = this.subscribe();
+      this.engine.catch(() => (this.engine = undefined)); // try again next time
+    }
+    return (await this.engine).port;
+  }
+
+  private async subscribe(): Promise<{ port: number; socket: net.Socket }> {
+    const dir = this.options.analyzerDir();
+    if (!dir) {
+      throw new Error("the analyzer is missing from the extension");
+    }
+    const port = await ensureEngine(this.options.python(), dir, (line) => this.log.appendLine(line));
+    const socket = await new Promise<net.Socket>((resolve, reject) => {
+      const socket: net.Socket = net.connect(port, "127.0.0.1", () => resolve(socket));
+      socket.on("error", reject);
+    });
+    const roots = viewerRoots((vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath));
+    socket.write(JSON.stringify({ hello: { role: "viewer", protocol: PROTOCOL, version: this.options.version, name: "vscode", roots } }) + "\n");
+    this.read(socket);
+    this.log.appendLine(`watching the Luciole engine on port ${port}`);
+    return { port, socket };
+  }
+
+  /**
+   * Folders were added to or removed from the workspace: the engine takes a viewer's roots only in
+   * its hello, so subscribe again with the new ones. The engine announces its processes to the new
+   * subscription, and their next frames light the view up again.
+   */
+  private resubscribe(): void {
+    const socket = this.subscribed;
+    if (!socket) {
+      return; // not subscribed (yet): the next subscription sends the current folders
+    }
+    this.log.appendLine("workspace folders changed; subscribing to the Luciole engine again");
+    this.subscribed = undefined;
+    this.engine = undefined;
+    socket.destroy();
+    this.forgetProcesses();
+    void this.connect().catch((error) => this.log.appendLine(`${error}`));
+  }
+
+  /**
+   * Starts `config` under VS Code's Python debugger, once the engine runs (the program's
+   * auto-start looks for it as it starts), ending the previous Run Live first.
+   */
+  async debug(config: PythonDebugConfiguration, folder: vscode.WorkspaceFolder | undefined): Promise<void> {
+    try {
+      await this.connect();
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Luciole: ${error instanceof Error ? error.message : error}`);
+      return;
+    }
+    await this.endPrevious();
+    const run: { session?: vscode.DebugSession } = {};
+    this.debugRun = run;
+    this.setState({ ...IDLE, running: true, debugged: true });
+    this.log.appendLine(`debugging ${config.module ? `-m ${config.module}` : config.program} ${config.args.join(" ")}`.trimEnd());
+    const started = await vscode.debug.startDebugging(folder, config);
+    if (!started && this.debugRun === run) {
+      this.log.appendLine("the Python debugger did not start");
+      this.debugRun = undefined;
+      this.update();
+    }
+  }
+
+  /** Starts `run` under `luciole run` in a fresh terminal, ending the previous Run Live first. */
   async run(run: ResolvedRun, root: string, python: string, analyzerDir: string): Promise<void> {
-    const port = await this.listen();
-    // The previous run's connection closes when its terminal goes: that must not end this run.
-    this.socket?.removeAllListeners();
-    this.socket?.destroy();
-    this.socket = undefined;
-    this.terminal?.dispose();
-    const args = ["-m", "luciole", "run", "--root", root, ...run.target];
+    let port: number;
+    try {
+      port = await this.connect();
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Luciole: ${error instanceof Error ? error.message : error}`);
+      return;
+    }
+    await this.endPrevious();
+    const args = ["-m", "luciole", "run", "--root", root, "--port", String(port), ...run.target];
     // Python is the terminal's process, with no shell: other extensions (venv auto-activation)
     // type into new shells, and their Ctrl+C would kill the run.
     this.terminal = vscode.window.createTerminal({
@@ -63,127 +191,122 @@ export class LiveSession implements vscode.Disposable {
       shellArgs: args,
       env: {
         ...run.env,
-        LUCIOLE_LIVE_PORT: String(port),
         PYTHONPATH: [analyzerDir, run.env.PYTHONPATH ?? process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
       },
     });
+    this.launching = { pid: Promise.resolve(this.terminal.processId) };
     this.terminal.show(true);
     this.log.appendLine(`$ ${shellCommand([python, ...args])}`);
     this.setState({ ...IDLE, running: true });
   }
 
-  /**
-   * Puts the run on hold, or resumes it. Each thread stops at its next line of project code and
-   * sends its variables; a thread busy in library or C code (a sleep, a long torch call) stops
-   * when it gets back to project code.
-   */
-  pause(paused: boolean): void {
-    if (paused === this.state.paused || !this.state.running || this.state.stopping) {
-      return;
+  /** Ends the previous Run Live: its debug session, or its terminal (its process exits, and leaves the engine with it). */
+  private async endPrevious(): Promise<void> {
+    const session = this.debugRun?.session;
+    this.debugRun = undefined;
+    if (session) {
+      await vscode.debug.stopDebugging(session);
     }
-    if (!this.command({ cmd: paused ? "pause" : "resume" })) {
-      void vscode.window.showWarningMessage("Luciole: the program is not connected to the view yet.");
-      return;
-    }
-    this.resolveExpanding();
-    this.setState({ ...this.state, paused, held: 0, stepping: false });
+    this.terminal?.dispose();
+    this.terminal = undefined;
+    this.launching = undefined;
   }
 
   /**
-   * Runs the stopped `thread` to its next line ("into"), its next line in the same function
-   * ("over": calls on the way run without stopping), or its caller's next line ("out"), then
-   * pauses everything again. The other threads run meanwhile, as in VS Code's Python debugger:
-   * keeping them stopped would hang a step over a `join()` or a queue read.
+   * Stops what runs. A debug session (Run Live's, else the Python one being debugged) is stopped
+   * by the debugger. Otherwise the first call sends SIGINT, like Ctrl+C in the terminal: the
+   * program gets a KeyboardInterrupt, its `finally` blocks run and the traceback shows where it
+   * stopped. A program can survive that (it catches the interrupt, or non-daemon threads keep it
+   * alive), so the next call kills it.
    */
-  step(thread: number, mode: StepMode): void {
-    if (!this.state.paused || !this.state.held || this.state.stepping) {
+  async stop(session?: vscode.DebugSession): Promise<void> {
+    const debugged = this.debugRun?.session ?? session;
+    if (debugged) {
+      this.setState({ ...this.state, stopping: true });
+      await vscode.debug.stopDebugging(debugged);
       return;
     }
-    if (this.command({ cmd: "step", thread, mode })) {
-      this.resolveExpanding();
-      this.setState({ ...this.state, held: 0, stepping: true });
+    const pids = new Set(this.processes.active.map((id) => this.processes.info(id)?.pid));
+    pids.add(await this.launching?.pid);
+    pids.delete(undefined);
+    const signal = this.state.stopping ? "SIGKILL" : "SIGINT";
+    let sent = false;
+    for (const pid of pids) {
+      sent = this.signal(pid!, signal) || sent;
+    }
+    if (sent) {
+      this.setState({ ...this.state, stopping: true });
     }
   }
 
-  /** Children of a value of the paused program (items of a container, attributes of an object). */
-  expand(ref: number): Promise<Variable[]> {
-    return new Promise((resolve) => {
-      if (!this.state.paused || !this.command({ cmd: "expand", ref })) {
-        resolve([]);
-        return;
-      }
-      this.expanding.set(ref, resolve);
-    });
+  /** The debug session `session` runs the process `pid`. */
+  debuggedProcess(session: vscode.DebugSession, pid: number): void {
+    this.debuggedPids.set(pid, session);
+    this.changed.fire();
   }
 
   /**
-   * Stops the run. The first call sends SIGINT, like Ctrl+C in the terminal: the program gets a
-   * KeyboardInterrupt, its `finally` blocks run and the traceback shows where it stopped. A program
-   * can survive that (it catches the interrupt, or non-daemon threads keep it alive), so the next
-   * call kills it.
+   * True when `process` runs in one of VS Code's debug sessions (a Run Live, or the user's own):
+   * the debug toolbar stops it. A program started under debugpy outside VS Code keeps its Stop.
    */
-  async stop(): Promise<void> {
-    if (this.state.paused) {
-      this.pause(false); // paused threads would keep the process alive
+  isDebugged(process: RunningProcess): boolean {
+    return this.debuggedPids.has(process.info.pid);
+  }
+
+  /** Stops one process of the Running view: SIGINT (like Ctrl+C), then SIGKILL if asked again. */
+  stopProcess(id: number): void {
+    const pid = this.running.get(id)?.info.pid;
+    if (pid === undefined) {
+      return;
     }
-    if (await this.signal(this.state.stopping ? "SIGKILL" : "SIGINT")) {
-      this.setState({ ...this.state, paused: false, held: 0, stepping: false, stopping: true });
+    const signal = this.interrupted.has(id) ? "SIGKILL" : "SIGINT";
+    if (this.signal(pid, signal) && !this.interrupted.has(id)) {
+      this.interrupted.add(id);
+      this.changed.fire(); // it reads "stopping" now
     }
   }
 
-  private command(command: object): boolean {
-    if (!this.socket || this.socket.destroyed) {
-      return false;
-    }
-    this.socket.write(JSON.stringify(command) + "\n");
-    return true;
+  /** True when `process` was sent SIGINT from the Running view and has not exited yet. */
+  isStopping(process: RunningProcess): boolean {
+    return this.interrupted.has(process.id);
   }
 
-  private resolveExpanding(): void {
-    for (const resolve of this.expanding.values()) {
-      resolve([]);
+  clearExited(): void {
+    if (this.running.clearExited()) {
+      this.changed.fire();
     }
-    this.expanding.clear();
   }
 
-  /** Sends `signal` to the run's process; false when there is no run or it failed. */
-  private async signal(signal: NodeJS.Signals): Promise<boolean> {
-    const pid = this.state.running ? await this.terminal?.processId : undefined;
-    if (!pid) {
-      return false;
-    }
-    // Python is the terminal's process (no shell in between), so this pid is the program's.
+  /** The connection to the engine, once subscribed. */
+  private subscribed: net.Socket | undefined;
+
+  private signal(pid: number, signal: NodeJS.Signals): boolean {
+    // Run Live's Python is the terminal's process (no shell in between), so this pid is the program's.
     try {
       process.kill(pid, signal);
-      this.log.appendLine(`sent ${signal} to the live run (pid ${pid})`);
+      this.log.appendLine(`sent ${signal} to pid ${pid}`);
       return true;
     } catch (error) {
-      this.log.appendLine(`could not send ${signal} to the live run (pid ${pid}): ${error}`);
+      this.log.appendLine(`could not send ${signal} to pid ${pid}: ${error}`);
       return false;
     }
   }
 
   dispose(): void {
-    this.subscription.dispose();
-    this.server?.close();
+    this.disposed = true;
+    this.subscriptions.forEach((subscription) => subscription.dispose());
+    this.changed.dispose();
+    this.subscribed?.destroy();
     this.terminal?.dispose();
   }
 
-  private listen(): Promise<number> {
-    if (!this.port) {
-      this.port = new Promise((resolve, reject) => {
-        this.server = net.createServer((socket) => this.accept(socket));
-        this.server.on("error", reject);
-        this.server.listen(0, "127.0.0.1", () => resolve((this.server!.address() as net.AddressInfo).port));
-      });
-    }
-    return this.port;
-  }
-
-  /** The run is over: its process exited, or its terminal was closed. */
-  private finish(): void {
-    if (this.state.running) {
-      this.resolveExpanding();
+  /** Running while Run Live starts or its debug session lasts, or while a connected process runs project code. */
+  private update(): void {
+    const running = this.launching !== undefined || this.debugRun !== undefined || this.processes.active.length > 0;
+    if (running && !this.state.running) {
+      // A program started by the user's own debug session, with auto-start on, is under the debugger too.
+      this.setState({ ...IDLE, running: true, debugged: this.debugRun !== undefined || vscode.debug.activeDebugSession !== undefined });
+    } else if (!running && this.state.running) {
       this.listener.frame({ done: true });
       this.setState(IDLE);
     }
@@ -192,44 +315,130 @@ export class LiveSession implements vscode.Disposable {
   private setState(state: LiveState): void {
     this.state = state;
     void vscode.commands.executeCommand("setContext", "luciole.liveRunning", state.running);
-    void vscode.commands.executeCommand("setContext", "luciole.livePaused", state.paused);
     this.listener.state(state);
   }
 
-  private receive(message: LiveFrame & RecorderReply): void {
-    if (message.paused) {
-      if (this.state.paused) {
-        this.setState({ ...this.state, held: this.state.held + 1, stepping: false });
-        this.listener.paused(message.paused);
+  private async receive(message: EngineMessage): Promise<void> {
+    if (message.welcome) {
+      return;
+    }
+    if (message.refused) {
+      this.log.appendLine(`the Luciole engine refused this window: ${message.refused}`);
+      void vscode.window.showErrorMessage(`Luciole: the engine refused this window: ${message.refused}`);
+      return;
+    }
+    if (message.process) {
+      const { id, ...info } = message.process;
+      this.processes.add(id);
+      this.processes.identify(id, info);
+      this.log.appendLine(`connected: ${info.argv.join(" ")} (pid ${info.pid})`);
+      if (this.launching && info.pid === (await this.launching.pid)) {
+        this.launching = undefined; // Run Live's process: running until it exits, project code or not
+        this.processes.activate(id);
+        this.show(id);
+        this.update();
       }
-    } else if (message.children) {
-      this.expanding.get(message.children.ref)?.(message.children.vars);
-      this.expanding.delete(message.children.ref);
-    } else {
-      this.listener.frame(message);
+      return;
+    }
+    if (message.exit !== undefined) {
+      this.processes.remove(message.exit);
+      this.interrupted.delete(message.exit);
+      if (this.running.exit(message.exit)) {
+        this.changed.fire();
+      }
+      this.update();
+      this.showRemaining();
+      return;
+    }
+    const id = message.from;
+    if (id === undefined) {
+      return;
+    }
+    if (message.t === undefined && !message.done) {
+      return; // a reply to another engine client's command (paused, children): not for this view
+    }
+    const { t, stacks, calls, links, spawns, waiting, done } = message;
+    const wasActive = this.processes.isActive(id);
+    const frame = this.processes.merge(id, { t, stacks, calls, links, spawns, waiting, done });
+    if (frame) {
+      if (!wasActive) {
+        this.show(id);
+        this.listener.started(processLabel(this.processes.info(id)));
+        this.update();
+      }
+      this.listener.frame(frame);
+    } else if (done) {
+      this.showRemaining();
     }
   }
 
-  /** One connection per run; one JSON object per line. */
-  private accept(socket: net.Socket): void {
-    this.socket = socket;
+  /** A process left the picture while others still run: show theirs now, not at their next frame. */
+  private showRemaining(): void {
+    const frame = this.processes.snapshot();
+    if (frame && this.state.running) {
+      this.listener.frame(frame);
+    }
+  }
+
+  /** `id` lit up: list it in the Running view. */
+  private show(id: number): void {
+    const info = this.processes.info(id);
+    if (info && this.running.start(id, info)) {
+      this.changed.fire();
+    }
+  }
+
+  /** No engine to hear from: no process runs as far as this window knows. */
+  private forgetProcesses(): void {
+    for (const id of this.processes.ids) {
+      this.processes.remove(id);
+    }
+    this.interrupted.clear();
+    if (this.running.exitAll()) {
+      this.changed.fire();
+    }
+    this.update();
+  }
+
+  /** The engine's messages, one JSON object per line, handled in order. */
+  private read(socket: net.Socket): void {
+    this.subscribed = socket;
     socket.setEncoding("utf8");
     let buffer = "";
+    // In order, though identifying Run Live's process waits for its terminal's pid.
+    let handled = Promise.resolve();
     socket.on("data", (chunk: string) => {
       buffer += chunk;
       for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
-        try {
-          this.receive(JSON.parse(line) as LiveFrame & RecorderReply);
-        } catch {
-          this.log.appendLine(`ignored a malformed live event: ${line.slice(0, 200)}`);
+        const parsed = parseEngineLine(line);
+        if (!parsed || parsed.recovered) {
+          this.log.appendLine(`${parsed ? "kept the end of" : "ignored"} a malformed live event: ${line.slice(0, 200)}`);
         }
+        if (!parsed) {
+          continue;
+        }
+        const message = parsed.message as EngineMessage;
+        handled = handled.then(() => this.receive(message)).catch((error) => this.log.appendLine(`live event failed: ${error}`));
       }
     });
-    // The recorder sends {"done": true} when the program's main code ends, but threads can keep
-    // the process alive after that: the run is over when the process exits and the socket closes.
-    socket.on("close", () => this.finish());
+    // The engine went away (it crashed, or was killed): forget its processes, find or start an
+    // engine again.
+    socket.on("close", () => {
+      void handled.then(() => {
+        if (this.subscribed !== socket) {
+          return;
+        }
+        this.subscribed = undefined;
+        this.engine = undefined;
+        this.forgetProcesses();
+        if (!this.disposed) {
+          this.log.appendLine("lost the Luciole engine; reconnecting");
+          setTimeout(() => void this.connect().catch((error) => this.log.appendLine(`${error}`)), 2000);
+        }
+      });
+    });
     socket.on("error", () => undefined);
   }
 }

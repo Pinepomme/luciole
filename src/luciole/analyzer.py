@@ -1,67 +1,26 @@
 """Static analysis: turn Python source into a Luciole graph (see docs/graph-format.md).
 
 Pass 1 (`Analyzer.collect*`) creates every module, class, function and variable node and
-records what each name is bound to in each scope. Pass 2 (`FlowVisitor`) walks the code
-again, resolves names against those bindings, and records the edges.
+records what each name is bound to in each scope. Pass 2 (`FlowVisitor`, in flows.py) walks the
+code again, resolves names against those bindings, and records the edges. The scopes and AST
+helpers both passes share are in scopes.py.
 """
 
 from __future__ import annotations
 
 import ast
+import fnmatch
 import logging
-from dataclasses import dataclass, field
+import os
 from pathlib import Path
 
 from luciole import __version__
+from luciole.flows import FlowVisitor
+from luciole.scopes import BUILTIN_METHOD_NAMES, Binding, FUNCTION_DEFS, Import, MAX_OVERRIDES, PROPERTY_DECORATORS, Param, Scope, VARIABLE_ROLE, body_line, is_overload, is_super, loc, pos, scope_walk
 
 log = logging.getLogger(__name__)
 
 SKIP_DIRS = {"__pycache__", "node_modules", "site-packages", "venv"}
-FUNCTION_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef)
-COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
-VARIABLE_ROLE = {"module": "global", "class": "class_attr", "function": "local"}
-
-
-@dataclass(frozen=True)
-class Import:
-    """A name bound by an import, resolved lazily once every module is known."""
-
-    module: str
-    name: str | None = None
-
-
-# What a name is bound to in a scope: a node id, an import, or None for a name that is
-# bound but not tracked (an import from outside the project, for instance).
-Binding = str | Import | None
-
-
-@dataclass
-class Param:
-    name: str
-    var_id: str
-    kind: str  # "posonly", "positional", "vararg", "kwonly" or "kwarg"
-    node: ast.arg
-
-
-@dataclass
-class Scope:
-    node_id: str
-    kind: str  # "module", "class" or "function"
-    tree: ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef
-    parent: Scope | None
-    file: str
-    bindings: dict[str, Binding] = field(default_factory=dict)
-    global_names: set[str] = field(default_factory=set)
-    nonlocal_names: set[str] = field(default_factory=set)
-    children: list[Scope] = field(default_factory=list)
-    # Modules only: the package that relative imports start from.
-    package: str = ""
-    # Classes only: `self.<name>` attributes assigned in methods.
-    attrs: dict[str, str] = field(default_factory=dict)
-    # Functions only.
-    params: list[Param] = field(default_factory=list)
-    return_var: str | None = None
-    method_kind: str | None = None  # "method", "static" or "class"; None outside classes
 
 
 def build_graph(path: Path) -> dict:
@@ -69,18 +28,45 @@ def build_graph(path: Path) -> dict:
     if path.is_file():
         root, files = path.parent, [path]
     else:
-        root = path
-        files = sorted(
-            p
-            for p in path.rglob("*.py")
-            if not any(part.startswith(".") or part in SKIP_DIRS for part in p.relative_to(root).parent.parts)
-        )
+        root, files = path, sorted(python_files(path))
     analyzer = Analyzer(root)
     modules = [analyzer.collect_module(f) for f in files]
     for scope in modules:
         if scope is not None:
             FlowVisitor(analyzer, scope, scope.node_id).run(scope.tree.body)
     return analyzer.to_json()
+
+
+def python_files(root: Path):
+    """The .py files under `root`, in a stable order. Hidden directories, `SKIP_DIRS` and the
+    directories the top-level .gitignore lists (see `gitignored`) are left out, unvisited."""
+    ignored = gitignored(root)
+    for directory, subdirectories, files in os.walk(root):
+        top = Path(directory) == root
+        subdirectories[:] = sorted(d for d in subdirectories if not d.startswith(".") and d not in SKIP_DIRS and not ignored(d, top))
+        for name in sorted(files):
+            if name.endswith(".py"):
+                yield Path(directory, name)
+
+
+def gitignored(root: Path):
+    """A test for the directories `root`'s .gitignore lists, called with a directory's name and
+    whether it is at the top. Only plain patterns are used (`runs/`, `/data`, `output`, `*.egg-info`);
+    paths and `**` are not, and a `!` pattern, which may bring files back, disables it all."""
+    anywhere, at_top = [], []
+    try:
+        lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        lines = []
+    for line in lines:
+        line = line.strip()
+        if line.startswith("!"):
+            return lambda name, top: False
+        pattern = line.strip("/")
+        if not pattern or line.startswith("#") or "/" in pattern or "**" in pattern or "\\" in pattern:
+            continue
+        (at_top if line.startswith("/") else anywhere).append(pattern)
+    return lambda name, top: any(fnmatch.fnmatchcase(name, p) for p in anywhere) or (top and any(fnmatch.fnmatchcase(name, p) for p in at_top))
 
 
 def module_name(file: Path) -> str:
@@ -94,38 +80,6 @@ def module_name(file: Path) -> str:
     return ".".join(parts)
 
 
-def scope_walk(nodes: list[ast.AST]):
-    """Yield the nodes evaluated directly in one scope, in source order.
-
-    Nested function and class definitions are yielded but not entered. Lambdas and
-    comprehensions are skipped: their variables are not tracked.
-    """
-    stack = list(reversed(nodes))
-    while stack:
-        node = stack.pop()
-        if isinstance(node, (ast.Lambda, *COMPREHENSIONS)):
-            continue
-        yield node
-        if not isinstance(node, (*FUNCTION_DEFS, ast.ClassDef)):
-            stack.extend(reversed(list(ast.iter_child_nodes(node))))
-
-
-def is_overload(node: ast.AST) -> bool:
-    """`@typing.overload` stubs only exist for type checkers; they are left out of the graph."""
-    return isinstance(node, FUNCTION_DEFS) and any(
-        (isinstance(d, ast.Name) and d.id == "overload") or (isinstance(d, ast.Attribute) and d.attr == "overload")
-        for d in node.decorator_list
-    )
-
-
-def loc(node: ast.AST) -> dict:
-    return {"line": node.lineno, "col": node.col_offset, "end_line": node.end_lineno, "end_col": node.end_col_offset}
-
-
-def pos(node: ast.AST) -> tuple[int, int]:
-    return (node.lineno, node.col_offset)
-
-
 class Analyzer:
     def __init__(self, root: Path):
         self.root = root
@@ -137,6 +91,13 @@ class Analyzer:
         self.var_types: dict[str, str] = {}  # variable id -> id of the class of its value
         self.self_vars: set[str] = set()
         self.bases: dict[str, list[str]] = {}
+        self.subclasses: dict[str, list[str]] | None = None  # class id -> direct subclasses, built on first use
+        self.return_types: dict[str, str | None] = {}  # function id -> class of what it returns
+        self.aliases: dict[str, str] = {}  # variable id -> function it holds (`parse = staticmethod(parse_header)`)
+        self.method_names: dict[str, list[str]] | None = None  # method name -> functions defined in classes
+        self.by_name: set[tuple[str, str, str]] = set()  # edges resolved by method name alone
+        self.callbacks: set[tuple[str, str, str]] = set()  # functions passed to be called later
+        self.module_bindings: dict[tuple[str, str], str | None] = {}  # (module id, name) -> resolved, see module_binding
 
     # Nodes and edges
 
@@ -151,10 +112,29 @@ class Analyzer:
     def add_variable(self, scope: Scope, name: str, role: str, node: ast.AST, **extra) -> str:
         return self.add_node("variable", name, scope, scope.file, loc(node), f"{scope.node_id}#{name}", role=role, **extra)
 
-    def add_edge(self, kind: str, source: str, target: str, site: tuple[int, int]) -> None:
-        sites = self.edges.setdefault((kind, source, target), [])
+    def add_edge(self, kind: str, source: str, target: str, site: tuple[int, int], by_name: bool = False, callback: bool = False) -> None:
+        """Record an edge. `by_name`: a call resolved by method name alone; `callback`: a function
+        passed to be called later. Finding the same edge as a plain call makes it a plain call."""
+        key = (kind, source, target)
+        if not by_name and not callback:
+            self.by_name.discard(key)
+            self.callbacks.discard(key)
+        elif key not in self.edges:
+            (self.by_name if by_name else self.callbacks).add(key)
+        sites = self.edges.setdefault(key, [])
         if site not in sites:
             sites.append(site)
+
+    def only_method_named(self, name: str) -> str | None:
+        """The project's one method called `name`, when there is exactly one and no built-in type
+        has a method of that name: the likely target of `x.name` when `x`'s type is unknown."""
+        if self.method_names is None:
+            self.method_names = {}
+            for scope in self.scopes.values():
+                if scope.kind == "function" and scope.parent is not None and scope.parent.kind == "class":
+                    self.method_names.setdefault(self.nodes[scope.node_id]["name"], []).append(scope.node_id)
+        found = self.method_names.get(name, [])
+        return found[0] if len(found) == 1 and name not in BUILTIN_METHOD_NAMES else None
 
     def is_variable(self, node_id: str | None) -> bool:
         return node_id is not None and self.nodes[node_id]["kind"] == "variable"
@@ -170,7 +150,14 @@ class Analyzer:
             "generator": {"name": "luciole", "version": __version__},
             "nodes": list(self.nodes.values()),
             "edges": [
-                {"kind": kind, "source": source, "target": target, "sites": [{"line": l, "col": c} for l, c in sorted(sites)]}
+                {
+                    "kind": kind,
+                    "source": source,
+                    "target": target,
+                    "sites": [{"line": l, "col": c} for l, c in sorted(sites)],
+                    **({"by_name": True} if (kind, source, target) in self.by_name else {}),
+                    **({"callback": True} if (kind, source, target) in self.callbacks else {}),
+                }
                 for (kind, source, target), sites in self.edges.items()
             ],
         }
@@ -227,6 +214,8 @@ class Analyzer:
                 for alias in node.names:
                     if alias.name != "*":
                         scope.bindings[alias.asname or alias.name] = None if base is None else Import(base, alias.name)
+                    elif base is not None and scope.kind == "module":
+                        scope.star_imports.append(base)
 
     def bind_variable(self, scope: Scope, name: str, node: ast.AST) -> None:
         if name in scope.nonlocal_names:
@@ -245,8 +234,10 @@ class Analyzer:
             extra["is_async"] = True
         if fn.decorator_list:
             extra["decorators"] = [ast.unparse(d) for d in fn.decorator_list]
-        fid = self.add_node("function", fn.name, scope, scope.file, loc(fn), self.child_id(scope, fn.name), **extra)
-        scope.bindings[fn.name] = fid
+        fid = self.add_node("function", fn.name, scope, scope.file, loc(fn), self.child_id(scope, fn.name), body_line=body_line(fn), **extra)
+        accessor = any(isinstance(d, ast.Attribute) and d.attr in ("setter", "deleter") and isinstance(d.value, ast.Name) and d.value.id == fn.name for d in fn.decorator_list)
+        if not (accessor and fn.name in scope.bindings):  # `obj.x` reads the property's getter
+            scope.bindings[fn.name] = fid
         fscope = Scope(fid, "function", fn, scope, scope.file)
         self.scopes[fid] = fscope
         self.def_scopes[fn] = fscope
@@ -326,39 +317,84 @@ class Analyzer:
             scope = scope.parent
         return scope
 
-    def resolve(self, binding: Binding, depth: int = 0) -> str | None:
+    def resolve(self, binding: Binding, seen: set[tuple[str, str]] | None = None) -> str | None:
         if not isinstance(binding, Import):
             return binding
-        if depth > 20:  # import cycle
-            return None
         if binding.name is None:
             module = self.modules.get(binding.module)
             return module.node_id if module else None
         module = self.modules.get(binding.module)
-        if module and binding.name in module.bindings:
-            return self.resolve(module.bindings[binding.name], depth + 1)
+        found = self.module_binding(module, binding.name, seen) if module else None
+        if found:
+            return found
         submodule = self.modules.get(f"{binding.module}.{binding.name}" if binding.module else binding.name)
         return submodule.node_id if submodule else None
 
-    def lookup(self, scope: Scope, name: str, shadowed: list[set[str]] = ()) -> str | None:
-        """Resolve a name read in `scope` (LEGB; class bodies are not visible from methods)."""
+    def module_binding(self, module: Scope, name: str, seen: set[tuple[str, str]] | None = None) -> str | None:
+        """A module's own binding for `name`, else one its `from m import *` lines bring in.
+
+        `seen` holds the (module, name) pairs already being looked up, so import cycles end; the
+        answers of outermost lookups are cached, which keeps star imports between many modules linear.
+        """
+        key = (module.node_id, name)
+        outermost = seen is None
+        if outermost:
+            if key in self.module_bindings:
+                return self.module_bindings[key]
+            seen = set()
+        elif key in seen:  # import cycle
+            return None
+        seen.add(key)
+        found = None
+        if name in module.bindings:
+            found = self.resolve(module.bindings[name], seen)
+        elif not name.startswith("_"):  # star imports leave out _private names
+            for star in module.star_imports:
+                source = self.modules.get(star)
+                found = self.module_binding(source, name, seen) if source else None
+                if found:
+                    break
+        if outermost:
+            self.module_bindings[key] = found
+        return found
+
+    def binding_scope(self, scope: Scope, name: str, shadowed: list[set[str]] = ()) -> Scope | None:
+        """The scope whose binding a name read in `scope` sees (LEGB; class bodies are not visible
+        from methods); the module when only its star imports may bind it."""
         if any(name in names for names in shadowed):
             return None
         current, first = scope, True
         while current is not None:
             if first or current.kind != "class":
                 if name in current.global_names:
-                    return self.resolve(self.module_scope(current).bindings.get(name))
-                if name in current.bindings and name not in current.nonlocal_names:
-                    return self.resolve(current.bindings[name])
+                    return self.module_scope(current)
+                if (name in current.bindings and name not in current.nonlocal_names) or current.parent is None:
+                    return current
             current, first = current.parent, False
         return None
+
+    def lookup(self, scope: Scope, name: str, shadowed: list[set[str]] = ()) -> str | None:
+        """Resolve a name read in `scope`."""
+        found = self.binding_scope(scope, name, shadowed)
+        if found is None:
+            return None
+        return self.module_binding(found, name) if found.kind == "module" else self.resolve(found.bindings[name])
+
+    def is_imported(self, scope: Scope, name: str, shadowed: list[set[str]] = ()) -> bool:
+        """A name read in `scope` is bound by an import (resolved or not)."""
+        found = self.binding_scope(scope, name, shadowed)
+        binding = found.bindings.get(name, False) if found else False
+        return binding is None or isinstance(binding, Import)
 
     def ref(self, scope: Scope, node: ast.expr, shadowed: list[set[str]] = ()) -> str | None:
         """Resolve a name or dotted attribute chain to a node id, without recording edges."""
         if isinstance(node, ast.Name):
             return self.lookup(scope, node.id, shadowed)
         if isinstance(node, ast.Attribute):
+            if is_super(node.value):
+                cls = self.enclosing_class(scope)
+                found = (self.class_member(base, node.attr) for base in self.class_bases(cls)) if cls else ()
+                return next(filter(None, found), None)
             base = self.ref(scope, node.value, shadowed)
             return self.member(base, node.attr) if base else None
         return None
@@ -366,9 +402,9 @@ class Analyzer:
     def member(self, node_id: str, name: str) -> str | None:
         kind = self.kind(node_id)
         if kind == "module":
-            module = self.scopes[node_id]
-            if name in module.bindings:
-                return self.resolve(module.bindings[name])
+            found = self.module_binding(self.scopes[node_id], name)
+            if found:
+                return found
             submodule = self.modules.get(f"{self.nodes[node_id]['name']}.{name}")
             return submodule.node_id if submodule else None
         if kind == "class":
@@ -391,296 +427,94 @@ class Analyzer:
                 return found
         return None
 
+    def is_property(self, node_id: str | None) -> bool:
+        decorators = self.nodes[node_id].get("decorators", []) if self.kind(node_id) == "function" else []
+        return any(d.rpartition(".")[2] in PROPERTY_DECORATORS for d in decorators)
+
+    def enclosing_class(self, scope: Scope) -> str | None:
+        """The class of the method `scope` is (or is nested in), for `super()`."""
+        while scope is not None:
+            if scope.kind == "function" and scope.parent is not None and scope.parent.kind == "class":
+                return scope.parent.node_id
+            scope = scope.parent
+        return None
+
+    def overrides(self, class_id: str, name: str) -> list[str]:
+        """Functions named `name` defined in the subclasses of `class_id`, at any depth: what a
+        call on an instance may run instead, when the instance is of a subclass."""
+        if self.subclasses is None:
+            self.subclasses = {}
+            for cid, scope in self.scopes.items():
+                if scope.kind == "class":
+                    for base in self.class_bases(cid):
+                        self.subclasses.setdefault(base, []).append(cid)
+        found, stack, seen = [], list(self.subclasses.get(class_id, [])), {class_id}
+        while stack and len(found) < MAX_OVERRIDES:
+            cid = stack.pop()
+            if cid in seen:
+                continue
+            seen.add(cid)
+            own = self.resolve(self.scopes[cid].bindings.get(name))
+            if self.kind(own) == "function":
+                found.append(own)
+            stack.extend(self.subclasses.get(cid, []))
+        return found
+
+    def return_type(self, function_id: str, depth: int = 0) -> str | None:
+        """Class of the instances a function returns: from its return annotation, else from its
+        `return` statements (`return Cart(...)`, `return self`, a call to a function of known type)."""
+        if function_id in self.return_types:
+            return self.return_types[function_id]
+        self.return_types[function_id] = None  # recursion guard
+        scope = self.scopes[function_id]
+        found = self.annotation_class(scope.parent, scope.tree.returns) if scope.tree.returns else None
+        if found is None and depth < 10:
+            for node in scope_walk(scope.tree.body):
+                if isinstance(node, ast.Return) and node.value is not None:
+                    found = self.value_class(scope, node.value, depth + 1)
+                    if found:
+                        break
+        self.return_types[function_id] = found
+        return found
+
+    def annotation_class(self, scope: Scope, annotation: ast.expr) -> str | None:
+        """The class an annotation names: `Cart`, `"Cart"`, `Cart | None`, `Optional[Cart]`."""
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            try:
+                annotation = ast.parse(annotation.value, mode="eval").body
+            except SyntaxError:
+                return None
+        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+            return self.annotation_class(scope, annotation.left) or self.annotation_class(scope, annotation.right)
+        if isinstance(annotation, ast.Subscript) and ast.unparse(annotation.value).rpartition(".")[2] == "Optional":
+            return self.annotation_class(scope, annotation.slice)
+        found = self.ref(scope, annotation)
+        return found if self.kind(found) == "class" else None
+
+    def value_class(self, scope: Scope, node: ast.expr, depth: int = 0) -> str | None:
+        """Class of the instance an expression evaluates to, when the code makes it plain."""
+        if isinstance(node, ast.Call):
+            callee = self.ref(scope, node.func)
+            if self.kind(callee) == "class":
+                return callee
+            if self.kind(callee) == "function":
+                return self.return_type(callee, depth)
+            if isinstance(node.func, ast.Attribute):
+                receiver = self.value_class(scope, node.func.value, depth)
+                method = self.class_member(receiver, node.func.attr) if receiver else None
+                return self.return_type(method, depth) if self.kind(method) == "function" else None
+            return None
+        if isinstance(node, (ast.Name, ast.Attribute)):
+            found = self.ref(scope, node)
+            if self.is_variable(found):
+                return self.var_types.get(found)
+            if self.is_property(found):
+                return self.return_type(found, depth)
+        return None
+
     def class_bases(self, class_id: str) -> list[str]:
         if class_id not in self.bases:
             scope = self.scopes[class_id]
             refs = [self.ref(scope.parent, b) for b in scope.tree.bases]
             self.bases[class_id] = [r for r in refs if self.kind(r) == "class"]
         return self.bases[class_id]
-
-
-# A value source: the variable it comes from, and the call site when it is a function's
-# return value (which becomes a `returns` edge instead of `flows_to`).
-Flow = tuple[str, tuple[int, int] | None]
-
-
-class FlowVisitor:
-    """Pass 2: walk the code of one scope and record edges.
-
-    `actor` is the module or function the code runs as. Class bodies run as the
-    enclosing module or function.
-    """
-
-    def __init__(self, analyzer: Analyzer, scope: Scope, actor: str):
-        self.an = analyzer
-        self.scope = scope
-        self.actor = actor
-        self.shadowed: list[set[str]] = []  # names bound by enclosing lambdas and comprehensions
-
-    def run(self, body: list[ast.stmt]) -> None:
-        for stmt in body:
-            self.stmt(stmt)
-
-    def lookup(self, name: str) -> str | None:
-        return self.an.lookup(self.scope, name, self.shadowed)
-
-    def ref(self, node: ast.expr) -> str | None:
-        return self.an.ref(self.scope, node, self.shadowed)
-
-    def read(self, var: str, node: ast.AST) -> None:
-        self.an.add_edge("reads", var, self.actor, pos(node))
-
-    def assign(self, targets: list[tuple[str, ast.AST]], flows: list[Flow]) -> None:
-        for var, node in targets:
-            site = pos(node)
-            self.an.add_edge("writes", self.actor, var, site)
-            for source, call_site in flows:
-                if source == var:
-                    continue
-                if call_site:
-                    self.an.add_edge("returns", source, var, call_site)
-                else:
-                    self.an.add_edge("flows_to", source, var, site)
-
-    # Statements
-
-    def stmt(self, node: ast.stmt) -> None:
-        if is_overload(node):
-            return
-        if isinstance(node, FUNCTION_DEFS):
-            self.function_def(node)
-        elif isinstance(node, ast.ClassDef):
-            self.class_def(node)
-        elif isinstance(node, ast.Assign):
-            flows = self.expr(node.value)
-            for target in node.targets:
-                self.assign_typed(target, node.value, flows)
-        elif isinstance(node, ast.AnnAssign):
-            if node.value:
-                self.assign_typed(node.target, node.value, self.expr(node.value))
-        elif isinstance(node, ast.AugAssign):
-            targets = self.targets(node.target)
-            for var, target in targets:
-                self.read(var, target)
-            self.assign(targets, self.expr(node.value))
-        elif isinstance(node, ast.Return):
-            if node.value and self.scope.return_var:
-                self.assign([(self.scope.return_var, node)], self.expr(node.value))
-            elif node.value:  # `return` outside a function parses but never runs
-                self.expr(node.value)
-        elif isinstance(node, (ast.For, ast.AsyncFor)):
-            self.assign(self.targets(node.target), self.expr(node.iter))
-            self.run(node.body)
-            self.run(node.orelse)
-        elif isinstance(node, (ast.With, ast.AsyncWith)):
-            for item in node.items:
-                flows = self.expr(item.context_expr)
-                if item.optional_vars:
-                    self.assign(self.targets(item.optional_vars), flows)
-            self.run(node.body)
-        elif not isinstance(node, (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal)):
-            self.generic(node)
-
-    def generic(self, node: ast.AST) -> None:
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.stmt):
-                self.stmt(child)
-            elif isinstance(child, ast.expr):
-                self.expr(child)
-            elif isinstance(child, (ast.excepthandler, ast.match_case)):
-                self.generic(child)
-
-    def assign_typed(self, target: ast.expr, value: ast.expr, flows: list[Flow]) -> None:
-        targets = self.targets(target)
-        self.assign(targets, flows)
-        if isinstance(value, ast.Call) and self.an.kind(self.ref(value.func)) == "class":
-            for var, node in targets:
-                if node is target:
-                    self.an.var_types[var] = self.ref(value.func)
-
-    def function_def(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        fscope = self.an.def_scopes[node]
-        self.decorators(node)
-        params = {p.node: p for p in fscope.params}
-        positional = node.args.posonlyargs + node.args.args
-        defaults = list(zip(positional[len(positional) - len(node.args.defaults):], node.args.defaults))
-        defaults += [(a, d) for a, d in zip(node.args.kwonlyargs, node.args.kw_defaults) if d]
-        for arg, default in defaults:
-            var = params[arg].var_id
-            for source, call_site in self.expr(default):
-                if call_site:
-                    self.an.add_edge("returns", source, var, call_site)
-                else:
-                    self.an.add_edge("flows_to", source, var, pos(arg))
-        for param in fscope.params:
-            if param.node.annotation and param.var_id not in self.an.var_types:
-                cls = self.ref(param.node.annotation)
-                if self.an.kind(cls) == "class":
-                    self.an.var_types[param.var_id] = cls
-        FlowVisitor(self.an, fscope, fscope.node_id).run(node.body)
-
-    def class_def(self, node: ast.ClassDef) -> None:
-        self.decorators(node)
-        for base in node.bases:
-            self.expr(base)
-        for keyword in node.keywords:
-            self.expr(keyword.value)
-        FlowVisitor(self.an, self.an.def_scopes[node], self.actor).run(node.body)
-
-    def decorators(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> None:
-        for decorator in node.decorator_list:
-            self.expr(decorator)
-            target = self.ref(decorator)
-            if self.an.kind(target) == "function":
-                self.an.add_edge("calls", self.actor, target, pos(decorator))
-
-    def targets(self, node: ast.expr) -> list[tuple[str, ast.AST]]:
-        """Variables written by an assignment target, each with the node to use as site."""
-        if isinstance(node, (ast.Tuple, ast.List)):
-            return [t for element in node.elts for t in self.targets(element)]
-        if isinstance(node, ast.Starred):
-            return self.targets(node.value)
-        if isinstance(node, (ast.Name, ast.Attribute)):
-            var = self.ref(node)
-            if self.an.is_variable(var):
-                return [(var, node)]
-            return self.mutated(node.value, node) if isinstance(node, ast.Attribute) else []
-        if isinstance(node, ast.Subscript):
-            self.expr(node.slice)
-            return self.mutated(node.value, node)
-        return []
-
-    def mutated(self, node: ast.expr, site: ast.AST) -> list[tuple[str, ast.AST]]:
-        """`a.x = v` or `a[i] = v` with no tracked `x`: count it as a write to `a`."""
-        if isinstance(node, ast.Subscript):
-            self.expr(node.slice)
-            return self.mutated(node.value, site)
-        if isinstance(node, (ast.Name, ast.Attribute)):
-            var = self.ref(node)
-            if self.an.is_variable(var):
-                return [(var, site)]
-            return self.mutated(node.value, site) if isinstance(node, ast.Attribute) else []
-        self.expr(node)
-        return []
-
-    # Expressions
-
-    def expr(self, node: ast.expr) -> list[Flow]:
-        """Record reads and calls in an expression, and return where its value comes from."""
-        if isinstance(node, (ast.Name, ast.Attribute)):
-            target = self.ref(node)
-            if self.an.is_variable(target):
-                self.read(target, node)
-                return [(target, None)]
-            if target or isinstance(node, ast.Name):
-                return []
-            return self.expr(node.value)
-        if isinstance(node, ast.Call):
-            return self.call(node)
-        if isinstance(node, ast.NamedExpr):
-            targets = self.targets(node.target)
-            self.assign(targets, self.expr(node.value))
-            return [(var, None) for var, _ in targets]
-        if isinstance(node, ast.Lambda):
-            for default in node.args.defaults + [d for d in node.args.kw_defaults if d]:
-                self.expr(default)
-            args = node.args
-            names = {a.arg for a in args.posonlyargs + args.args + args.kwonlyargs}
-            names |= {a.arg for a in (args.vararg, args.kwarg) if a}
-            self.shadowed.append(names)
-            self.expr(node.body)
-            self.shadowed.pop()
-            return []
-        if isinstance(node, COMPREHENSIONS):
-            return self.comprehension(node)
-        if isinstance(node, ast.IfExp):
-            self.expr(node.test)
-            return self.expr(node.body) + self.expr(node.orelse)
-        flows = []
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.expr):
-                flows += self.expr(child)
-        return flows
-
-    def comprehension(self, node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp) -> list[Flow]:
-        # The first iterable is evaluated outside the comprehension.
-        flows = self.expr(node.generators[0].iter)
-        self.shadowed.append({n.id for g in node.generators for n in ast.walk(g.target) if isinstance(n, ast.Name)})
-        for index, generator in enumerate(node.generators):
-            if index:
-                flows += self.expr(generator.iter)
-            for condition in generator.ifs:
-                self.expr(condition)
-        elements = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
-        for element in elements:
-            flows += self.expr(element)
-        self.shadowed.pop()
-        return flows
-
-    def call(self, node: ast.Call) -> list[Flow]:
-        site = pos(node)
-        target = self.ref(node.func)
-        kind = self.an.kind(target)
-        offset, receiver = 0, None
-        if kind == "class":
-            init = self.an.class_member(target, "__init__")
-            if self.an.kind(init) != "function":
-                self.an.add_edge("calls", self.actor, target, site)
-                self.unmapped_args(node)
-                return []
-            target, kind, offset = init, "function", 1
-        elif kind == "function":
-            offset, receiver = self.binding(node.func, self.an.scopes[target])
-
-        if kind != "function":
-            # Unresolved call: assume anything that goes in can come out.
-            flows = self.expr(node.func) if kind in (None, "variable") else []
-            return flows + self.unmapped_args(node)
-
-        self.an.add_edge("calls", self.actor, target, site)
-        callee = self.an.scopes[target]
-        if receiver is not None and callee.params:
-            var = self.ref(receiver)
-            flows = [(var, None)] if var in self.an.self_vars else self.expr(receiver)
-            self.pass_value(flows, callee.params[0], receiver)
-
-        positional = [p for p in callee.params if p.kind in ("posonly", "positional")]
-        by_name = {p.name: p for p in callee.params if p.kind in ("positional", "kwonly")}
-        vararg = next((p for p in callee.params if p.kind == "vararg"), None)
-        kwarg = next((p for p in callee.params if p.kind == "kwarg"), None)
-        starred = False
-        for index, arg in enumerate(node.args):
-            starred = starred or isinstance(arg, ast.Starred)
-            if starred:  # positions after *args are unknown
-                param = vararg
-            else:
-                param = positional[offset + index] if offset + index < len(positional) else vararg
-            self.pass_value(self.expr(arg), param, arg)
-        for keyword in node.keywords:
-            param = by_name.get(keyword.arg, kwarg) if keyword.arg else kwarg
-            self.pass_value(self.expr(keyword.value), param, keyword.value)
-        return [(callee.return_var, site)] if callee.return_var else []
-
-    def binding(self, func: ast.expr, callee: Scope) -> tuple[int, ast.expr | None]:
-        """How a call binds the callee's first parameter: (argument offset, receiver expression)."""
-        if callee.method_kind in (None, "static") or not isinstance(func, ast.Attribute):
-            return 0, None
-        if callee.method_kind == "class":
-            return 1, None
-        via_instance = self.an.is_variable(self.ref(func.value))
-        return (1, func.value) if via_instance else (0, None)
-
-    def pass_value(self, flows: list[Flow], param: Param | None, arg: ast.expr) -> None:
-        if param is None:
-            return
-        for source, _ in flows:
-            if source != param.var_id:
-                self.an.add_edge("passes_arg", source, param.var_id, pos(arg))
-
-    def unmapped_args(self, node: ast.Call) -> list[Flow]:
-        flows = []
-        for arg in node.args:
-            flows += self.expr(arg)
-        for keyword in node.keywords:
-            flows += self.expr(keyword.value)
-        return flows

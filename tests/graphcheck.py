@@ -11,7 +11,7 @@ SCHEMA = json.loads((REPO / "schema" / "graph.schema.json").read_text())
 
 # Allowed (source kinds, target kinds) for each edge kind.
 EDGE_ENDPOINTS = {
-    "calls": ({"module", "function"}, {"function", "class"}),
+    "calls": ({"module", "function"}, {"function", "class", "module"}),
     "reads": ({"variable"}, {"module", "function"}),
     "writes": ({"module", "function"}, {"variable"}),
     "flows_to": ({"variable"}, {"variable"}),

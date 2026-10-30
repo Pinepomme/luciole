@@ -17,7 +17,9 @@ JSON line with what happened since the last one, and the current state:
   not simply the caller.
 - `waiting`: project coroutines suspended on an `await` right now, per function.
 The last line is {"done": true}. Node ids follow docs/graph-format.md, so they match the
-static graph.
+static graph. The connection to the engine starts with the recorder's hello (see protocol.py).
+The session that installs the recorder in an interpreter, and its start and stop, are in
+session.py.
 
 The view can pause the program to look at its variables, with JSON lines sent back on the
 socket: {"cmd": "pause"}, {"cmd": "resume"}, {"cmd": "expand", "ref": 7},
@@ -38,24 +40,29 @@ without fake_mode, missing lifted constants).
 from __future__ import annotations
 
 import inspect
-import json
 import itertools
 import logging
 import queue
-import runpy
-import socket
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from luciole import values
 from luciole.analyzer import SKIP_DIRS, module_name
 
+if TYPE_CHECKING:
+    from luciole.tracer import Tracer  # imported when tracing only: sqlite3 costs a few ms
+
 log = logging.getLogger(__name__)
 
 FRAME = 0.05  # seconds between two frames
+# Seconds to wait for the engine's answer to the hello, before the program goes on. The engine
+# answers within a millisecond or so, and a loaded CI machine within tens of them; a port that
+# something else now holds (an engine killed without removing its file) may never answer, and
+# every process started with auto-start on would wait this long.
+ANSWER_TIMEOUT = 0.5
 OWN_PACKAGE = Path(__file__).resolve().parent
 ASYNC_FLAGS = inspect.CO_COROUTINE | inspect.CO_ITERABLE_COROUTINE | inspect.CO_ASYNC_GENERATOR
 CALLER_SEARCH = 40  # frames to look through first for the nearest project caller (asyncio adds ~10)
@@ -64,6 +71,15 @@ MAX_PAUSED_FRAMES = 60
 
 
 STEP_MODES = ("over", "into", "out")
+
+
+def own_thread(target, name: str) -> threading.Thread:
+    """A thread of the recorder's own. Marked the way debugpy marks its threads, so that VS Code's
+    debugger neither lists nor pauses it: the view stays live while the debugger is stopped."""
+    thread = threading.Thread(target=target, name=name, daemon=True)
+    thread.is_pydev_daemon_thread = True
+    thread.pydev_do_not_trace = True
+    return thread
 
 
 class Step:
@@ -98,7 +114,7 @@ class Recorder:
         self.waiting: dict[str, int] = {}
         self.started = time.perf_counter()
         self.thread_stacks: dict[int, list[str]] = {}  # thread ident -> project stack, replaced (never mutated)
-        self.last_state: tuple = ()
+        self.last_state: tuple = ([], {})  # nothing runs yet: no frame until something does
         # Pausing: set from the control thread; each paused thread waits on its own queue.
         self.line_events: Callable[[bool], None] = lambda on: None
         self.pausing = False
@@ -107,6 +123,7 @@ class Recorder:
         self.refs: dict[int, tuple[int, object]] = {}  # ref -> (owning thread ident, value)
         self.next_ref = itertools.count(1)
         self.step: Step | None = None
+        self.tracer: Tracer | None = None  # writes the run to a trace file, when asked to
 
     # Identifying code
 
@@ -150,15 +167,19 @@ class Recorder:
         return not any(part.startswith(".") or part in SKIP_DIRS for part in parts)
 
     def nearest_project(self, frame, limit: int | None = CALLER_SEARCH) -> str | None:
-        """Node id of the nearest project frame, starting at `frame` (in the current thread).
+        """Node id of the nearest project frame, starting at `frame` (in the current thread)."""
+        found = self.project_frame(frame, limit)
+        return self.ids[found.f_code] if found else None
+
+    def project_frame(self, frame, limit: int | None = CALLER_SEARCH):
+        """The nearest project frame, starting at `frame` (in the current thread).
 
         Looks through `limit` frames, or the whole stack when `limit` is None.
         """
         depth = 0
         while frame is not None and (limit is None or depth < limit):
-            node_id = self.node_id(frame.f_code)
-            if node_id:
-                return node_id
+            if self.node_id(frame.f_code):
+                return frame
             frame = frame.f_back
             depth += 1
         return None
@@ -215,6 +236,8 @@ class Recorder:
         if node_id is None:
             return sys.monitoring.DISABLE
         self.leave(node_id)
+        if self.tracer is not None:
+            self.tracer.suspend(code)
         if code.co_flags & ASYNC_FLAGS:
             self.waiting[node_id] = self.waiting.get(node_id, 0) + 1
         elif self.step is not None:
@@ -227,6 +250,8 @@ class Recorder:
         if node_id is None:
             return sys.monitoring.DISABLE
         self.leave(node_id)
+        if self.tracer is not None:
+            self.tracer.returned(code, value)
         if self.step is not None:
             self.left(sys._getframe(1))
         return None
@@ -236,8 +261,16 @@ class Recorder:
         node_id = self.node_id(code)
         if node_id:
             self.leave(node_id)
+            if self.tracer is not None:
+                self.tracer.unwound(code, exception)
             if self.step is not None:
                 self.left(sys._getframe(1))
+
+    def on_raise(self, code, offset: int, exception):
+        """RAISE, only while tracing: an exception is raised in a frame, or reaches it from a call.
+        Cannot be disabled."""
+        if self.tracer is not None and self.node_id(code):
+            self.tracer.raised(code, sys._getframe(1), exception)
 
     def left(self, frame) -> None:
         step = self.step
@@ -350,16 +383,19 @@ class Recorder:
     # Bookkeeping, always in the thread the event happens in
 
     def enter(self, code, node_id: str, frame, new_call: bool) -> None:
+        own = frame
         if frame.f_code is code:
             frame = frame.f_back
-        caller = self.nearest_project(frame)
+        caller_frame = self.project_frame(frame)
         ident = threading.get_ident()
         stack = self.thread_stacks.get(ident, [])
-        if caller is None and stack:
+        if caller_frame is None and stack:
             # Called back from deeper than CALLER_SEARCH library frames (torch tracing a model, a test
             # run by pytest): look through the whole stack. Guessing the top of `stack` instead is wrong
             # when it holds a frame that left without an event.
-            caller = self.nearest_project(frame, limit=None)
+            caller_frame = self.project_frame(frame, limit=None)
+        caller = self.ids[caller_frame.f_code] if caller_frame else None
+        origin = None
         if new_call:
             self.calls[node_id] = self.calls.get(node_id, 0) + 1
             if code.co_flags & ASYNC_FLAGS:
@@ -376,11 +412,18 @@ class Recorder:
                 origin = None if stack else getattr(threading.current_thread(), "_luciole_origin", None)
                 if origin and origin != caller:  # first project code of a thread: who started it
                     self.count(self.spawns, f"{origin}>{node_id}")
+                origin = None
         if caller in stack:  # cut what left without an event (an exception in library code, say)
             stack = stack[: len(stack) - stack[::-1].index(caller)]
         else:
             stack = [caller] if caller else []
         self.thread_stacks[ident] = [*stack, node_id]
+        tracer = self.tracer
+        if tracer is not None:
+            if new_call:
+                tracer.start(code, node_id, own, caller_frame, origin)
+            else:
+                tracer.resume(code, node_id, own)
 
     def resume(self, code, node_id: str, frame) -> None:
         if code.co_flags & ASYNC_FLAGS and self.waiting.get(node_id):
@@ -431,131 +474,8 @@ class Recorder:
             origin = recorder.nearest_project(sys._getframe(1))
             if origin:
                 thread._luciole_origin = origin
+            if recorder.tracer is not None:
+                thread._luciole_origin_frame = recorder.tracer.current_frame()
             return start(thread, *args, **kwargs)
 
         return luciole_start
-
-
-def hide_recorder_frames(error: BaseException) -> None:
-    """Cut the traceback at the program's last frame.
-
-    Ctrl+C (or Stop in the view) raises KeyboardInterrupt wherever the main thread is, often inside
-    a monitoring callback: the traceback should end at the program's line, not in the recorder.
-    """
-    # The traceback starts in run() (this file), goes through runpy into the program, and may end
-    # in a callback (this file again) and whatever the callback calls.
-    tb, previous, in_program = error.__traceback__, None, False
-    while tb is not None:
-        in_recorder = tb.tb_frame.f_code.co_filename == __file__
-        if in_recorder and in_program:
-            previous.tb_next = None
-            return
-        in_program = in_program or not in_recorder
-        previous, tb = tb, tb.tb_next
-
-
-def run(target: list[str], as_module: bool, root: Path, port: int | None, events: Path | None) -> int:
-    """Run a script (or module, with `as_module`) under the recorder. Returns its exit code."""
-    if sys.version_info < (3, 12):
-        log.error("live mode needs Python 3.12 or newer (sys.monitoring); this is %s", sys.version.split()[0])
-        return 2
-    connection = None
-    sinks = []
-    if port:
-        try:
-            connection = socket.create_connection(("127.0.0.1", port))
-            sinks.append(lambda line: connection.sendall(line.encode()))
-        except OSError as error:
-            log.warning("could not reach the Luciole view on port %s: %s", port, error)
-    if events:
-        file = events.open("w", encoding="utf-8")
-        sinks.append(lambda line: (file.write(line), file.flush()))
-    view_sinks = sinks[:1] if connection else []
-    write_lock = threading.Lock()  # the pump and paused threads all write
-
-    def write(frame: dict, targets: list) -> None:
-        line = json.dumps(frame, separators=(",", ":")) + "\n"
-        with write_lock:
-            for sink in list(targets):
-                try:
-                    sink(line)
-                except OSError:
-                    targets.remove(sink)  # the view went away; keep running the program
-
-    def send(frame: dict) -> None:
-        write(frame, sinks)
-
-    recorder = Recorder(root, send, lambda message: write(message, view_sinks))
-    stop = threading.Event()
-
-    def control() -> None:
-        """Commands from the view, one JSON object per line."""
-        try:
-            for line in connection.makefile(encoding="utf-8"):
-                try:
-                    recorder.command(json.loads(line))
-                except (ValueError, AttributeError) as error:
-                    log.warning("ignored a command from the view: %s (%s)", line.strip()[:200], error)
-        except OSError:
-            pass
-        recorder.resume_all()  # never leave the program paused without a view
-
-    def pump() -> None:
-        while not stop.wait(FRAME):
-            recorder.flush()
-
-    monitoring = sys.monitoring
-    tool = monitoring.PROFILER_ID
-    events_ = monitoring.events
-    callbacks = {
-        events_.PY_START: recorder.on_start,
-        events_.PY_RESUME: recorder.on_resume,
-        events_.PY_THROW: recorder.on_throw,
-        events_.PY_YIELD: recorder.on_yield,
-        events_.PY_RETURN: recorder.on_return,
-        events_.PY_UNWIND: recorder.on_unwind,
-    }
-    always = sum(callbacks)
-    monitoring.use_tool_id(tool, "luciole")
-    for event, callback in callbacks.items():
-        monitoring.register_callback(tool, event, callback)
-    monitoring.register_callback(tool, events_.LINE, recorder.on_line)
-    recorder.line_events = lambda on: monitoring.set_events(tool, always | (events_.LINE if on else 0))
-    pump_thread = threading.Thread(target=pump, name="luciole-recorder", daemon=True)
-    pump_thread.start()
-    thread_start = threading.Thread.start
-    threading.Thread.start = recorder.thread_start_hook(thread_start)
-    origin_depth = sys.get_coroutine_origin_tracking_depth()
-    sys.set_coroutine_origin_tracking_depth(ORIGIN_DEPTH)
-    monitoring.set_events(tool, always)
-    if connection:  # after set_events above, which would undo an early pause's LINE events
-        threading.Thread(target=control, name="luciole-control", daemon=True).start()
-    sys.argv = list(target)
-    try:
-        if as_module:
-            runpy.run_module(target[0], run_name="__main__", alter_sys=True)
-        else:
-            sys.path.insert(0, str(Path(target[0]).resolve().parent))
-            runpy.run_path(target[0], run_name="__main__")
-        return 0
-    except SystemExit as exit:
-        if exit.code is None or isinstance(exit.code, int):
-            return exit.code or 0
-        print(exit.code, file=sys.stderr)
-        return 1
-    except KeyboardInterrupt as interrupt:
-        hide_recorder_frames(interrupt)
-        raise
-    finally:
-        recorder.line_events = lambda on: None
-        recorder.resume_all()  # threads paused while the main code ended
-        monitoring.set_events(tool, 0)
-        for event in [*callbacks, events_.LINE]:
-            monitoring.register_callback(tool, event, None)
-        monitoring.free_tool_id(tool)
-        threading.Thread.start = thread_start
-        sys.set_coroutine_origin_tracking_depth(origin_depth)
-        stop.set()
-        pump_thread.join()
-        recorder.flush()
-        send({"done": True})
