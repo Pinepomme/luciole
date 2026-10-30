@@ -230,11 +230,38 @@ test("rows by call order: each function above the functions it calls", () => {
   const y = (id: string) => positions.get(id)!.y;
   const chain = ["src.app.cli:main", "src.app.core.engine:Engine.run", "src.app.core.engine:Engine.step", "src.app.core.store:Store.get", "src.app.core.store:load"];
   chain.slice(1).forEach((id, i) => assert.ok(y(chain[i]) > y(id), `${chain[i]} above ${id}`));
-  // A function called from two rows goes below the lower caller.
+  // Called by main and by a test: below both.
   assert.ok(y("tests.test_engine:test_run") > y("src.app.core.engine:Engine.run"));
   for (const p of positions.values()) {
     assert.equal(p.z, 0); // flat, facing the camera
   }
+});
+
+test("rows by call order: a function called from two rows goes below the lower caller", () => {
+  const graph = project({ "m.py": ["a", "b", "c"] }, ["m:a > m:b", "m:b > m:c", "m:a > m:c"]);
+  const { positions } = rows(graph);
+  const y = (id: string) => positions.get(id)!.y;
+  assert.ok(y("m:a") > y("m:b") && y("m:b") > y("m:c"));
+});
+
+test("rows by call order: an empty brain lays out nothing", () => {
+  const result = rows(project({ "m.py": [] }, []));
+  assert.equal(result.positions.size, 0);
+  assert.deepEqual(route(result, "m:a", "m:b"), []);
+});
+
+test("rows by call order: functions linked only by shared state go on the last row", () => {
+  const graph = project({ "m.py": ["main", "work", "save", "load"] }, ["m:main > m:work"]);
+  const loc = { line: 1, col: 0, end_line: 1, end_col: 0 };
+  graph.nodes.push({ id: "m#CACHE", kind: "variable", name: "CACHE", parent: "m", file: "m.py", loc, role: "global" });
+  graph.edges.push({ kind: "writes", source: "m:save", target: "m#CACHE" }, { kind: "reads", source: "m#CACHE", target: "m:load" });
+  const brain = buildBrain(graph);
+  assert.ok(brain.synapses.some((s) => s.kind === "state" && s.source === "m:save" && s.target === "m:load"));
+  const { positions } = layoutByCalls(brain, nodesOf(graph));
+  const lowest = Math.min(...[...positions.values()].map((p) => p.y));
+  assert.equal(positions.get("m:save")!.y, lowest);
+  assert.equal(positions.get("m:load")!.y, lowest);
+  assert.ok(positions.get("m:work")!.y > lowest);
 });
 
 test("rows by call order: loops and recursion do not loop the layout", () => {
