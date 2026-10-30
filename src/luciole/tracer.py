@@ -107,6 +107,7 @@ class Tracer:
         self.suspended_fids: dict[str, dict[int, None]] = {}  # node -> ids of its frames in `suspended`, oldest first
         self.arg_names: dict[object, tuple] = {}  # code -> ((name, secret), ...)
         self.exit_status: int | None = None
+        self.off = False  # set when the trace cannot be written: the hooks then record nothing
         self.writer = Writer(self, root)
         self.writer_thread: threading.Thread | None = None
 
@@ -133,6 +134,8 @@ class Tracer:
     def start(self, code, node_id: str, frame, caller_frame, task_origin: str | None) -> None:
         """PY_START of project code: a new frame. `caller_frame` is the nearest project frame
         below it (None for none), `task_origin` the function that created a task's coroutine."""
+        if self.off:
+            return
         fid = next(self.frame_ids)
         state = self.state()
         stack = state.stack
@@ -235,7 +238,7 @@ class Tracer:
 
     def raised(self, code, frame, error: BaseException) -> None:
         """RAISE in project code: an exception is raised in `frame`, or reaches it from a call."""
-        if isinstance(error, FLOW):
+        if self.off or isinstance(error, FLOW):
             return
         state = self.state()
         stack = state.stack
@@ -383,12 +386,25 @@ class Writer:
         )
 
     def loop(self) -> None:
-        while not self.stopping.wait(WRITE_EVERY):
-            try:
-                self.write()
-            except Exception as error:  # a full disk, say: stop tracing, keep the program running
-                log.warning("stopped writing the trace %s: %s", self.tracer.path, error)
-                return
+        while not self.stopping.wait(WRITE_EVERY) and not self.finished:
+            self.write()
+
+    def fail(self, error: Exception) -> None:
+        """The trace cannot be written (a full disk, say): stop tracing, keep the program running.
+        The hooks record nothing more, and what they had recorded is dropped. Holds the lock."""
+        tracer = self.tracer
+        tracer.off = True
+        self.finished = True
+        log.warning("stopped writing the trace %s: %s", tracer.path, error)
+        for state in list(tracer.all_threads):
+            state.buffer.clear()
+        # New containers rather than cleared ones: a hook may be running in another thread.
+        tracer.all_threads, tracer.threads, tracer.suspended, tracer.suspended_fids = [], {}, {}, {}
+        self.open, self.new_snapshots, self.snapshot_ids = [], [], {}
+        try:
+            self.db.close()
+        except Exception:
+            pass
 
     def drain(self) -> list:
         events = []
@@ -401,7 +417,10 @@ class Writer:
     def write(self) -> None:
         with self.lock:
             if not self.finished:
-                self.insert(self.drain())
+                try:
+                    self.insert(self.drain())
+                except Exception as error:
+                    self.fail(error)
 
     def insert(self, events: list) -> None:
         level = self.tracer.level
@@ -478,28 +497,36 @@ class Writer:
         return found
 
     def finish(self, ended_by: str) -> None:
-        """The last write, frames still running, which exceptions went unhandled, the run's end."""
-        tracer = self.tracer
+        """The last write, frames still running, which exceptions went unhandled, the run's end.
+        Never raises: a trace that cannot be written is given up (see fail())."""
         with self.lock:
             if self.finished:
                 return
-            self.insert(self.drain())
-            total = next(tracer.frame_ids) - 1
-            running = {id(entry) for state in list(tracer.all_threads) for entry in list(state.stack)}
-            suspended = [(entry[END_NS], entry[FID]) for entry in self.open if id(entry) not in running and entry[KIND] is None and entry[END_NS] is not None]
-            db = self.db
-            db.execute("BEGIN")
-            # Generators and coroutines left suspended (or abandoned): they end where they last stopped.
-            db.executemany("UPDATE frames SET end_ns = ?, end_kind = 'suspended' WHERE id = ? AND end_kind IS NULL", suspended)
-            db.execute("UPDATE frames SET end_kind = 'running' WHERE end_kind IS NULL")
-            # An exception is handled in the last frame it reached, unless that frame exited with it.
-            db.execute("UPDATE exceptions SET handled_in = NULL WHERE handled_in IN (SELECT id FROM frames WHERE exception = exceptions.id)")
-            db.execute(
-                "UPDATE runs SET ended_at = ?, duration_ns = ?, exit_status = ?, ended_by = ?, frames_total = ?, frames_stored = ?, truncated = ? WHERE id = 1",
-                (time.time(), tracer.now(), tracer.exit_status, ended_by, total, self.frames_stored, int(total > self.frames_stored)),
-            )
-            db.execute("COMMIT")
-            db.executescript(trace.INDEXES)
-            db.execute("PRAGMA journal_mode = DELETE")  # one file again, for readers and copies
-            db.close()
-            self.finished = True
+            try:
+                self.write_end(ended_by)
+            except Exception as error:
+                self.fail(error)
+
+    def write_end(self, ended_by: str) -> None:
+        """finish(), holding the lock."""
+        tracer = self.tracer
+        self.insert(self.drain())
+        total = next(tracer.frame_ids) - 1
+        running = {id(entry) for state in list(tracer.all_threads) for entry in list(state.stack)}
+        suspended = [(entry[END_NS], entry[FID]) for entry in self.open if id(entry) not in running and entry[KIND] is None and entry[END_NS] is not None]
+        db = self.db
+        db.execute("BEGIN")
+        # Generators and coroutines left suspended (or abandoned): they end where they last stopped.
+        db.executemany("UPDATE frames SET end_ns = ?, end_kind = 'suspended' WHERE id = ? AND end_kind IS NULL", suspended)
+        db.execute("UPDATE frames SET end_kind = 'running' WHERE end_kind IS NULL")
+        # An exception is handled in the last frame it reached, unless that frame exited with it.
+        db.execute("UPDATE exceptions SET handled_in = NULL WHERE handled_in IN (SELECT id FROM frames WHERE exception = exceptions.id)")
+        db.execute(
+            "UPDATE runs SET ended_at = ?, duration_ns = ?, exit_status = ?, ended_by = ?, frames_total = ?, frames_stored = ?, truncated = ? WHERE id = 1",
+            (time.time(), tracer.now(), tracer.exit_status, ended_by, total, self.frames_stored, int(total > self.frames_stored)),
+        )
+        db.execute("COMMIT")
+        db.executescript(trace.INDEXES)
+        db.execute("PRAGMA journal_mode = DELETE")  # one file again, for readers and copies
+        db.close()
+        self.finished = True

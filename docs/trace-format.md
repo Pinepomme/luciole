@@ -239,6 +239,10 @@ The last write happens when recording stops: at the program's end (or `luciole.s
 SIGTERM ends the process (unless the program has its own handler; see "Starting the recorder"),
 and in forked children that end with `os._exit`.
 
+If the file cannot be written (a full disk, say), tracing stops with a warning and the program
+runs on: what was written so far stays (without the run's end, as after a crash), and the
+recorder keeps nothing more in memory.
+
 ## Reading
 
 ```sh

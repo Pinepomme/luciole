@@ -600,8 +600,7 @@ class Session:
         self.pump_thread.join()
         self.recorder.flush()
         self.send({"done": True})
-        if self.recorder.tracer is not None:
-            self.recorder.tracer.close("stop")
+        self.close_trace("stop")
         if close:
             self.close()
 
@@ -612,8 +611,7 @@ class Session:
         self.pump_thread.join(timeout=4 * FRAME)  # in vain if this thread holds the write lock
         self.recorder.flush()
         self.send({"done": True})
-        if self.recorder.tracer is not None:
-            self.recorder.tracer.close("sigterm", timeout=0.5)
+        self.close_trace("sigterm", timeout=0.5)
 
     def uninstall(self) -> None:
         monitoring = sys.monitoring
@@ -634,8 +632,15 @@ class Session:
             self.connection.close()
         if self.file:
             self.file.close()
+        self.close_trace("stop")  # done already, unless the session never started
+
+    def close_trace(self, ended_by: str, timeout: float | None = None) -> None:
+        """Write the end of the trace, if any. Never raises: the program's own end comes first."""
         if self.recorder.tracer is not None:
-            self.recorder.tracer.close("stop")  # done already, unless the session never started
+            try:
+                self.recorder.tracer.close(ended_by, timeout)
+            except Exception as error:
+                log.warning("could not end the trace %s: %s", self.recorder.tracer.path, error)
 
     def pump(self) -> None:
         while not self.stopping.wait(FRAME):

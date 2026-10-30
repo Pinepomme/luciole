@@ -219,6 +219,35 @@ def test_abandoned_generators_do_not_pile_up(tmp_path):
     assert rows(path, "SELECT end_kind, COUNT(*) FROM frames WHERE node = 'prog:items' GROUP BY end_kind") == [("suspended", 6000)]
 
 
+def test_a_trace_that_cannot_be_written_stops_without_breaking_the_program(tmp_path):
+    result, path = traced(tmp_path, """
+        import time
+        from luciole import recorder
+
+        def work(n):
+            return n + 1
+
+        def main():
+            tracer = recorder.active.recorder.tracer
+            for n in range(100):
+                work(n)
+            with tracer.writer.lock:
+                tracer.writer.db.close()  # as if the disk were full: the next write fails
+            for n in range(100):
+                work(n)
+            time.sleep(0.5)
+            for n in range(100):
+                work(n)
+            print("off", tracer.off, sum(len(state.buffer) for state in tracer.all_threads), len(tracer.writer.open))
+            return 3
+
+        raise SystemExit(main())
+    """)
+    assert result.returncode == 3, result.stderr
+    assert result.stdout.split() == ["off", "True", "0", "0"]
+    assert "stopped writing the trace" in result.stderr and "Traceback" not in result.stderr
+
+
 def test_threads_have_their_own_roots_and_callers(tmp_path):
     result, path = traced(tmp_path, """
         import threading
