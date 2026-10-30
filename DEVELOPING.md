@@ -86,6 +86,8 @@ uv run luciole graph examples/                     # summary of a graph
 uv run luciole graph examples/shop.py --json       # the graph as JSON
 uv run luciole run examples/workers.py             # run under the recorder
 uv run luciole run --events run.jsonl examples/workers.py   # record the events to a file
+uv run luciole run --trace run.sqlite --level 1 examples/workers.py   # keep a trace (SQLite)
+uv run luciole trace run.sqlite summary            # read it: summary, calls NODE, tree, exceptions
 uv run luciole tests src/luciole/analyzer.py       # test files that import a module
 ```
 
@@ -170,6 +172,9 @@ Rules that hold across the codebase:
 - The graph JSON is the contract between the two halves. If you change it, update
   `docs/graph-format.md` and `schema/graph.schema.json` too; `tests/test_graph_format.py` checks
   `examples/shop.graph.json` against the schema.
+- The trace schema is a contract too (for `luciole trace`, the MCP server, other tools): a change
+  updates `trace.SCHEMA` and `docs/trace-format.md` together (`tests/test_trace.py` checks they
+  match, and the worked example), and `SCHEMA_VERSION` when a column changes meaning.
 
 ## 7. Release a new version
 
@@ -237,7 +242,9 @@ src/luciole/
   engine.py        the local engine that recorders connect to and viewers subscribe to
   protocol.py      protocol version and engine discovery (~/.luciole/engine-v1.json)
   _autostart/      sitecustomize.py: starts the recorder in any Python process when enabled
-  values.py        variable snapshots for the recorder's pause protocol (engine clients)
+  tracer.py        writes a trace of a run (SQLite), fed by the recorder's callbacks
+  trace.py         the trace schema and queries (`luciole trace`, later the MCP server)
+  values.py        value snapshots, for the recorder's pause protocol (engine clients) and traces
   testfinder.py    finds the test files that import a module
   cli.py           the `luciole` command
 extension/
@@ -249,6 +256,6 @@ extension/
   test/              unit tests (npm test)
   package.mjs        builds luciole.vsix with a copy of src/luciole
 tests/             Python tests (uv run pytest)
-docs/              graph format, roadmap
+docs/              graph format, trace format, roadmap
 examples/          small programs and a reference graph
 ```

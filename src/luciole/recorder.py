@@ -57,10 +57,13 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from luciole import protocol, values
 from luciole.analyzer import SKIP_DIRS, module_name
+
+if TYPE_CHECKING:
+    from luciole.tracer import Tracer  # imported when tracing only: sqlite3 costs a few ms
 
 log = logging.getLogger(__name__)
 
@@ -130,6 +133,7 @@ class Recorder:
         self.refs: dict[int, tuple[int, object]] = {}  # ref -> (owning thread ident, value)
         self.next_ref = itertools.count(1)
         self.step: Step | None = None
+        self.tracer: Tracer | None = None  # writes the run to a trace file, when asked to
 
     # Identifying code
 
@@ -173,15 +177,19 @@ class Recorder:
         return not any(part.startswith(".") or part in SKIP_DIRS for part in parts)
 
     def nearest_project(self, frame, limit: int | None = CALLER_SEARCH) -> str | None:
-        """Node id of the nearest project frame, starting at `frame` (in the current thread).
+        """Node id of the nearest project frame, starting at `frame` (in the current thread)."""
+        found = self.project_frame(frame, limit)
+        return self.ids[found.f_code] if found else None
+
+    def project_frame(self, frame, limit: int | None = CALLER_SEARCH):
+        """The nearest project frame, starting at `frame` (in the current thread).
 
         Looks through `limit` frames, or the whole stack when `limit` is None.
         """
         depth = 0
         while frame is not None and (limit is None or depth < limit):
-            node_id = self.node_id(frame.f_code)
-            if node_id:
-                return node_id
+            if self.node_id(frame.f_code):
+                return frame
             frame = frame.f_back
             depth += 1
         return None
@@ -238,6 +246,8 @@ class Recorder:
         if node_id is None:
             return sys.monitoring.DISABLE
         self.leave(node_id)
+        if self.tracer is not None:
+            self.tracer.suspend(code)
         if code.co_flags & ASYNC_FLAGS:
             self.waiting[node_id] = self.waiting.get(node_id, 0) + 1
         elif self.step is not None:
@@ -250,6 +260,8 @@ class Recorder:
         if node_id is None:
             return sys.monitoring.DISABLE
         self.leave(node_id)
+        if self.tracer is not None:
+            self.tracer.returned(code, value)
         if self.step is not None:
             self.left(sys._getframe(1))
         return None
@@ -259,8 +271,16 @@ class Recorder:
         node_id = self.node_id(code)
         if node_id:
             self.leave(node_id)
+            if self.tracer is not None:
+                self.tracer.unwound(code, exception)
             if self.step is not None:
                 self.left(sys._getframe(1))
+
+    def on_raise(self, code, offset: int, exception):
+        """RAISE, only while tracing: an exception is raised in a frame, or reaches it from a call.
+        Cannot be disabled."""
+        if self.tracer is not None and self.node_id(code):
+            self.tracer.raised(code, sys._getframe(1), exception)
 
     def left(self, frame) -> None:
         step = self.step
@@ -373,16 +393,19 @@ class Recorder:
     # Bookkeeping, always in the thread the event happens in
 
     def enter(self, code, node_id: str, frame, new_call: bool) -> None:
+        own = frame
         if frame.f_code is code:
             frame = frame.f_back
-        caller = self.nearest_project(frame)
+        caller_frame = self.project_frame(frame)
         ident = threading.get_ident()
         stack = self.thread_stacks.get(ident, [])
-        if caller is None and stack:
+        if caller_frame is None and stack:
             # Called back from deeper than CALLER_SEARCH library frames (torch tracing a model, a test
             # run by pytest): look through the whole stack. Guessing the top of `stack` instead is wrong
             # when it holds a frame that left without an event.
-            caller = self.nearest_project(frame, limit=None)
+            caller_frame = self.project_frame(frame, limit=None)
+        caller = self.ids[caller_frame.f_code] if caller_frame else None
+        origin = None
         if new_call:
             self.calls[node_id] = self.calls.get(node_id, 0) + 1
             if code.co_flags & ASYNC_FLAGS:
@@ -399,11 +422,18 @@ class Recorder:
                 origin = None if stack else getattr(threading.current_thread(), "_luciole_origin", None)
                 if origin and origin != caller:  # first project code of a thread: who started it
                     self.count(self.spawns, f"{origin}>{node_id}")
+                origin = None
         if caller in stack:  # cut what left without an event (an exception in library code, say)
             stack = stack[: len(stack) - stack[::-1].index(caller)]
         else:
             stack = [caller] if caller else []
         self.thread_stacks[ident] = [*stack, node_id]
+        tracer = self.tracer
+        if tracer is not None:
+            if new_call:
+                tracer.start(code, node_id, own, caller_frame, origin)
+            else:
+                tracer.resume(code, node_id, own)
 
     def resume(self, code, node_id: str, frame) -> None:
         if code.co_flags & ASYNC_FLAGS and self.waiting.get(node_id):
@@ -454,6 +484,8 @@ class Recorder:
             origin = recorder.nearest_project(sys._getframe(1))
             if origin:
                 thread._luciole_origin = origin
+            if recorder.tracer is not None:
+                thread._luciole_origin_frame = recorder.tracer.current_frame()
             return start(thread, *args, **kwargs)
 
         return luciole_start
@@ -481,9 +513,11 @@ class Session:
     """The recorder installed in this interpreter: its monitoring callbacks, the pump thread that
     sends a frame every FRAME seconds, and the control thread that reads the view's commands."""
 
-    def __init__(self, root: Path, port: int | None, connection: socket.socket | None, events: Path | None):
+    def __init__(self, root: Path, port: int | None, connection: socket.socket | None, events: Path | None, trace: Path | str | None = None, level: int = 0):
         self.port = port  # to connect again from a forked child
         self.connection = connection
+        self.trace = trace  # trace file or directory (forked children write next to it)
+        self.level = level
         self.file = events.open("w", encoding="utf-8") if events else None
         self.sinks: list[Callable[[str], None]] = []
         if connection:
@@ -494,6 +528,10 @@ class Session:
         # The pump and paused threads all write; reentrant for on_sigterm, which may interrupt a write.
         self.write_lock = threading.RLock()
         self.recorder = Recorder(root, self.send, lambda message: self.write(message, self.view_sinks))
+        if trace:
+            from luciole.tracer import Tracer
+
+            self.recorder.tracer = Tracer(trace, level, self.recorder.root)
         self.stopping = threading.Event()
         self.tool: int | None = None
         self.thread_start = threading.Thread.start
@@ -538,6 +576,9 @@ class Session:
             events.PY_UNWIND: recorder.on_unwind,
             events.LINE: recorder.on_line,
         }
+        if recorder.tracer is not None:
+            callbacks[events.RAISE] = recorder.on_raise
+            recorder.tracer.start_writer(own_thread)
         always = sum(callbacks) - events.LINE
         monitoring.use_tool_id(tool, "luciole")
         self.tool = tool
@@ -568,15 +609,18 @@ class Session:
         self.pump_thread.join()
         self.recorder.flush()
         self.send({"done": True})
+        self.close_trace("stop")
         if close:
             self.close()
 
     def terminate(self) -> None:
-        """On SIGTERM, just before the process dies: send the last frame and {"done": true}."""
+        """On SIGTERM, just before the process dies: send the last frame and {"done": true}, and
+        write the end of the trace."""
         self.stopping.set()
         self.pump_thread.join(timeout=4 * FRAME)  # in vain if this thread holds the write lock
         self.recorder.flush()
         self.send({"done": True})
+        self.close_trace("sigterm", timeout=0.5)
 
     def uninstall(self) -> None:
         monitoring = sys.monitoring
@@ -597,6 +641,15 @@ class Session:
             self.connection.close()
         if self.file:
             self.file.close()
+        self.close_trace("stop")  # done already, unless the session never started
+
+    def close_trace(self, ended_by: str, timeout: float | None = None) -> None:
+        """Write the end of the trace, if any. Never raises: the program's own end comes first."""
+        if self.recorder.tracer is not None:
+            try:
+                self.recorder.tracer.close(ended_by, timeout)
+            except Exception as error:
+                log.warning("could not end the trace %s: %s", self.recorder.tracer.path, error)
 
     def pump(self) -> None:
         while not self.stopping.wait(FRAME):
@@ -658,7 +711,23 @@ def connect(port: int | str | None, quiet: bool) -> socket.socket | None:
     return connection
 
 
-def start(root: Path | str | None = None, port: int | str | None = None, events: Path | str | None = None, quiet: bool = False, connection: socket.socket | None = None) -> bool:
+def trace_level(level: int | str | None) -> int:
+    """The trace level asked for (default: LUCIOLE_TRACE_LEVEL, else 0)."""
+    try:
+        return int(level if level is not None else os.environ.get("LUCIOLE_TRACE_LEVEL") or 0)
+    except ValueError:
+        return 0
+
+
+def start(
+    root: Path | str | None = None,
+    port: int | str | None = None,
+    events: Path | str | None = None,
+    quiet: bool = False,
+    connection: socket.socket | None = None,
+    trace: Path | str | None = None,
+    level: int | None = None,
+) -> bool:
     """Start recording this process, until stop() or the process exits. See luciole.start()."""
     global active
     if active is not None:
@@ -667,15 +736,23 @@ def start(root: Path | str | None = None, port: int | str | None = None, events:
         if not quiet:
             log.warning("live mode needs Python 3.12 or newer (sys.monitoring); this is %s", sys.version.split()[0])
         return False
-    if events is None and "luciole" in map(sys.monitoring.get_tool, (3, 4)):
+    trace = trace or os.environ.get("LUCIOLE_TRACE") or None
+    if events is None and trace is None and "luciole" in map(sys.monitoring.get_tool, (3, 4)):
         return True  # another copy of luciole (auto-start's, see import_bundled) already reports it
     port = port or os.environ.get("LUCIOLE_LIVE_PORT") or protocol.engine_port()
     if connection is None and port:
         connection = connect(port, quiet)
-    if connection is None and events is None:
+    if connection is None and events is None and trace is None:
         return False  # nothing would see the events: record nothing
     root = Path(root or os.environ.get("LUCIOLE_ROOT") or Path.cwd())
-    session = Session(root, int(port) if port else None, connection, Path(events) if events else None)
+    try:
+        session = Session(root, int(port) if port else None, connection, Path(events) if events else None, trace, trace_level(level))
+    except Exception as error:  # the trace file cannot be written
+        if not quiet:
+            log.warning("could not start the recorder: %s", error)
+        if connection:
+            connection.close()
+        return False
     try:
         session.start()
     except ValueError as error:
@@ -781,7 +858,13 @@ def after_fork() -> None:
         session.uninstall()
         if session.connection:
             session.connection.close()  # the child's copy: the parent's connection stays open
-        if session.connection and start(session.recorder.root, session.port, quiet=True):
+        trace = None
+        if session.recorder.tracer is not None:
+            from luciole.tracer import child_target
+
+            session.recorder.tracer.forget()  # the parent's file: the child writes its own
+            trace = child_target(session.trace)
+        if (session.connection or trace) and start(session.recorder.root, session.port, quiet=True, trace=trace, level=session.level):
             exit_ = os._exit
             if exit_.__name__ != "luciole_exit":
                 # Forked children usually end with os._exit (multiprocessing's do), which skips
@@ -798,36 +881,52 @@ def after_fork() -> None:
         pass
 
 
-def run(target: list[str], as_module: bool, root: Path, port: int | None, events: Path | None) -> int:
-    """Run a script (or module, with `as_module`) under the recorder. Returns its exit code."""
+def run(target: list[str], as_module: bool, root: Path, port: int | None, events: Path | None, trace: Path | str | None = None, level: int = 0) -> int:
+    """Run a script (or module, with `as_module`) under the recorder, writing a trace to `trace`
+    (a file, or a directory to make one in) at `level`. Returns its exit code."""
     global active
     if sys.version_info < (3, 12):
         log.error("live mode needs Python 3.12 or newer (sys.monitoring); this is %s", sys.version.split()[0])
         return 2
     stop()  # auto-started in this interpreter: this run records it instead, with its own options
     # Without --port, the running engine's, if any: then nothing to warn about when there is none.
-    session = Session(root, port, connect(port, quiet=not port), events)
+    connection = connect(port, quiet=not port)
+    try:
+        session = Session(root, port, connection, events, trace, level)
+    except Exception as error:  # the trace file cannot be written (on Windows, open in a reader)
+        log.error("could not write the trace %s: %s", trace, error)
+        if connection:
+            connection.close()
+        return 1
     session.start()
     active = session
     install_hooks()
     install_sigterm()
     sys.argv = list(target)
+    status = None
     try:
         if as_module:
             runpy.run_module(target[0], run_name="__main__", alter_sys=True)
         else:
             sys.path.insert(0, str(Path(target[0]).resolve().parent))
             runpy.run_path(target[0], run_name="__main__")
-        return 0
+        status = 0
     except SystemExit as exit:
         if exit.code is None or isinstance(exit.code, int):
-            return exit.code or 0
-        print(exit.code, file=sys.stderr)
-        return 1
+            status = exit.code or 0
+        else:
+            print(exit.code, file=sys.stderr)
+            status = 1
     except KeyboardInterrupt as interrupt:
         hide_recorder_frames(interrupt)
         raise
+    except BaseException:
+        status = 1  # the traceback is printed by Python, as without Luciole
+        raise
     finally:
+        if session.recorder.tracer is not None:
+            session.recorder.tracer.exit_status = status
         if active is session:
             active = None
             end(session, close=False)
+    return status

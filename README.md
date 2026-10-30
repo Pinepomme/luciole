@@ -37,6 +37,16 @@ luciole run --events run.jsonl -m pytest -q
 Code extension, or to a file with `--events`. Only code under `--root` (default: the current
 directory) is reported.
 
+It can also keep a trace of the run, every call with its caller, timings and exceptions (and with
+`--level 1`, arguments and return values), in a SQLite file to query afterwards:
+
+```sh
+luciole run --trace run.sqlite --level 1 -m pytest -q tests/test_cart.py
+luciole trace run.sqlite summary              # top functions by calls and by time
+luciole trace run.sqlite calls Cart.add       # each call: caller, arguments, result, duration
+luciole trace run.sqlite exceptions           # where raised, chained from, handled where
+```
+
 Without changing how a program is started, any Python process can light up the view too:
 
 ```sh
@@ -55,7 +65,8 @@ luciole.start()                       # from inside a program: a server, a noteb
 In VS Code, the **Luciole: on/off** switch in the status bar does the same for new terminals.
 
 The graph format and the live events are documented in
-[docs/graph-format.md](docs/graph-format.md), and the plan in [docs/roadmap.md](docs/roadmap.md).
+[docs/graph-format.md](docs/graph-format.md), traces in [docs/trace-format.md](docs/trace-format.md),
+and the plan in [docs/roadmap.md](docs/roadmap.md).
 
 ## Status
 

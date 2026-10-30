@@ -52,6 +52,15 @@
   only. Luciole's own Pause/Resume and Step commands, their keys (F10, F11, Shift+F11, F5) and
   buttons, and the Luciole Variables view are removed: the debugger's do the same. The recorder
   keeps its pause, step and variables protocol for other clients of the engine.
+- Traces: `luciole run --trace run.sqlite` keeps a record of the run in a SQLite file: every call
+  of project code with its caller, call site, thread and timings, and every exception (where it
+  was raised, what it was chained from, where it was handled). `--level 1` adds each call's
+  arguments and return value, as short snapshots, with secrets (`password`, `token`, `api_key`…)
+  redacted. `luciole trace run.sqlite summary|calls NODE|tree|exceptions` reads it, as text or
+  `--json`. With auto-start, `luciole env --trace DIR` (or `LUCIOLE_TRACE=DIR`) makes every
+  Python process write its own trace, child processes included. `--trace DIR/` makes a new file
+  in `DIR`, creating it. If the file cannot be written (a full disk), tracing stops with a
+  warning and the program runs on. The format is documented in `docs/trace-format.md`.
 - Auto-start: with the **Luciole: on** switch (status bar, setting `luciole.autoStart`), every
   Python program started in a new VS Code terminal lights up the view, child processes included
   (forked ones too). Nothing is started when the view is not listening. `luciole env` does the

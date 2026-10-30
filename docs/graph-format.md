@@ -204,7 +204,7 @@ drawn.
 
 ## Live events
 
-`luciole run [--root DIR] [--port N] [--events FILE] script.py [args...]` (or `-m module`) runs a
+`luciole run [--root DIR] [--port N] [--events FILE] [--trace FILE] script.py [args...]` (or `-m module`) runs a
 program under the recorder ([`src/luciole/recorder.py`](../src/luciole/recorder.py), Python
 3.12+, `sys.monitoring`). Only code under `--root` is reported, by the same node ids as the graph.
 Every 50 ms the recorder sends one JSON line, to the port and/or the file:
@@ -275,13 +275,14 @@ paused program would stay frozen otherwise).
 ### Starting the recorder
 
 - `luciole run`, as above. Without `--port`, it reports to the running engine, if any.
-- `luciole.start(root=None, port=None, events=None)` and `luciole.stop()`, from the program
+- `luciole.start(root=None, port=None, events=None, trace=None, level=None)` and `luciole.stop()`, from the program
   itself (a server, a notebook). `root` defaults to `LUCIOLE_ROOT`, else the working directory, and
   `port` to the running engine's. Nothing is recorded, and `start` returns `False`, when nothing
-  would see the events: no engine runs and there is no events file.
+  would see the events: no engine runs and there is neither an events file nor a trace.
 - Auto-start: with the folder `luciole/_autostart` on `PYTHONPATH`, its `sitecustomize.py` starts
-  the recorder in any Python process when the engine runs, and does nothing otherwise (not even
-  importing the recorder). Child processes inherit the environment; forked children connect again
+  the recorder in any Python process when the engine runs (or `LUCIOLE_TRACE` asks for a trace,
+  see [trace-format.md](trace-format.md)), and does nothing otherwise (not even importing the
+  recorder). Child processes inherit the environment; forked children connect again
   as processes of their own. The VS Code switch ("Luciole: on" in the status bar, setting
   `luciole.autoStart`) sets `PYTHONPATH` and `LUCIOLE_ROOT` in new terminals; `luciole env` prints
   them for a shell (`--off` to undo). The `sitecustomize` it hides still runs, and `luciole run`
@@ -296,7 +297,8 @@ sends it, then lets the signal end the process as before (not on Windows).
 
 The recorder sends aggregates rather than one event per call. That keeps the stream small however
 fast the program runs (pytest makes about 30,000 calls per second through it), which is all the
-lighting needs. Variable reads and writes, and per-call replay, are not recorded yet.
+lighting needs. One row per call goes to a trace instead, with `--trace` (SQLite, see
+[trace-format.md](trace-format.md)); variable reads and writes are not recorded yet.
 
 All the state is kept by the monitoring callbacks, in the thread where each event happens: each
 thread has its own project stack, pushed on `PY_START`/`PY_RESUME`, popped on
