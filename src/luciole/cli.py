@@ -38,7 +38,8 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd.add_argument("--root", type=Path, default=Path.cwd(), help="project directory: only code inside it is reported")
     run_cmd.add_argument("--port", type=int, default=os.environ.get("LUCIOLE_LIVE_PORT"), help="engine port (default: the running engine's, if any)")
     run_cmd.add_argument("--events", type=Path, help="also write events to this JSON Lines file")
-    run_cmd.add_argument("--trace", type=Path, default=os.environ.get("LUCIOLE_TRACE") or None, help="write a trace of the run to this SQLite file (or a new file in this directory)")
+    # A string, not a Path: Path("traces/") drops the separator that marks a directory to make.
+    run_cmd.add_argument("--trace", default=os.environ.get("LUCIOLE_TRACE") or None, help="write a trace of the run to this SQLite file (or a new file in this directory)")
     run_cmd.add_argument("--level", type=int, choices=[0, 1], default=None, help="trace level: 0 call tree, timings and exceptions (default); 1 also arguments and return values")
     run_cmd.add_argument("-m", dest="as_module", action="store_true", help="run a module, like python -m")
     run_cmd.add_argument("target", nargs=argparse.REMAINDER, help="script (or module) and its arguments")

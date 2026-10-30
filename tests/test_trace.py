@@ -716,6 +716,18 @@ def test_cli_output(tmp_path):
     assert "RuntimeError: wrapped" in exceptions and "caused by !1" in exceptions and "handled in prog:catches" in exceptions
 
 
+def test_a_trace_directory_that_does_not_exist_yet_is_made(tmp_path):
+    write(tmp_path, {"prog.py": "def f():\n    pass\n\nf()\n"})
+    command = [sys.executable, "-m", "luciole", "run", "--root", str(tmp_path)]
+    by_option = subprocess.run([*command, "--trace", "made/", "prog.py"], cwd=tmp_path, env=clean_env(), capture_output=True, text=True, timeout=60)
+    by_env = subprocess.run([*command, "prog.py"], cwd=tmp_path, env=clean_env(LUCIOLE_TRACE="from-env" + os.sep), capture_output=True, text=True, timeout=60)
+    assert by_option.returncode == 0 and by_env.returncode == 0, by_option.stderr + by_env.stderr
+    for folder in ("made", "from-env"):
+        assert (tmp_path / folder).is_dir()
+        [path] = (tmp_path / folder).glob("trace-*.sqlite")
+        assert ("prog:f",) in rows(path, "SELECT node FROM frames")
+
+
 def test_cli_rejects_what_is_not_a_trace(tmp_path):
     (tmp_path / "x.sqlite").write_text("nope")
     result = subprocess.run([sys.executable, "-m", "luciole", "trace", str(tmp_path / "x.sqlite"), "summary"], env=clean_env(), capture_output=True, text=True, timeout=60)

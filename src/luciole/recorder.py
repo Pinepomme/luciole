@@ -857,7 +857,7 @@ def after_fork() -> None:
         pass
 
 
-def run(target: list[str], as_module: bool, root: Path, port: int | None, events: Path | None, trace: Path | None = None, level: int = 0) -> int:
+def run(target: list[str], as_module: bool, root: Path, port: int | None, events: Path | None, trace: Path | str | None = None, level: int = 0) -> int:
     """Run a script (or module, with `as_module`) under the recorder, writing a trace to `trace`
     (a file, or a directory to make one in) at `level`. Returns its exit code."""
     global active
