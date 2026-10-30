@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `luciole run` on a script that does not exist says so in one line, instead of a traceback and an
+  empty trace file.
 - Graphs of 60 functions or fewer (whatever the number of files) are laid out in rows by call
   order: what nothing calls on top, each function above the ones it calls, so a file reads like
   an outline; there are no region names. Lines between functions of one row arc above it, lines
