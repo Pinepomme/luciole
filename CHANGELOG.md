@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Live mode: a process that ends within milliseconds of starting (a multiprocessing pool's
+  workers, terminated right after their last task) no longer loses its calls. The recorder now
+  reads the engine's welcome before the program goes on (waiting half a second at most); left
+  unread, it made the connection reset when the process ended, and the engine dropped the calls
+  it had not read yet.
 - ⚡ Run Live on a file of a package that imports relatively (`from . import x`) runs it as a
   module (`python -m pkg.mod`), the only way it can run; it stopped at its first relative import.
 - A Luciole sidebar in the activity bar, with three native views. **Actions**: Show Graph (file
