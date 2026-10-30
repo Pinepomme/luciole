@@ -21,13 +21,17 @@ and time travel), and only then widen to other editors and languages.
   function glows red, breakpoints from neurons).
 - **Call resolution** without a type checker, including callbacks (`Thread(target=f)`): on the
   standard library's `email` and `asyncio`, missing runtime calls went from 52% to 27%.
+- **A Luciole sidebar**: actions, running programs, and a map outline with search that flies to
+  the function in the brain.
+- **The trace store** (`luciole run --trace`, `luciole trace`): one SQLite file per process with
+  the call tree, arguments and return values, and exceptions.
 
 ## Target architecture
 
 One **engine** sits between the program and everything that looks at it or controls it. Each
 Python process runs a **recorder** (live data) and, when debugging, **debugpy** (control). People
-connect through their editor (Debug Adapter Protocol, DAP), agents through MCP, and both can
-share the same session.
+connect through their editor (Debug Adapter Protocol, DAP), agents through MCP. Agents work
+mostly from recordings (see phase 3); sharing one live debug session with them is for later.
 
 ```
   You (VS Code, Cursor, Neovim)      Agents (Claude Code, Cursor, any MCP client)
@@ -89,8 +93,6 @@ share the same session.
 - [x] Graph-driven debugging: right-click a neuron to stop the next time that function runs (a
   VS Code breakpoint on its first body line, in the Breakpoints view); neurons holding a
   breakpoint show a red dot. Tested by hand in VS Code on WSL (2026-10-29).
-- Several clients on one session (needed by phase 3: you and an agent on the same run): a DAP
-  proxy around debugpy, owned by the engine.
 - [x] Better call resolution, with the standard library only (no Pyright or jedi): imports, star
   imports, properties, `super()`, overrides, return types and annotations, special methods,
   functions held in variables, and the project's only method of a name (marked `by_name`). Missing
@@ -108,12 +110,22 @@ share the same session.
     module";
   - [x] stable positions, seeded from paths: the same project always gives the same map;
   - [x] calls between regions bundled into tracts; region labels, so the overview reads like a map;
-  - semantic zoom: regions open into modules, then functions, as you get closer;
-  - size and brightness by importance (callers, runtime calls), entry points marked;
-  - search, focus (the functions N calls around a selection) and filters (tests, private helpers).
+  - [x] small graphs (60 functions or fewer) in rows by call order, read like an outline;
+  - [x] neurons sized by their connections; search in the sidebar's Map view;
+  - focus (the functions N calls around a selection) and filters (tests, private helpers) move to
+    phase 3, step 6: the same mechanism as lighting an origin path.
 - [x] A minimal look: neutral greys, one accent (the theme's), a muted tint per file; calls trace
   their line from caller to callee; no legend.
-- A Luciole sidebar: actions, running programs, a map outline with search (PR #13).
+- [x] A Luciole sidebar: actions, running programs, a map outline with search.
+- [x] Big graphs draw smoothly: spheres and lines in one batch each, nothing drawn while still.
+
+Dropped: semantic zoom (regions opening into modules as you get closer; names already appear as
+you zoom in, and the Map view's search flies to any function) and brightness by importance
+(against the minimal look; runtime lighting already shows what matters).
+
+Deferred until a need shows up: several clients on one live debug session (a DAP proxy around
+debugpy, owned by the engine). Agents debug from recordings (phase 3); a live session matters for
+an agent only on a bug that does not reproduce on demand (flaky, a long-running server).
 
 ### Phase 3: History and agents (one track)
 
@@ -139,9 +151,19 @@ function, which keeps the cost where you look:
 - level 2, scoped: every assignment in chosen functions (variable history);
 - level 3, narrow: instruction-level detail in one function, for exact provenance.
 
-The debugging loop (yours or Claude's): run the failing test at level 0/1, spot the suspicious
-function, re-run with level 2 on that area, ask origin questions. Re-running with more detail is
-much simpler than exact replay, and most bugs reproduce under a test.
+**Agents debug from a recording, not by stepping.** Breakpoints and stepping are made for a person
+watching: an agent would have to guess where to stop before knowing what is wrong, pay a tool call
+per step, and start over when it stepped past the moment that mattered. Instead, everything an
+agent runs is recorded from the first run, and it asks questions afterwards:
+- every run starts at level 1 (call tree, arguments, return values, exceptions): a few
+  microseconds per call, cheap enough to leave on;
+- on a failure (an uncaught exception, a failing test), the locals of every frame on the stack are
+  kept, as a post-mortem debugger would show them: free until something fails.
+
+One run then answers most questions: the exception and its chain, the calls that led to it, their
+arguments, and the locals at the crash. A second run is needed only when the wrong value was made
+long before the failure, in a function whose locals were not kept: the agent re-runs with level 2
+on the suspect functions. Most bugs reproduce under a test, which makes that cheap.
 
 **Origins:**
 - a value: its last write before that moment and that line; the static edges say which operands
@@ -155,20 +177,20 @@ much simpler than exact replay, and most bugs reproduce under a test.
 
 | Step | What | Rough effort |
 |---|---|---|
-| 1 | Trace store: call tree, arguments/returns, exceptions (levels 0–1) | 1–1.5 weeks |
-| 2 | `luciole mcp`: trace queries plus graph queries (neighbors, callers, slicing) | ~1 week |
-| 3 | Scoped variable history (level 2), redaction, limits | 1–2 weeks |
-| 4 | Origin queries: dynamic slicing over static edges and the trace | ~2 weeks |
-| 5 | In VS Code: a timeline to scrub (the brain replays), a function's variables and their values over time, origin paths lit on the brain | ~2 weeks |
-| 6 | Later: stepping backwards in the debugger over a recording; level 3 provenance | — |
+| 1 | Done: trace store, call tree, arguments/returns, exceptions (levels 0–1) | — |
+| 2 | `luciole mcp`: trace queries plus graph queries (neighbors, callers, slicing); its `run` records at level 1 by default | ~1 week |
+| 3 | Failure snapshots: the locals of every frame on the stack at an uncaught exception or a failing test | a few days |
+| 4 | Scoped variable history (level 2), redaction, limits; coroutine suspend/resume, so time spent awaiting is not counted as busy | 1–2 weeks |
+| 5 | Origin queries: dynamic slicing over static edges and the trace | ~2 weeks |
+| 6 | In VS Code: the call tree in the Luciole sidebar, a timeline to scrub (the brain replays), a function's variables and their values over time, origin paths lit on the brain, focus and filters | ~2 weeks |
+| 7 | Later: stepping backwards in the debugger over a recording; level 3 provenance | — |
 
 MCP tools (summarized and paginated answers): `run(command, level, scope)`, `call_tree`,
 `calls_of(function)` with arguments and returns, `variable_history`, `origin_of(variable, frame,
-time)`, `exceptions`, `diff_runs`, and the graph queries. Then a Claude Code plugin (the MCP server,
+time)`, `exceptions` (with the failure snapshot), `diff_runs`, and the graph queries. Then a Claude Code plugin (the MCP server,
 a skill teaching when to debug with Luciole, slash commands, optional hooks such as recording a
 failing test), the agent's activity shown on the graph, explicit approval to run programs, and a
-benchmark of planted bugs with and without Luciole. Several clients on one debug session (a DAP
-proxy around debugpy, owned by the engine) comes when an agent needs to drive the debugger live.
+benchmark of planted bugs with and without Luciole.
 
 Effort goes first to the trace store and origin queries (what nothing else offers); the MCP
 server early, so Claude is the first user of the data model; the UI after, starting minimal.
@@ -209,8 +231,8 @@ The codebase must stay easy to change as it grows. Standing rules:
   configurations, tree data, queries) lives in modules with no `vscode` or `three` import, with
   unit tests. `main.ts` and `extension.ts` only wire things up.
 - **Size limits as a signal.** A file past ~800 lines, or a function past ~80, is split at the next
-  feature that touches it, as its own commit. Today: `analyzer.py`, `main.ts` and `recorder.py` are
-  near or over.
+  feature that touches it, as its own commit. Today: `main.ts` (~1,280 lines), `analyzer.py`
+  (~1,090) and `recorder.py` (~940) are over.
 - **A cleanup PR after each feature cluster**: dead code, duplicated helpers, names that no longer
   fit, docs that drifted. Reviewed like a feature.
 - **Every PR reviewed** (code review pass plus the hands-on checklist) before it merges.
@@ -226,6 +248,5 @@ The codebase must stay easy to change as it grows. Standing rules:
 
 ## Open questions
 
-- Order of phases 2 and 3: MCP graph and run tools could ship before the DAP proxy, since the
-  engine already serves them.
-- When to publish: phase 0, or after phase 2.
+- Whether agents ever need a live debug session (the deferred DAP proxy), or recordings plus
+  failure snapshots are enough: the planted-bug benchmark will tell.
