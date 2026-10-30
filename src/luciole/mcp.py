@@ -44,7 +44,10 @@ moment (a post-mortem debugger's view, no re-run needed), `calls` for every call
 with its values, `call_tree` for who called what, `frame` for one call in detail. When a wrong
 value was made inside a function, before anything failed, `run` again with `scope` naming the
 suspect functions (level 2): `variable_history` then shows every assignment in them, line by line,
-with the values. `find` and `neighbors` answer from the static graph: where a
+with the values. When a value is wrong, ask `origin` where it came from: it walks back through
+the assignments, arguments, return values, globals and attributes that made it, across functions,
+each with its line and value (exact lines for a local assigned in several places need its
+function in a `scope`: it says when, and how). `find` and `neighbors` answer from the static graph: where a
 function is, who calls it, what it calls, which variables it reads and writes, even for code that
 did not run. Runs are kept: `runs` lists them, and every query takes a run id (default: the last).
 """
@@ -128,6 +131,23 @@ TOOLS = [
         },
     },
     {
+        "name": "origin",
+        "description": "Where a value came from. From one variable of one call, walks back through what made it, each step with its line, code and value: the assignment that set it, the caller that passed it (a parameter), the call that returned it, the last call that set a global or an attribute of the same object; then what fed those, across functions. Use it on a wrong value (a wrong result, a bad argument or local in `traceback`) rather than guessing. A local assigned on several lines needs its function in a `scope` (level 2) to know which line ran: the answer says so, and how to re-run. The data paths come from static analysis: calls through objects of unknown type, and changes made inside containers, can be missing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "function": {"type": "string", "description": "A node id (`pkg.mod:Class.method`) or its end (`Class.method`, `method`). Not needed with `frame`."},
+                "variable": {"type": "string", "description": "A local or parameter (`due`), `return` (what the call returned), an attribute of self (`self.total`), a global the function reads (`RATE`), or a variable's node id (`pkg.mod:Class#total`)."},
+                "frame": {"type": "integer", "description": "Which call (#N in other answers; default: the function's last call)."},
+                "at": {"type": "integer", "description": "The value at this moment, in ns since the run started, as given where a walk was cut (default: the call's end)."},
+                "depth": {"type": "integer", "description": "Steps followed back (default 8)."},
+                "run": RUN_ARG,
+                "process": PROCESS_ARG,
+            },
+            "required": ["variable"],
+        },
+    },
+    {
         "name": "find",
         "description": "Find functions and classes in the project's static graph by name: their node id, file and line.",
         "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "A name, or the end of a node id (`Cart.total`)."}}, "required": ["name"]},
@@ -150,6 +170,7 @@ class Server:
         self.runs_dir = runs_folder(self.root)
         self.graph: dict | None = None
         self.graph_stamp: tuple | None = None
+        self.graph_index: tuple | None = None  # (graph, origins.Graph of it), for `origin`
 
     # JSON-RPC
 
@@ -242,6 +263,8 @@ class Server:
                 return self.frame(trace, int(required(args, "frame")))
             if name == "variable_history":
                 return self.history(trace, args)
+            if name == "origin":
+                return self.origin(trace, args)
         raise ToolError(f"unknown tool: {name}")
 
     def run(self, args: dict) -> str:
@@ -366,6 +389,22 @@ class Server:
         if args.get("variable") and not found["total"]:
             return f"{args['variable']} was never assigned in {', '.join(found['nodes'])} ({plural(found['calls'], 'call')}): check the name, or ask without `variable`"
         return render_history(found).replace("(--limit, --offset)", "(limit, offset)")
+
+    def origin(self, trace: Trace, args: dict) -> str:
+        from luciole.origins import OriginError, origin, render_origin
+        from luciole.slicing import Graph
+
+        function, frame, at = args.get("function"), args.get("frame"), args.get("at")
+        if not function and frame is None:
+            raise ToolError("missing argument: function (or frame)")
+        graph = self.static_graph()
+        if self.graph_index is None or self.graph_index[0] is not graph:
+            self.graph_index = (graph, Graph(graph))
+        try:
+            found = origin(trace, self.graph_index[1], function, required(args, "variable"), int(frame) if frame is not None else None, int(at) if at is not None else None, int(args.get("depth") or 8))
+        except OriginError as problem:
+            raise ToolError(f"{problem} (`calls` lists a function's calls, `find` looks names up)") from None
+        return render_origin(found, rerun="mcp")
 
     # Static graph
 

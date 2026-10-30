@@ -87,7 +87,7 @@ def test_initialize_and_list_tools(project):
     assert reply["result"]["capabilities"] == {"tools": {}}
     assert "run" in reply["result"]["instructions"]
     tools = {tool["name"]: tool for tool in client.request("tools/list")["result"]["tools"]}
-    assert set(tools) == {"run", "runs", "summary", "exceptions", "traceback", "calls", "call_tree", "frame", "variable_history", "find", "neighbors"}
+    assert set(tools) == {"run", "runs", "summary", "exceptions", "traceback", "calls", "call_tree", "frame", "variable_history", "origin", "find", "neighbors"}
     assert tools["run"]["inputSchema"]["required"] == ["command"]
     assert client.request("no/such/method")["error"]["code"] == -32601
     client.close()

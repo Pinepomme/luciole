@@ -41,7 +41,14 @@ work with any Python 3.10+.
      the time coroutines spend awaiting);
    - `variable_history FUNCTION [variable] [frame]`: every assignment to its local variables,
      call by call and line by line, with the values. It needs a run with a `scope` covering the
-     function (below); otherwise it says so, and how to get one.
+     function (below); otherwise it says so, and how to get one;
+   - `origin FUNCTION VARIABLE [frame] [at] [depth]`: where a wrong value came from, walked back
+     across functions: the assignment that set it, the caller that passed it, the call that
+     returned it, the last call that set a global or an attribute of the same object, then what
+     fed those, each with its line, code and value (see [origins.md](origins.md)). `VARIABLE` is a
+     local or parameter, `return`, `self.attr`, or a global the function reads. Values that crossed
+     calls are known at level 1; for a local assigned on several lines, the answer names the
+     function to put in a `scope` to know which line ran.
 3. When a wrong value was made inside a function, long before anything failed (so that the
    locals `traceback` shows are not enough), `run` the same command again with `scope`, the
    suspect functions: `scope: ["cart:checkout", "Cart.*"]` (node ids or their ends, `*` as a
