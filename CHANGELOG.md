@@ -29,8 +29,9 @@
   arguments and return value, as short snapshots, with secrets (`password`, `token`, `api_key`…)
   redacted. `luciole trace run.sqlite summary|calls NODE|tree|exceptions` reads it, as text or
   `--json`. With auto-start, `luciole env --trace DIR` (or `LUCIOLE_TRACE=DIR`) makes every
-  Python process write its own trace, child processes included. The format is documented in
-  `docs/trace-format.md`.
+  Python process write its own trace, child processes included. `--trace DIR/` makes a new file
+  in `DIR`, creating it. If the file cannot be written (a full disk), tracing stops with a
+  warning and the program runs on. The format is documented in `docs/trace-format.md`.
 - Auto-start: with the **Luciole: on** switch (status bar, setting `luciole.autoStart`), every
   Python program started in a new VS Code terminal lights up the view, child processes included
   (forked ones too). Nothing is started when the view is not listening. `luciole env` does the
