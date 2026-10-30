@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- The recorded history in VS Code. Every Run Live (under the debugger or in a terminal) also
+  records a level 1 trace, in the run folders `luciole mcp` uses (`~/.luciole/runs`, the last 50
+  per project; setting `luciole.recordHistory`, on by default). A new **Calls** view in the
+  Luciole sidebar lists the workspace's runs, yours and an agent's, newest first; under each, its
+  processes, their exceptions (with the frames they went through and those frames' locals) and
+  their call tree, loaded a level at a time and a page at a time, repeated calls collapsed into
+  `×N`, each call with its arguments and return value or exception. Clicking a call flies the
+  brain to it and opens the line that called it; **Show Values** opens its values, and its
+  variables over time when the run recorded them (level 2).
+- **Replay**: a recorded run plays back on the brain with live mode's own lighting, under a
+  timeline with play/pause, a scrubber that jumps anywhere in the run, and speeds from 1/10000×
+  to 10×. Only the frames on screen are read from the trace, so long runs replay as smoothly as
+  short ones.
+- **Focus Around** dims every function more than N calls away from one (setting
+  `luciole.focusDepth`), and **Filters…** hides tests and private helpers; neither adds draw calls.
+- `luciole runs [--root DIR] [--json]` lists a project's recorded runs (`new` and `finish` make
+  and end one); `luciole trace FILE children|frame|frames|serve` answer what the views ask: a
+  call's children a page at a time, one call, live frames that replay the run, and a query server
+  on stdin. Run ids no longer reuse the id of a run just pruned.
 - Origin queries: `luciole trace FILE origin FUNCTION VARIABLE [--frame N]`, and the MCP tool
   `origin`, answer "where did this value come from?". From one variable of one call, they walk
   back through the assignment that set it, the caller that passed it, the call that returned it,

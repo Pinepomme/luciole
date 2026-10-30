@@ -296,6 +296,57 @@ class Trace:
             entry["more"] = counts.get(entry["frame"], 0) - len(entry["children"])
         return _collapse(roots)
 
+    def children(self, frame: int | None = None, after: int = 0, until: int | None = None, limit: int = 100, collapse: bool = True, scan: int = 20_000) -> dict:
+        """The calls `frame` made (default: the roots), one page at a time, for views that open
+        a call tree level by level: `{"calls", "next"}`.
+
+        Each item is a call (like an item of calls()) with `count`, `last` (the frame id of the
+        last call it stands for), `duration_ns` (their sum) and `calls` (how many calls it made).
+        With `collapse`, consecutive calls of one function that ended the same way are one item,
+        `count` of them (its values are the first call's); the calls below it are then those of
+        all of them. Pages go by frame id: `after` the last id of the previous page (`next`, None
+        at the end), `until` an id not to go past (the calls of a collapsed item: `after` its
+        frame - 1, `until` its `last`, without `collapse`). At most `limit` items, from at most
+        `scan` calls read."""
+        where, params = ("caller = ?", [frame]) if frame is not None else ("caller IS NULL", [])
+        if until is not None:
+            where, params = where + " AND id <= ?", [*params, until]
+        rows = self.db.execute(f"SELECT id, node, end_kind, start_ns, end_ns FROM frames WHERE {where} AND id > ? ORDER BY id LIMIT ?", [*params, after, scan + 1])
+        end = None
+        groups: list[dict] = []
+        last_id, read, more = after, 0, False
+        for row in rows:
+            if read >= scan:
+                more = True
+                break
+            group = groups[-1] if groups else None
+            if collapse and group and group["node"] == row["node"] and group["end"] == row["end_kind"]:
+                group["count"] += 1
+            elif len(groups) >= limit:
+                more = True
+                break
+            else:
+                group = {"frame": row["id"], "node": row["node"], "end": row["end_kind"], "count": 1, "duration_ns": 0}
+                groups.append(group)
+            if row["end_ns"] is None and end is None:
+                end = self.run()["duration_ns"]
+            group["last"] = row["id"]
+            group["duration_ns"] += (row["end_ns"] if row["end_ns"] is not None else end) - row["start_ns"]
+            last_id, read = row["id"], read + 1
+        calls = []
+        counts = self._child_counts([group["frame"] for group in groups if group["count"] == 1])
+        for group in groups:
+            call = self.frame(group["frame"])
+            call.update(count=group["count"], last=group["last"])
+            if group["count"] > 1:
+                call["duration_ns"] = group["duration_ns"]
+                below = self.db.execute("SELECT COUNT(*) FROM frames WHERE caller BETWEEN ? AND ? AND caller IN (SELECT id FROM frames WHERE " + where + " AND id BETWEEN ? AND ?)", [group["frame"], group["last"], *params, group["frame"], group["last"]]).fetchone()[0]
+                call["calls"] = below
+            else:
+                call["calls"] = counts.get(group["frame"], 0)
+            calls.append(call)
+        return {"calls": calls, "next": last_id if more else None}
+
     def exceptions(self, limit: int = 50, offset: int = 0) -> dict:
         """Exceptions in the order they were raised: `{"total", "exceptions"}`. Each has the frame
         and line where it was raised (or where it reached project code), what it was chained from,

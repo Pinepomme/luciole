@@ -4,6 +4,7 @@
  * come from actions.ts, running.ts and map.ts; this file only turns them into VS Code tree items.
  */
 
+import * as path from "path";
 import * as vscode from "vscode";
 import { ActionItem, actionItems } from "./actions";
 import type { Graph } from "./graph";
@@ -94,6 +95,9 @@ export class MapView implements vscode.TreeDataProvider<MapEntry>, vscode.Dispos
   setGraph(graph: Graph | undefined, target?: string): void {
     this.tree = graph ? buildMap(graph) : undefined;
     this.root = graph?.root;
+    this.places = new Map(
+      (graph?.nodes ?? []).filter((node) => node.kind === "function" || node.kind === "module").map((node) => [node.id, { file: path.resolve(graph!.root, node.file), line: node.loc.line }]),
+    );
     this.counts = this.tree ? runningCounts(this.tree, this.running) : new Map();
     if (this.view) {
       this.view.message = undefined;
@@ -141,6 +145,13 @@ export class MapView implements vscode.TreeDataProvider<MapEntry>, vscode.Dispos
   get functions(): MapEntry[] {
     return this.tree ? mapFunctions(this.tree) : [];
   }
+
+  /** Where the graph shown defines `node` (a function, or a module's code): absolute file, 1-based line. */
+  locate(node: string): { file: string; line: number } | undefined {
+    return this.places.get(node);
+  }
+
+  private places = new Map<string, { file: string; line: number }>();
 
   getChildren(entry?: MapEntry): MapEntry[] {
     if (!this.tree) {

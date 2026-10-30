@@ -5,6 +5,7 @@
  *   node out/dev/screenshot.js [path] [--events FILE [--frames N] [--every MS] [--zoom F]]
  *                              [--breakpoint FILE:LINE] [--stopped FILE:LINE] [--out dir] [--fps] [--cpu [--slow N] [--profile]]
  *                              [--theme light] [--focus ID] [--without-debugger]
+ *                              [--trace FILE [--at SECONDS]] [--around ID [--depth N]] [--hide-tests] [--hide-private]
  *
  * --focus shows what a click in the Map view does: the camera flies to the neuron ID
  * (`shop:Cart.add`) or the region ID (`mod:shop`, `cls:shop:Cart`, `pkg:src/app`).
@@ -23,6 +24,10 @@
  * --breakpoint and --stopped (FILE relative to the graph's
  * root) show a breakpoint and the debugger stopped there, as VS Code would send them.
  * --without-debugger shows a Run Live running in a terminal, the Python debugger not installed.
+ * --trace replays a recorded run (a trace file, `luciole run --trace FILE --level 1 ...`, or one in
+ * ~/.luciole/runs) as the Calls view's Replay does, pauses at SECONDS (default: the deepest
+ * stacks) and takes 6-replay.png. --around ID (with --depth N), --hide-tests and --hide-private
+ * show focus and filters: 7-filters.png.
  *
  * Needs a Chromium: set CHROME_PATH, or have one in the Playwright cache (~/.cache/ms-playwright).
  */
@@ -245,6 +250,22 @@ async function main(): Promise<void> {
     await shot("4-focus");
   }
 
+  // Replay: a moment of a recorded run (a trace), the way the Calls view's Replay shows it.
+  const traceFile = option("--trace");
+  if (traceFile) {
+    await replayShot(page, path.resolve(traceFile), option("--at"), shot);
+  }
+
+  // Focus and filters: only the functions around one, tests and private helpers hidden.
+  const around = option("--around");
+  if (around || process.argv.includes("--hide-tests") || process.argv.includes("--hide-private")) {
+    const filters = { around, depth: Number(option("--depth") ?? 1), hideTests: process.argv.includes("--hide-tests"), hidePrivate: process.argv.includes("--hide-private") };
+    await page.evaluate((filters) => window.postMessage({ type: "filters", filters }, "*"), filters);
+    await page.waitForTimeout(1200); // the camera flies to the focus
+    await shot("7-filters");
+    await fps(" with filters");
+  }
+
   if (process.argv.includes("--without-debugger")) {
     await page.evaluate(() => window.postMessage({ type: "debuggerNotice", show: true }, "*"));
     await shot("5-without-debugger");
@@ -257,6 +278,74 @@ async function main(): Promise<void> {
     console.error(problems.join("\n"));
     process.exit(1);
   }
+}
+
+/**
+ * --trace FILE [--at SECONDS]: replays a trace as the extension does (replayStart, then the
+ * timeline's replayFetch requests answered by `luciole trace FILE serve`), jumps to SECONDS
+ * (default: the moment with the deepest stacks), pauses there and takes 6-replay.png.
+ */
+async function replayShot(page: import("playwright-core").Page, file: string, at: string | undefined, shot: (name: string) => Promise<void>): Promise<void> {
+  const luciole = (args: string[]) =>
+    execFileSync("python3", ["-m", "luciole", ...args], { cwd: path.join(repo, "src"), env: { ...process.env, PYTHONPATH: path.join(repo, "src") }, maxBuffer: 1 << 28 }).toString();
+  const end = (JSON.parse(luciole(["trace", file, "summary", "--json"])) as { run: { duration_ns: number } }).run.duration_ns;
+  let moment = at !== undefined ? Number(at) * 1e9 : undefined;
+  if (moment === undefined) {
+    const coarse = JSON.parse(luciole(["trace", file, "frames", "--every", String(end / 1e6 / 200), "--json"])) as { t: number; stacks: { stack: string[] }[] }[];
+    const depth = (f: { stacks: { stack: string[] }[] }) => f.stacks.reduce((sum, s) => sum + s.stack.length, 0);
+    moment = coarse.reduce((best, f) => (depth(f) > depth(best) ? f : best), coarse[0]).t * 1e9;
+  }
+  const { spawn } = await import("child_process");
+  const server = spawn("python3", ["-m", "luciole", "trace", file, "serve"], { cwd: path.join(repo, "src"), env: { ...process.env, PYTHONPATH: path.join(repo, "src") } });
+  const replies = new Map<number, (result: unknown) => void>();
+  let buffer = "";
+  server.stdout.setEncoding("utf8");
+  server.stdout.on("data", (chunk: string) => {
+    buffer += chunk;
+    for (let n = buffer.indexOf("\n"); n >= 0; n = buffer.indexOf("\n")) {
+      const reply = JSON.parse(buffer.slice(0, n)) as { id: number; result: unknown };
+      buffer = buffer.slice(n + 1);
+      replies.get(reply.id)?.(reply.result);
+    }
+  });
+  let nextId = 1;
+  const query = (args: object) =>
+    new Promise<unknown>((resolve) => {
+      const id = nextId++;
+      replies.set(id, resolve);
+      server.stdin.write(JSON.stringify({ id, query: "frames", args }) + "\n");
+    });
+  // Answer the timeline's requests as GraphPanel does, for `ms`.
+  const serve = async (ms: number) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      const fetches = (await page.evaluate(() => {
+        const posted = (window as any).__posted as { type: string }[];
+        const fetches = posted.filter((m) => m.type === "replayFetch");
+        (window as any).__posted = posted.filter((m) => m.type !== "replayFetch");
+        return fetches as unknown;
+      })) as { seq: number; from: number; to: number; every: number }[];
+      for (const { seq, from, to, every } of fetches) {
+        const frames = await query({ from, to, every });
+        await page.evaluate(({ seq, frames }) => window.postMessage({ type: "replayFrames", seq, frames }, "*"), { seq, frames });
+      }
+      await page.waitForTimeout(30);
+    }
+  };
+  await page.evaluate((end) => window.postMessage({ type: "replayStart", label: "trace", start: 0, end }, "*"), end);
+  await serve(300);
+  // Jump there with the scrubber, then pause: the brain shows that moment.
+  await page.evaluate((value) => {
+    const scrub = document.getElementById("replayScrub") as HTMLInputElement;
+    scrub.value = String(value);
+    scrub.dispatchEvent(new Event("input"));
+    scrub.dispatchEvent(new Event("change"));
+    (document.getElementById("replayPlay") as HTMLButtonElement).click();
+  }, Math.round((moment / end) * 1000));
+  await serve(1000);
+  console.log(`replay at ${(moment / 1e9).toFixed(4)} s of ${(end / 1e9).toFixed(4)} s: ${await page.textContent("#replayTime")}, path: ${await page.textContent("#path")}`);
+  await shot("6-replay");
+  server.stdin.end();
 }
 
 /**

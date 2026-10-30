@@ -326,6 +326,33 @@ luciole trace run.sqlite history NODE [--var NAME] [--frame N] [--limit 50]   # 
 luciole trace run.sqlite origin NODE VARIABLE [--frame N] [--at NS] [--depth 8]  # where a value came from
 ```
 
+For tools that browse a trace (VS Code's Calls view and replay, [`src/luciole/browse.py`](../src/luciole/browse.py)):
+
+```sh
+luciole trace run.sqlite children [--frame N] [--after ID] [--until ID] [--limit 100] [--no-collapse]
+luciole trace run.sqlite frame N                                   # one call: arguments, result or exception, locals
+luciole trace run.sqlite frames [--from S] [--to S] [--every MS]  # live frames that replay the run
+luciole trace run.sqlite serve                                    # JSON queries on stdin, one per line
+```
+
+- `children`: the calls frame `N` made (default: the roots), a page at a time, consecutive calls
+  of one function that ended the same way collapsed into one item with a `count`. Each item is a
+  call (like an item of `calls`) plus `count`, `last` (the last frame it stands for) and `calls`
+  (how many calls it made). Pages go by frame id, so a call with a million children opens as fast
+  as one with ten: `next` is the `--after` of the next page (null at the end), and a collapsed
+  item's calls, one by one, are `--after FRAME-1 --until LAST --no-collapse`.
+- `frames`: what live mode streams ("Live events" in [graph-format.md](graph-format.md)), made
+  from the trace, one frame per `--every` ms of the run: `t` (the end of its window, in seconds),
+  `stacks` (each thread's project frames then, outermost first), and the `calls`, `links` and
+  `spawns` started in its window. Frame ids follow start times, so the stacks at any moment take
+  one indexed lookup per frame on them, whatever the trace's size: a replay jumps without reading
+  what came before. Frames have no `waiting` (a trace has a coroutine's total time suspended, not
+  when).
+- `serve`: answers `{"id": 1, "query": "children", "args": {"frame": 3}}` lines with
+  `{"id": 1, "result": ...}` (or `"error"`), the queries being `run`, `summary`, `children`,
+  `frame`, `exceptions`, `traceback`, `history` and `frames` with the arguments above (`from`,
+  `to`, `every` in nanoseconds). The trace is opened again for each request, so a run still
+  recording is read as it is now.
 `origin` walks a value back through the assignments, arguments, return values, globals and
 attributes that made it, across functions, with the static graph: see [origins.md](origins.md),
 which also says what each level lets it answer, and its limits.
@@ -344,6 +371,7 @@ with Trace("run.sqlite") as trace:
     trace.traceback(exception_id=None)            # {"exception", "frames", "handled_in"}: innermost first
     trace.history("checkout", name=None, frame=None, limit=20, offset=0)
                               # {"nodes", "scope", "recorded", "calls", "total", "frames": [{..., "writes"}]}
+    trace.children(frame=None, after=0, until=None, limit=100, collapse=True)   # {"calls", "next"}
     trace.frame(7)            # one call, like an item of calls()
     trace.snapshot(3)         # {"type", "repr", "items"?, "truncated"?}
 ```

@@ -10,11 +10,14 @@ import * as THREE from "three";
 import type { Graph } from "../graph";
 import type { FromWebview, LiveFrame, SourceLine, ThreadStack, ToWebview } from "../messages";
 import { Brain, breakpointAction, buildBrain, neuronAt, Synapse, SynapseKind, synapseId } from "./brain";
+import { Filters, filtersText, NO_FILTERS, Shade, shades } from "./filters";
 import { addCall, alongPolyline, traceAt } from "./flow";
 import { LineBatch, SphereBatch } from "./batches";
+import { fitCamera, flyToNode } from "./camera";
 import { declutterLabels, label, makeRegionLabels, regionLabels } from "./labels";
 import { bundle, Layout, layoutBrain, layoutByCalls, NEURON_GAP, regionMembers } from "./layout";
 import { baseOpacity, disposeStroke, drawStroke, markOf, NeuronNode, neuronObject, neuronUnder, raysChanged, ringOf, SynapseLink, synapseObject, worldPerPixel } from "./objects";
+import { ReplayBar } from "./replay";
 import { neuronTooltip, pathText, synapseTooltip } from "./text";
 import { ACCENT, background, FOCUS, LINE, PRIMARY, RED, SECONDARY } from "./theme";
 
@@ -29,6 +32,10 @@ const FADE = 0.35;
 /** The ring around a lit function: its width, as a multiple of its sphere's radius, and never narrower on screen than RING_MIN_PX. */
 const RING_SCALE = 2.6;
 const RING_MIN_PX = 12;
+/** Filtered-out neurons fade this far into the background (dimmed: outside the focus; hidden: tests, helpers), their lines to this share of their opacity. */
+const SHADE_FADE = { dim: 0.8, hidden: 0.93 };
+const SHADE_LINES = { dim: 0.2, hidden: 0.03 };
+const BACKGROUND = new THREE.Color(background);
 
 const vscode = acquireVsCodeApi();
 const statusEl = document.getElementById("status")!;
@@ -71,6 +78,10 @@ let focusedRegion: string | undefined;
 /** The Map's focus changed: region names are placed again (the camera may not move). */
 let refocused = false;
 let callsThisSecond: { t: number; n: number }[] = [];
+/** Focus and filters (filters.ts), and the neurons they shade. */
+let filters: Filters = NO_FILTERS;
+let shaded = new Map<string, Shade>();
+const clearFiltersButton = document.getElementById("clearFilters") as HTMLButtonElement;
 
 const graph = new ForceGraph3D(document.getElementById("brain")!)
   .backgroundColor(background)
@@ -254,8 +265,9 @@ function animate(now: number): void {
     const hasBreakpoint = breakpointNodes.has(node.id);
     // What the Map points at gets a ring in the text color, while nothing lights it up.
     const isFocused = node.id === focused;
+    const shade = shaded.get(node.id);
     // A cold neuron whose look depends on nothing that changed is left as it is: most of them.
-    const look = (isStopped ? 1 : 0) | (isWaiting ? 2 : 0) | (node === hovered ? 4 : 0) | (hasBreakpoint ? 8 : 0) | (showAll ? 16 : 0) | (isFocused ? 32 : 0);
+    const look = (isStopped ? 1 : 0) | (isWaiting ? 2 : 0) | (node === hovered ? 4 : 0) | (hasBreakpoint ? 8 : 0) | (showAll ? 16 : 0) | (isFocused ? 32 : 0) | (shade === "dim" ? 64 : shade ? 128 : 0);
     // A steady ring (waiting on an await, or the Map's) is only scaled again when the camera moved:
     // else a coroutine waiting for minutes, or a function left focused, would keep the brain drawing.
     const steadyRing = (isWaiting || isFocused) && !cameraWasMoving;
@@ -270,7 +282,11 @@ function animate(now: number): void {
       markOf(parts).visible = hasBreakpoint; // a sprite drawn at opacity 0 still costs a draw call
     }
     const color = isStopped ? RED : ACCENT;
-    parts.color.copy(parts.base).lerp(color, node.heat);
+    parts.color.copy(parts.base);
+    if (shade) {
+      parts.color.lerp(BACKGROUND, SHADE_FADE[shade]);
+    }
+    parts.color.lerp(color, node.heat);
     let ringColor = color;
     let ringOpacity = isWaiting ? 1 : node.heat;
     if (isFocused && ringOpacity < 0.5) {
@@ -288,7 +304,7 @@ function animate(now: number): void {
         ring.updateMatrix();
       }
     }
-    const wantsLabel = showAll || node.heat > 0.15 || isWaiting || isFocused || node === hovered || hasBreakpoint;
+    const wantsLabel = (showAll && !shade) || node.heat > 0.15 || isWaiting || isFocused || node === hovered || hasBreakpoint;
     if (wantsLabel || parts.label) {
       const text = label(node);
       text.userData.wanted = wantsLabel; // declutterLabels starts from it: a cold neuron's is not set again
@@ -330,7 +346,7 @@ function animate(now: number): void {
     // Lines fade as there are more of them (baseOpacity): restyle them all when synapses are added.
     styledLinks = links.length;
     for (const link of links) {
-      link.opacity = link.color ? baseOpacity(link, links.length) + (1 - baseOpacity(link, links.length)) * link.heat : link.opacity;
+      link.opacity = link.color ? linkOpacity(link) : link.opacity;
     }
     lineBatch.rewriteAll();
   }
@@ -340,7 +356,7 @@ function animate(now: number): void {
     link.heat = onPath ? 1 : link.heat * fade < 0.002 ? 0 : link.heat * fade;
     if (link.color) {
       link.color.copy(LINE).lerp(ACCENT, link.heat);
-      link.opacity = baseOpacity(link, links.length) + (1 - baseOpacity(link, links.length)) * link.heat;
+      link.opacity = linkOpacity(link);
       lineBatch.recolor(link);
     }
     if (!onPath && link.heat === 0) {
@@ -363,6 +379,14 @@ function animate(now: number): void {
     graph.pauseAnimation();
   }
   requestAnimationFrame(animate);
+}
+
+/** A line's opacity: fainter as there are more (baseOpacity), full on the call path, faint when an end is filtered out. */
+function linkOpacity(link: SynapseLink): number {
+  const base = baseOpacity(link, links.length);
+  const ends = [link.synapse.source, link.synapse.target].map((id) => shaded.get(id));
+  const shade = ends.includes("hidden") ? SHADE_LINES.hidden : ends.includes("dim") ? SHADE_LINES.dim : 1;
+  return (base + (1 - base) * link.heat) * shade;
 }
 
 /** Draws again for at least `ms` (input, a message, a camera flight). */
@@ -476,6 +500,7 @@ function load(graphData: Graph, newTarget: string): void {
     }
   }
   pathway = new Set();
+  shaded = shades(brain, filters);
   if (!sameTarget) {
     fitted = false;
     focused = undefined;
@@ -527,7 +552,8 @@ function onDebugStopped(at: SourceLine | undefined): void {
 
 // Live mode
 
-function onLive(frame: LiveFrame): void {
+/** Lights the brain with a frame of a live run, or of a replay (`replaying`: the replay bar says where it is). */
+function onLive(frame: LiveFrame, replaying = false): void {
   if (frame.done) {
     live = false;
     onStack = new Set();
@@ -539,7 +565,9 @@ function onLive(frame: LiveFrame): void {
     return;
   }
   live = true;
-  liveButton.textContent = "Run again";
+  if (!replaying) {
+    liveButton.textContent = "Run again";
+  }
   const threads: ThreadStack[] = (frame.stacks ?? [])
     .map(({ thread, stack }) => ({ thread, stack: stack.filter((id) => nodeById.has(id)) }))
     .filter(({ stack }) => stack.length);
@@ -596,8 +624,44 @@ function onLive(frame: LiveFrame): void {
   callsThisSecond = callsThisSecond.filter((c) => now - c.t < 1000);
   callsThisSecond.push({ t: now, n: calls });
   const rate = callsThisSecond.reduce((sum, c) => sum + c.n, 0);
-  setStatus(`live · ${rate} calls/s`);
+  if (!replaying) {
+    setStatus(`live · ${rate} calls/s`);
+  }
   pathEl.textContent = pathText(threads, frame.waiting ?? {}, (id) => nodeById.get(id)?.neuron.label);
+}
+
+// Replay and filters
+
+const replay = new ReplayBar({
+  post: (message) => vscode.postMessage(message),
+  show: (frame) => {
+    wake();
+    onLive(frame, true);
+  },
+  reset: () => {
+    onLive({ done: true });
+    setStatus(summary());
+  },
+  status: setStatus,
+});
+
+/** New focus or filters: neurons and lines are recolored (the look of each shaded one changed), no object added. */
+function applyFilters(next: Filters): void {
+  filters = next;
+  shaded = brain ? shades(brain, filters) : new Map();
+  styledLinks = -1; // every line restyled with the next frame
+  const text = filtersText(filters, (id) => nodeById.get(id)?.neuron.label);
+  clearFiltersButton.hidden = !text;
+  clearFiltersButton.title = text ? `Showing ${text}: click to show every function again` : "";
+  setStatus(text ? `${summary()} · ${text}` : summary());
+  if (filters.around && nodeById.has(filters.around)) {
+    // Ringed as the Map's choice is, and the functions around it framed.
+    focused = filters.around;
+    focusedRegion = undefined;
+    refocused = true;
+    fit(800, nodes.filter((node) => !shaded.has(node.id)));
+  }
+  wake();
 }
 
 // UI
@@ -631,53 +695,17 @@ function focusRegion(id: string): void {
   }
 }
 
-/**
- * Frames the whole brain (or `subset` of it) from where the camera looks: its extent across and
- * up the screen, so the flat map fills the view, and room for labels.
- */
+/** Frames the whole brain (or `subset` of it). */
 function fit(duration: number, subset: NeuronNode[] = nodes): void {
-  if (!subset.length) {
-    return;
+  if (subset.length) {
+    wake(duration + 300);
+    fitCamera(graph, subset, nodes.length <= ALWAYS_LABEL, duration);
   }
-  const camera = graph.camera() as THREE.PerspectiveCamera;
-  const forward = camera.getWorldDirection(new THREE.Vector3());
-  const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
-  const up = new THREE.Vector3().crossVectors(right, forward).normalize();
-  const point = new THREE.Vector3();
-  const low = [Infinity, Infinity, Infinity];
-  const high = [-Infinity, -Infinity, -Infinity];
-  for (const node of subset) {
-    point.set(node.x ?? 0, node.y ?? 0, node.z ?? 0);
-    const r = node.parts?.radius ?? 0;
-    [point.dot(right), point.dot(up), point.dot(forward)].forEach((v, i) => {
-      low[i] = Math.min(low[i], v - r);
-      high[i] = Math.max(high[i], v + r);
-    });
-  }
-  const mid = (i: number) => (low[i] + high[i]) / 2;
-  const center = new THREE.Vector3().addScaledVector(right, mid(0)).addScaledVector(up, mid(1)).addScaledVector(forward, mid(2));
-  // Room for the labels above packages, and for the names around small brains.
-  const margin = nodes.length <= ALWAYS_LABEL ? 1.3 : 1.15;
-  const vertical = (camera.fov / 2) * (Math.PI / 180);
-  const horizontal = Math.atan(Math.tan(vertical) * camera.aspect);
-  const halfWidth = Math.max((high[0] - low[0]) / 2, 20) * margin;
-  const halfHeight = Math.max((high[1] - low[1]) / 2, 20) * margin;
-  const distance = Math.max(halfWidth / Math.tan(horizontal), halfHeight / Math.tan(vertical)) + (high[2] - low[2]) / 2;
-  const position = center.clone().addScaledVector(forward, -distance);
-  wake(duration + 300);
-  graph.cameraPosition({ x: position.x, y: position.y, z: position.z }, { x: center.x, y: center.y, z: center.z }, duration);
 }
 
 function flyTo(node: NeuronNode): void {
-  const distance = 80;
-  const length = Math.hypot(node.x ?? 0, node.y ?? 0, node.z ?? 0) || 1;
-  const ratio = 1 + distance / length;
   wake(1100);
-  graph.cameraPosition(
-    { x: (node.x ?? 0) * ratio, y: (node.y ?? 0) * ratio, z: (node.z ?? 0) * ratio },
-    { x: node.x ?? 0, y: node.y ?? 0, z: node.z ?? 0 },
-    800,
-  );
+  flyToNode(graph, node);
 }
 
 function setStatus(text: string): void {
@@ -702,6 +730,8 @@ document.getElementById("runWith")!.addEventListener("click", () => vscode.postM
 stopButton.addEventListener("click", () => vscode.postMessage({ type: "stopLive" }));
 document.getElementById("refresh")!.addEventListener("click", () => vscode.postMessage({ type: "refresh" }));
 document.getElementById("fit")!.addEventListener("click", () => fit(600));
+document.getElementById("replayLatest")!.addEventListener("click", () => vscode.postMessage({ type: "replayLatest" }));
+clearFiltersButton.addEventListener("click", () => vscode.postMessage({ type: "clearFilters" }));
 
 window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
   const message = event.data;
@@ -716,6 +746,7 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
   } else if (message.type === "liveStarted") {
     setStatus(`starting ${message.script}…`);
   } else if (message.type === "live") {
+    replay.stop(); // a program runs now: show it, not the past
     onLive(message.frame);
   } else if (message.type === "breakpoints") {
     breakpoints = message.breakpoints;
@@ -728,6 +759,16 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
     focusNode(message.node);
   } else if (message.type === "focusRegion") {
     focusRegion(message.region);
+  } else if (message.type === "replayStart") {
+    replay.start(message.label, message.start, message.end);
+  } else if (message.type === "replayFrames") {
+    replay.receive(message.seq, message.frames);
+  } else if (message.type === "replayFailed") {
+    replay.failed(message.seq, message.message);
+  } else if (message.type === "replayStop") {
+    replay.stop();
+  } else if (message.type === "filters") {
+    applyFilters(message.filters);
   } else if (message.type === "liveState") {
     const { running, stopping } = message.state;
     stopButton.hidden = !running || message.state.debugged; // the debug toolbar stops a debugged run
@@ -748,6 +789,7 @@ Object.assign(window, {
     },
     isLive: () => live,
     paused: () => paused,
+    replaying: () => replay.active,
   },
 });
 

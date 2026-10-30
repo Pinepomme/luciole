@@ -9,6 +9,9 @@
     luciole run --trace FILE [--level 0|1] ...      also write a trace of the run (SQLite)
     luciole run --trace FILE --level 2 --scope PATTERN[,...] ...   also every assignment in those functions
     luciole trace FILE summary|calls NODE|tree|exceptions|traceback|history NODE [--json]   read a trace
+    luciole trace FILE children|frame N|frames|serve ...  what VS Code's history views ask (browse.py)
+    luciole runs [--root DIR] [--json]            recorded runs of a project (MCP and Run Live), newest first
+    luciole runs new --root DIR --command JSON [--cwd DIR] [--by vscode]   a new run folder; runs finish FOLDER
     luciole trace FILE origin NODE VARIABLE [--frame N] [--depth D] [--json]   where a value came from
 """
 
@@ -68,6 +71,16 @@ def main(argv: list[str] | None = None) -> int:
     tests_cmd.add_argument("--json", action="store_true", help="print a JSON list of absolute paths")
     mcp_cmd = commands.add_parser("mcp", help="an MCP server (stdio) for agents: run programs under the recorder and query the runs")
     mcp_cmd.add_argument("--root", type=Path, default=Path.cwd(), help="project directory (default: the current directory)")
+    runs_cmd = commands.add_parser("runs", help="the recorded runs of a project (luciole mcp, VS Code's Run Live), newest first")
+    runs_cmd.add_argument("action", nargs="?", choices=["list", "new", "finish"], default="list", help="list (default); new: make a run folder and print it; finish: mark FOLDER's run ended")
+    runs_cmd.add_argument("folder", nargs="?", type=Path, help="finish: the run's folder")
+    runs_cmd.add_argument("--root", type=Path, default=Path.cwd(), help="project directory (default: the current directory)")
+    runs_cmd.add_argument("--cwd", type=Path, help="new: the folder the command runs in (default: the root)")
+    runs_cmd.add_argument("--level", type=int, default=1, help="new: the trace level it records at")
+    runs_cmd.add_argument("--by", default="vscode", help="new: who started it (vscode, agent)")
+    runs_cmd.add_argument("--exit-status", type=int, help="finish: the program's exit status, when known")
+    runs_cmd.add_argument("--command", dest="run_command", help='new: the command, as a JSON list (["python", "app.py"])')
+    runs_cmd.add_argument("--json", action="store_true", help="print JSON")
     trace_cmd = commands.add_parser("trace", help="read a trace written by luciole run --trace")
     trace_cmd.add_argument("file", type=Path, help="trace file (.sqlite)")
     trace_cmd.add_argument("--json", action="store_true", help="print JSON")
@@ -92,6 +105,20 @@ def main(argv: list[str] | None = None) -> int:
     history_cmd.add_argument("--frame", type=int, help="one call only: its frame id")
     history_cmd.add_argument("--limit", type=int, default=50, help="writes shown")
     history_cmd.add_argument("--offset", type=int, default=0)
+    children_cmd = queries.add_parser("children", help="the calls a frame made (default: the roots), a page at a time, repeated calls collapsed")
+    children_cmd.add_argument("--frame", type=int, help="frame id (default: the roots)")
+    children_cmd.add_argument("--after", type=int, default=0, help="frame id the previous page ended at")
+    children_cmd.add_argument("--until", type=int, help="frame id not to go past")
+    children_cmd.add_argument("--limit", type=int, default=100)
+    children_cmd.add_argument("--no-collapse", dest="collapse", action="store_false", help="one item per call")
+    frame_cmd = queries.add_parser("frame", help="one call: arguments, result or exception, locals")
+    frame_cmd.add_argument("frame", type=int)
+    frames_cmd = queries.add_parser("frames", help="live frames that replay the run (docs/graph-format.md, Live events)")
+    frames_cmd.add_argument("--from", dest="start", type=float, default=0, help="seconds since the run started")
+    frames_cmd.add_argument("--to", dest="end", type=float, help="seconds (default: the run's end)")
+    frames_cmd.add_argument("--every", type=float, default=50, help="milliseconds of the run per frame")
+    frames_cmd.add_argument("--limit", type=int, default=2000)
+    queries.add_parser("serve", help="answer JSON queries, one per line on stdin (for VS Code)")
     origin_cmd = queries.add_parser("origin", help="where a variable's value came from: the trace and the static graph, walked backwards")
     origin_cmd.add_argument("node", help="function's node id, or its end (- with --frame)")
     origin_cmd.add_argument("variable", help="a local or parameter, return, self.attribute, a global, or a variable's node id")
@@ -99,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
     origin_cmd.add_argument("--at", dest="time_ns", type=int, help="the value at this moment, in ns since the run started (default: the call's end)")
     origin_cmd.add_argument("--depth", type=int, default=8, help="steps followed back (default 8)")
     origin_cmd.add_argument("--branches", type=int, default=4, help="sources followed per step (default 4)")
-    for query in (summary_cmd, calls_cmd, tree_cmd, exceptions_cmd, traceback_cmd, history_cmd, origin_cmd):  # also accepted after the query
+    for query in (summary_cmd, calls_cmd, tree_cmd, exceptions_cmd, traceback_cmd, history_cmd, origin_cmd, children_cmd, frame_cmd, frames_cmd):  # also accepted after the query
         query.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
     args = parser.parse_args(argv)
 
@@ -108,6 +135,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.query == "history" and args.node is None and args.frame is None:
             parser.error("trace history: give a function, or --frame")
         return trace_command(args)
+    if args.command == "runs":
+        return runs_command(args, parser)
     if args.command in ("run", "env") and not getattr(args, "off", False):
         level, problem = scoped_level(args.level, args.scope)
         if problem:
@@ -198,9 +227,36 @@ def auto_start_env(port: int | None, root: Path | None, off: bool, trace: Path |
     return variables
 
 
+def runs_command(args, parser) -> int:
+    from luciole.runs import finish_run, list_runs, new_run, render_runs
+
+    if args.action == "finish":
+        if not args.folder or not (args.folder / "command.json").is_file():
+            parser.error("runs finish: give a run folder")
+        finish_run(args.folder, args.exit_status)
+        return 0
+    root = args.root.resolve()
+    if args.action == "new":
+        try:
+            command = json.loads(args.run_command or "[]")
+        except ValueError:
+            command = None
+        if not command or not isinstance(command, list):
+            parser.error('runs new: give the command as a JSON list: --command \'["python", "app.py"]\'')
+        run_id, folder = new_run(root, command, (args.cwd or root).resolve(), args.level, by=args.by)
+        print(json.dumps({"id": run_id, "folder": str(folder)}) if args.json else folder)
+        return 0
+    listing = list_runs(root)
+    print(json.dumps(listing, indent=2, ensure_ascii=False) if args.json else render_runs(listing))
+    return 0
+
+
 def trace_command(args) -> int:
+    from luciole.browse import query, render_children, render_frames, serve
     from luciole.trace import Trace, TraceError, render_calls, render_exceptions, render_history, render_summary, render_traceback, render_tree
 
+    if args.query == "serve":
+        return serve(args.file)
     try:
         trace = Trace(args.file)
     except TraceError as error:
@@ -219,6 +275,15 @@ def trace_command(args) -> int:
             result, text = trace.traceback(args.exception), render_traceback
         elif args.query == "history":
             result, text = trace.history(args.node, args.var, args.frame, args.limit, args.offset), render_history
+        elif args.query == "children":
+            result, text = trace.children(args.frame, args.after, args.until, args.limit, args.collapse), render_children
+        elif args.query == "frame":
+            result = trace.frame(args.frame)
+            text = lambda frame: render_calls({"nodes": [frame["node"]], "total": 1, "calls": [frame]}) if frame else f"no frame #{args.frame}"  # noqa: E731
+        elif args.query == "frames":
+            end = trace.run()["duration_ns"] if args.end is None else int(args.end * 1e9)
+            result = query(trace, "frames", {"from": int(args.start * 1e9), "to": end, "every": int(args.every * 1e6), "limit": args.limit})
+            text = render_frames
         else:
             result, text = trace.exceptions(args.limit, args.offset), render_exceptions
     print(json.dumps(result, indent=2, ensure_ascii=False) if args.json else text(result))

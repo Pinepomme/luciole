@@ -122,6 +122,8 @@ export interface PythonDebugConfiguration {
   justMyCode: true;
   /** Marks the sessions Luciole starts, to follow them. */
   __luciole: true;
+  /** The run folder it records in, finished when the session ends. */
+  __lucioleRun?: string;
 }
 
 export interface DebugOptions {

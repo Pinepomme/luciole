@@ -233,6 +233,10 @@ Every 50 ms the recorder sends one JSON line, to the port and/or the file:
 
 A line is only sent when something changed. The last line is `{"done": true}`.
 
+The same frames are made from a recorded run by `luciole trace FILE frames` (see
+[trace-format.md](trace-format.md)), without `waiting`: VS Code's replay feeds them to the live
+lighting as they are.
+
 ### The engine
 
 `luciole engine` ([`src/luciole/engine.py`](../src/luciole/engine.py)) is the one local process

@@ -13,23 +13,20 @@ Standard library only, like the rest of the Python side.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shlex
-import shutil
 import signal
-import sqlite3
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from luciole import __version__, protocol
-from luciole.trace import Trace, TraceError, plural, render_calls, render_exceptions, render_history, render_summary, render_traceback, render_tree
+from luciole import __version__
+from luciole.runs import finish_run, new_run, processes_of, runs_folder
+from luciole.trace import Trace, plural, render_calls, render_exceptions, render_history, render_summary, render_traceback, render_tree
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first
-KEEP_RUNS = 50  # run folders kept per project; older ones are deleted
 OUTPUT_HEAD = 20  # lines of a program's output shown from its start...
 OUTPUT_TAIL = 80  # ...and from its end
 MAX_TEXT = 20_000  # characters per answer
@@ -283,8 +280,10 @@ class Server:
             raise ToolError(problem)
         level = 1 if level is None else level
         timeout = float(args.get("timeout") or 600)
-        run_id, folder = self.new_run()
-        (folder / "command.json").write_text(json.dumps({"command": command, "cwd": str(cwd), "level": level, "scope": scope or None, "started_at": time.time()}))
+        try:
+            run_id, folder = new_run(self.root, command, cwd, level, scope, by="agent")
+        except OSError as error:
+            raise ToolError(f"could not make a run folder: {error}") from None
         env = dict(os.environ)
         for key, value in auto_start_env(None, self.root, False, folder, level, scope).items():
             if value is None:
@@ -305,8 +304,7 @@ class Server:
             output, _ = process.communicate()
         elapsed = time.monotonic() - began
         (folder / "output.txt").write_bytes(output)
-        meta = json.loads((folder / "command.json").read_text())
-        (folder / "command.json").write_text(json.dumps({**meta, "exit_status": None if timed_out else process.returncode}))
+        finish_run(folder, None if timed_out else process.returncode)
         status = f"stopped after {timeout:g} s (timeout)" if timed_out else f"exit status {process.returncode}"
         lines = [f"run {run_id}: {shlex.join(command)}", f"  {status}, {elapsed:.2f} s"]
         if scope:
@@ -472,21 +470,6 @@ class Server:
 
     # Runs
 
-    def new_run(self) -> tuple[str, Path]:
-        self.runs_dir.mkdir(parents=True, exist_ok=True)
-        old = sorted(path for path in self.runs_dir.iterdir() if path.is_dir())
-        for path in old[: max(0, len(old) - KEEP_RUNS + 1)]:
-            shutil.rmtree(path, ignore_errors=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        for n in range(1000):
-            run_id = stamp if n == 0 else f"{stamp}-{n}"
-            try:
-                (self.runs_dir / run_id).mkdir()
-                return run_id, self.runs_dir / run_id
-            except FileExistsError:
-                continue
-        raise ToolError("could not make a run folder")
-
     def trace(self, run_id: str | None, pid: int | None) -> Trace:
         folders = sorted(path.parent for path in self.runs_dir.glob("*/command.json")) if self.runs_dir.is_dir() else []
         if not folders:
@@ -508,25 +491,6 @@ class Server:
                 return trace
             trace.close()
         raise ToolError(f"no process {pid} in run {folder.name}")
-
-
-def runs_folder(root: Path) -> Path:
-    """Where a project's runs are kept: ~/.luciole/runs/<name>-<hash of its path>."""
-    digest = hashlib.sha1(str(root).encode()).hexdigest()[:8]
-    return protocol.home() / "runs" / f"{root.name or 'root'}-{digest}"
-
-
-def processes_of(folder: Path) -> list[Path]:
-    """A run's trace files, the first process first (then by start time)."""
-    found = []
-    for path in folder.glob("*.sqlite"):
-        try:
-            with Trace(path) as trace:
-                run = trace.run()
-        except (TraceError, TypeError, sqlite3.Error):
-            continue  # not a trace, or one still being created
-        found.append((run["started_at"], path))
-    return [path for _, path in sorted(found)]
 
 
 def exit_text(run: dict) -> str:
