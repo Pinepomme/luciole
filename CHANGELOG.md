@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Without the Python Debugger extension, Run Live still runs (in a terminal, lighting only), and
+  the panel now says so, with a button that installs the debugger, until it is installed. This
+  replaces a notification that showed once ever.
 - Live mode: a process that ends within milliseconds of starting (a multiprocessing pool's
   workers, terminated right after their last task) no longer loses its calls. The recorder now
   reads the engine's welcome before the program goes on (waiting half a second at most); left

@@ -74,6 +74,8 @@ const vscode = acquireVsCodeApi();
 const statusEl = document.getElementById("status")!;
 const pathEl = document.getElementById("path")!;
 const messageEl = document.getElementById("message")!;
+const noticeEl = document.getElementById("notice")!;
+document.getElementById("installDebugger")!.addEventListener("click", () => vscode.postMessage({ type: "installDebugger" }));
 const liveButton = document.getElementById("live") as HTMLButtonElement;
 const stopButton = document.getElementById("stop") as HTMLButtonElement;
 
@@ -889,6 +891,8 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
     placeDebugMarks();
   } else if (message.type === "debugStopped") {
     onDebugStopped(message.at);
+  } else if (message.type === "debuggerNotice") {
+    noticeEl.hidden = !message.show;
   } else if (message.type === "focus") {
     focusNode(message.node);
   } else if (message.type === "focusRegion") {

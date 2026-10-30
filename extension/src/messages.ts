@@ -40,6 +40,8 @@ export type ToWebview =
   | { type: "live"; frame: LiveFrame }
   | { type: "liveStarted"; script: string }
   | { type: "liveState"; state: LiveState }
+  /** Run Live ran without the Python debugger (in a terminal): offer to install it, until it is. */
+  | { type: "debuggerNotice"; show: boolean }
   /** VS Code's breakpoints in the graph's files (paths relative to its root). */
   | { type: "breakpoints"; breakpoints: SourceLine[] }
   /** The debugger stopped there, or went on (undefined). */
@@ -60,6 +62,8 @@ export type FromWebview =
   | { type: "runLive" }
   | { type: "runLiveWith" }
   | { type: "stopLive" }
+  /** The notice of a run without the Python debugger: install it. */
+  | { type: "installDebugger" }
   | { type: "reveal"; file: string; line: number; col: number }
   /** Right-click on a neuron: a breakpoint where each call of the function starts. */
   | { type: "addBreakpoint"; file: string; line: number }

@@ -5,7 +5,7 @@ import { randomBytes } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { addBreakpoint, hasPythonDebugger, pythonDebugSession, registerDebugging, removeBreakpoints, sourceBreakpoints } from "./debugging";
+import { addBreakpoint, hasPythonDebugger, installPythonDebugger, pythonDebugSession, registerDebugging, removeBreakpoints, sourceBreakpoints } from "./debugging";
 import type { Graph } from "./graph";
 import { webviewHtml } from "./html";
 import { LiveSession } from "./live";
@@ -24,8 +24,8 @@ let actions: ActionsView;
 
 /** The last run started, to run it again from the panel. */
 const LAST_RUN = "luciole.lastRun";
-/** Set once the user was told Run Live works better with the Python debugger installed. */
-const DEBUGGER_HINT = "luciole.debuggerHintShown";
+/** Run Live ran in a terminal for want of the Python debugger: the panel offers it until it is installed. */
+let debuggerNotice = false;
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("Luciole");
@@ -118,6 +118,12 @@ export function activate(context: vscode.ExtensionContext): void {
       log: (line) => output.appendLine(line),
     }),
     vscode.debug.onDidChangeBreakpoints(() => panel?.postBreakpoints()),
+    // The Python debugger installed (from the panel's notice or elsewhere): the next Run Live uses it.
+    vscode.extensions.onDidChange(() => {
+      if (debuggerNotice && hasPythonDebugger()) {
+        showDebuggerNotice(false);
+      }
+    }),
     // A file graph follows the editor: switching to another Python file shows that file's graph.
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       const document = editor?.document;
@@ -376,12 +382,7 @@ async function startRun(context: vscode.ExtensionContext, config: RunConfigurati
   void context.workspaceState.update(LAST_RUN, { ...config, folder }); // runs again from the same folder
   panel?.post({ type: "liveStarted", script: run.label });
   if (!hasPythonDebugger()) {
-    if (!context.globalState.get<boolean>(DEBUGGER_HINT)) {
-      void context.globalState.update(DEBUGGER_HINT, true);
-      void vscode.window.showInformationMessage(
-        "Luciole: install the Python Debugger extension (ms-python.debugpy) and Run Live runs under it: breakpoints, stepping and variables while the brain lights up. Until then, it runs in a terminal.",
-      );
-    }
+    showDebuggerNotice(true);
     await live.run(run, folder, pythonPath(folder), dir);
     return;
   }
@@ -392,6 +393,11 @@ async function startRun(context: vscode.ExtensionContext, config: RunConfigurati
     pythonPath: process.env.PYTHONPATH,
   });
   await live.debug(launch, vscode.workspace.getWorkspaceFolder(vscode.Uri.file(folder)));
+}
+
+function showDebuggerNotice(show: boolean): void {
+  debuggerNotice = show;
+  panel?.post({ type: "debuggerNotice", show });
 }
 
 function activePythonFile(): string | undefined {
@@ -542,6 +548,7 @@ class GraphPanel {
     if (message.type === "ready") {
       this.ready = true;
       this.post({ type: "liveState", state: live.current });
+      this.post({ type: "debuggerNotice", show: debuggerNotice });
       this.analyze();
     } else if (message.type === "refresh") {
       this.analyze();
@@ -549,6 +556,8 @@ class GraphPanel {
       void runAgain(this.context, this.target);
     } else if (message.type === "runLiveWith") {
       void pickRun(this.context);
+    } else if (message.type === "installDebugger") {
+      void installPythonDebugger();
     } else if (message.type === "stopLive") {
       void live.stop(pythonDebugSession());
     } else if (message.type === "addBreakpoint" && this.root) {
