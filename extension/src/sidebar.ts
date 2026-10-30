@@ -11,12 +11,16 @@ import type { LiveSession } from "./live";
 import { MapEntry, MapTree, buildMap, mapDescription, mapFunctions, runningCounts } from "./map";
 import { ProcessItem, processItems } from "./running";
 
-export class ActionsView implements vscode.TreeDataProvider<ActionItem> {
+export class ActionsView implements vscode.TreeDataProvider<ActionItem>, vscode.Disposable {
   private readonly changed = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.changed.event;
 
   refresh(): void {
     this.changed.fire();
+  }
+
+  dispose(): void {
+    this.changed.dispose();
   }
 
   getChildren(): ActionItem[] {
@@ -33,15 +37,21 @@ export class ActionsView implements vscode.TreeDataProvider<ActionItem> {
   }
 }
 
-export class RunningView implements vscode.TreeDataProvider<ProcessItem> {
+export class RunningView implements vscode.TreeDataProvider<ProcessItem>, vscode.Disposable {
   private readonly changed = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.changed.event;
+  private readonly subscription: vscode.Disposable;
 
   constructor(private readonly live: LiveSession) {
-    live.onDidChangeProcesses(() => {
+    this.subscription = live.onDidChangeProcesses(() => {
       void vscode.commands.executeCommand("setContext", "luciole.exitedProcesses", live.running.list.some((p) => p.exited));
       this.changed.fire();
     });
+  }
+
+  dispose(): void {
+    this.subscription.dispose();
+    this.changed.dispose();
   }
 
   getChildren(): ProcessItem[] {
@@ -65,7 +75,7 @@ const ICONS = { package: "package", module: "symbol-file", class: "symbol-class"
 /** At most this many tree refreshes per second while functions start and stop running. */
 const RUNNING_REFRESH_MS = 300;
 
-export class MapView implements vscode.TreeDataProvider<MapEntry> {
+export class MapView implements vscode.TreeDataProvider<MapEntry>, vscode.Disposable {
   private readonly changed = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.changed.event;
   private tree: MapTree | undefined;
@@ -116,6 +126,12 @@ export class MapView implements vscode.TreeDataProvider<MapEntry> {
         this.changed.fire();
       }, RUNNING_REFRESH_MS);
     }
+  }
+
+  dispose(): void {
+    clearTimeout(this.refreshTimer);
+    this.refreshTimer = undefined;
+    this.changed.dispose();
   }
 
   get functions(): MapEntry[] {

@@ -59,9 +59,13 @@ export function activate(context: vscode.ExtensionContext): void {
   actions = new ActionsView();
   map = new MapView();
   map.view = vscode.window.createTreeView("luciole.map", { treeDataProvider: map, showCollapseAll: true });
+  const running = new RunningView(live);
   context.subscriptions.push(
+    actions,
+    running,
+    map,
     vscode.window.createTreeView("luciole.actions", { treeDataProvider: actions }),
-    vscode.window.createTreeView("luciole.running", { treeDataProvider: new RunningView(live) }),
+    vscode.window.createTreeView("luciole.running", { treeDataProvider: running }),
     map.view,
     vscode.commands.registerCommand("luciole.revealInBrain", (entry: MapEntry) => panel?.focus(entry)),
     vscode.commands.registerCommand("luciole.goToSource", (entry: MapEntry) => {
