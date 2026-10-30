@@ -43,7 +43,10 @@ export type ToWebview =
   /** VS Code's breakpoints in the graph's files (paths relative to its root). */
   | { type: "breakpoints"; breakpoints: SourceLine[] }
   /** The debugger stopped there, or went on (undefined). */
-  | { type: "debugStopped"; at: SourceLine | undefined };
+  | { type: "debugStopped"; at: SourceLine | undefined }
+  /** The Map view chose a neuron (a function, or module code), or a region (`pkg:`, `mod:`, `cls:` id): fly there and mark it. */
+  | { type: "focus"; node: string }
+  | { type: "focusRegion"; region: string };
 
 /** A line of a file, relative to the graph's root. */
 export interface SourceLine {

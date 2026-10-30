@@ -102,6 +102,7 @@ npm run screenshot -- ../examples --events ../run.jsonl   # replay a recording
 npm run screenshot -- ../examples --events ../run.jsonl --frames 8   # and 8 shots of it moving
 npm run screenshot -- ../examples --fps                   # also print frames per second
 npm run screenshot -- ../examples --theme light           # in Light Modern instead of Dark Modern
+npm run screenshot -- ../examples --focus mod:shop        # where a click in the Map view flies (a region, or a function id)
 node out/dev/layout-stats.js graph.json                   # how the region layout turns out
 ```
 

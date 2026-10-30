@@ -20,7 +20,10 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onView:luciole.actions",
+    "onView:luciole.running",
+    "onView:luciole.map"
   ],
   "contributes": {
     "commands": [
@@ -60,6 +63,88 @@
         "title": "Turn Auto-Start On or Off",
         "category": "Luciole",
         "icon": "$(zap)"
+      },
+      {
+        "command": "luciole.findInMap",
+        "title": "Find in Map",
+        "category": "Luciole",
+        "icon": "$(search)",
+        "enablement": "luciole.graphOpen"
+      },
+      {
+        "command": "luciole.revealInBrain",
+        "title": "Show in Brain",
+        "category": "Luciole",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "luciole.goToSource",
+        "title": "Go to Source",
+        "category": "Luciole",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "luciole.stopProcess",
+        "title": "Stop",
+        "category": "Luciole",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "luciole.showCallStack",
+        "title": "Show Call Stack",
+        "category": "Luciole",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "luciole.clearExited",
+        "title": "Clear Exited Processes",
+        "category": "Luciole",
+        "icon": "$(clear-all)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "luciole",
+          "title": "Luciole",
+          "icon": "media/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "luciole": [
+        {
+          "id": "luciole.actions",
+          "name": "Actions",
+          "icon": "media/activity.svg"
+        },
+        {
+          "id": "luciole.running",
+          "name": "Running",
+          "icon": "media/activity.svg"
+        },
+        {
+          "id": "luciole.map",
+          "name": "Map",
+          "icon": "media/activity.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "luciole.running",
+        "contents": "No Python program is lit up right now.\n[Run Live](command:luciole.runLive)\nPrograms started in new terminals appear here too: auto-start is on.",
+        "when": "config.luciole.autoStart"
+      },
+      {
+        "view": "luciole.running",
+        "contents": "No Python program is lit up right now.\n[Run Live](command:luciole.runLive)\nTurn [auto-start](command:luciole.toggleAutoStart) on to light up the programs you start in terminals too.",
+        "when": "!config.luciole.autoStart"
+      },
+      {
+        "view": "luciole.map",
+        "contents": "No graph is open. The Map outlines the graph in the Luciole panel: packages, modules, classes and functions.\n[Show Graph for Current File](command:luciole.showFileGraph)\n[Show Graph (Whole Folder)](command:luciole.showGraph)",
+        "when": "!luciole.graphOpen"
       }
     ],
     "configuration": {
@@ -153,6 +238,72 @@
         {
           "command": "luciole.showGraph",
           "when": "explorerResourceIsFolder"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "luciole.revealInBrain",
+          "when": "false"
+        },
+        {
+          "command": "luciole.goToSource",
+          "when": "false"
+        },
+        {
+          "command": "luciole.stopProcess",
+          "when": "false"
+        },
+        {
+          "command": "luciole.showCallStack",
+          "when": "false"
+        },
+        {
+          "command": "luciole.clearExited",
+          "when": "luciole.exitedProcesses"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "luciole.stopLive",
+          "when": "view == luciole.running && luciole.liveRunning && !inDebugMode",
+          "group": "navigation@1"
+        },
+        {
+          "command": "luciole.clearExited",
+          "when": "view == luciole.running && luciole.exitedProcesses",
+          "group": "navigation@2"
+        },
+        {
+          "command": "luciole.findInMap",
+          "when": "view == luciole.map && luciole.graphOpen",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "luciole.stopProcess",
+          "when": "view == luciole.running && viewItem == process.stop",
+          "group": "inline"
+        },
+        {
+          "command": "luciole.showCallStack",
+          "when": "view == luciole.running && viewItem == process.debug",
+          "group": "inline"
+        },
+        {
+          "command": "luciole.goToSource",
+          "when": "view == luciole.map && viewItem == function",
+          "group": "inline"
+        },
+        {
+          "command": "luciole.revealInBrain",
+          "when": "view == luciole.map",
+          "group": "navigation@1"
+        },
+        {
+          "command": "luciole.goToSource",
+          "when": "view == luciole.map && viewItem == function",
+          "group": "navigation@2"
         }
       ]
     }
