@@ -256,7 +256,9 @@ extension/
   src/live.ts        live runs (debug session or terminal); src/engine.ts finds or starts the engine
   src/debugging.ts   following the VS Code debugger; src/runs.ts what Run Live launches
   src/webview/       the 3D view (brain.ts = model, layout.ts = map of regions and bundled
-                     links, flow.ts = calls tracing their lines, main.ts = rendering and lighting)
+                     links, flow.ts = calls tracing their lines, main.ts = rendering and lighting,
+                     with theme.ts = colors, objects.ts = three.js objects and picking,
+                     labels.ts = names on the map, text.ts = tooltips, batches.ts = draw batches)
   test/              unit tests (npm test)
   package.mjs        builds luciole.vsix with a copy of src/luciole
 tests/             Python tests (uv run pytest)
