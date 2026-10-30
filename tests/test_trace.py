@@ -728,6 +728,13 @@ def test_a_trace_directory_that_does_not_exist_yet_is_made(tmp_path):
         assert ("prog:f",) in rows(path, "SELECT node FROM frames")
 
 
+def test_luciole_run_says_when_the_trace_cannot_be_written(tmp_path):
+    write(tmp_path, {"prog.py": "print('ran')\n", "taken": "a file, not a directory"})
+    result = subprocess.run([sys.executable, "-m", "luciole", "run", "--trace", "taken/run.sqlite", "prog.py"], cwd=tmp_path, env=clean_env(), capture_output=True, text=True, timeout=60)
+    assert result.returncode == 1 and "could not write the trace" in result.stderr
+    assert "Traceback" not in result.stderr and "ran" not in result.stdout
+
+
 def test_cli_rejects_what_is_not_a_trace(tmp_path):
     (tmp_path / "x.sqlite").write_text("nope")
     result = subprocess.run([sys.executable, "-m", "luciole", "trace", str(tmp_path / "x.sqlite"), "summary"], env=clean_env(), capture_output=True, text=True, timeout=60)

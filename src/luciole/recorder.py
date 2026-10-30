@@ -866,7 +866,14 @@ def run(target: list[str], as_module: bool, root: Path, port: int | None, events
         return 2
     stop()  # auto-started in this interpreter: this run records it instead, with its own options
     # Without --port, the running engine's, if any: then nothing to warn about when there is none.
-    session = Session(root, port, connect(port, quiet=not port), events, trace, level)
+    connection = connect(port, quiet=not port)
+    try:
+        session = Session(root, port, connection, events, trace, level)
+    except Exception as error:  # the trace file cannot be written (on Windows, open in a reader)
+        log.error("could not write the trace %s: %s", trace, error)
+        if connection:
+            connection.close()
+        return 1
     session.start()
     active = session
     install_hooks()

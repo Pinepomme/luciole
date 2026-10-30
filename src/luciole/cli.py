@@ -105,9 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         if not args.target:
             parser.error("run: give a script or -m module to run")
-        from luciole.recorder import run
-
-        from luciole.recorder import trace_level
+        from luciole.recorder import run, trace_level
 
         return run(args.target, args.as_module, args.root, args.port, args.events, args.trace, trace_level(args.level))
     if not args.path.exists():
