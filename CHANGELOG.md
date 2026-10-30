@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Origin queries: `luciole trace FILE origin FUNCTION VARIABLE [--frame N]`, and the MCP tool
+  `origin`, answer "where did this value come from?". From one variable of one call, they walk
+  back through the assignment that set it, the caller that passed it, the call that returned it,
+  the last call that set a global or an attribute of the same object, and what fed each of
+  those, across functions, with lines, code and values: the static graph's data edges, filtered
+  and given values by the trace. At level 1 values that crossed calls are known; a local
+  assigned on several lines needs level 2 (the answer says which function to scope). Bounded in
+  depth and branches, never loops. See `docs/origins.md`, including its limits.
 - Variable history (trace level 2): `luciole run --trace FILE --scope cart:checkout,Cart.*`
   records every assignment to the local variables of the functions named (node ids or their
   ends, `*` as a wildcard): rebinding, and changes to lists, dicts, sets and bytearrays, each with
