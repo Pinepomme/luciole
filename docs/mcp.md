@@ -63,8 +63,30 @@ agent's programs run.
 ## Where runs are kept
 
 `~/.luciole/runs/<project>-<hash>/<run id>/`: one trace per process (`*.sqlite`, see
-[trace-format.md](trace-format.md)), `command.json` (command, folder, level, scope, exit status) and
-`output.txt` (the program's output). `luciole trace FILE ...` reads the traces too.
+[trace-format.md](trace-format.md)), `command.json` and `output.txt` (the program's output).
+`<project>` is the root folder's name and `<hash>` the start of the SHA-1 of its absolute path; a
+run id is the time it started (`20261030-142501`, then `-1`, `-2`... in the same second), so ids
+sort as runs started. The VS Code extension's Run Live records into the same folders (without
+`output.txt`: the program's output is in its terminal), so its Calls view lists the agent's runs
+next to yours, and `runs` lists yours to the agent. Both write them with
+[`src/luciole/runs.py`](../src/luciole/runs.py).
+
+`command.json`: `command` (a list), `cwd`, `level`, `scope`, `by` (`agent`, or `vscode` for Run
+Live; missing in runs made before it existed, which were the MCP server's), `started_at` (Unix
+time), and once the run ended, `exit_status` (null when unknown or stopped by a timeout) and
+`ended_at`.
+
+```sh
+luciole runs [--root DIR] [--json]       # the runs, newest first, each with its processes
+luciole trace FILE ...                   # one process's trace
+```
+
+`luciole runs --json` gives `{"root", "folder", "runs"}`, each run being its `command.json` plus
+`id`, `folder`, `state` (`running` until whoever started it says it ended; then `finished`, or
+`empty` when nothing was recorded, as with Python older than 3.12) and `processes` (file, pid,
+argv, duration, exit status, numbers of calls, exceptions and uncaught exceptions, level).
+`luciole runs new --root DIR --command JSON [--cwd DIR] [--by vscode]` makes a run folder and
+prints it; `luciole runs finish FOLDER [--exit-status N]` marks it ended.
 
 ## Protocol
 
