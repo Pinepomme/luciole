@@ -768,16 +768,21 @@ def start(
 
 def stop() -> None:
     """Stop recording this process. See luciole.stop()."""
-    global active
-    session, active = active, None
+    session = active
     if session is not None:
         end(session, close=True)
 
 
 def end(session: Session, close: bool) -> None:
-    """Stop `session`; a SIGTERM received meanwhile ends the process once its last frame is sent."""
-    global ending
+    """Stop `session`; a SIGTERM received meanwhile ends the process once its last frame is sent.
+
+    `ending` holds the session before `active` lets go of it: a SIGTERM in between (a pool
+    terminating a worker that is calling os._exit) must find it in one or the other, or the
+    process dies without sending its calls."""
+    global active, ending
     ending = session
+    if active is session:
+        active = None
     try:
         session.stop(close)
     finally:
@@ -927,6 +932,5 @@ def run(target: list[str], as_module: bool, root: Path, port: int | None, events
         if session.recorder.tracer is not None:
             session.recorder.tracer.exit_status = status
         if active is session:
-            active = None
             end(session, close=False)
     return status
