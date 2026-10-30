@@ -31,8 +31,6 @@ export interface LiveState {
   stopping: boolean;
   /** The run is under VS Code's debugger: its toolbar stops it, so the panel shows no Stop. */
   debugged: boolean;
-  /** Run Live runs in a terminal because the Python debugger is not installed: no breakpoints or stepping. */
-  withoutDebugger: boolean;
 }
 
 export type ToWebview =
@@ -42,6 +40,8 @@ export type ToWebview =
   | { type: "live"; frame: LiveFrame }
   | { type: "liveStarted"; script: string }
   | { type: "liveState"; state: LiveState }
+  /** Run Live ran without the Python debugger (in a terminal): offer to install it, until it is. */
+  | { type: "debuggerNotice"; show: boolean }
   /** VS Code's breakpoints in the graph's files (paths relative to its root). */
   | { type: "breakpoints"; breakpoints: SourceLine[] }
   /** The debugger stopped there, or went on (undefined). */

@@ -224,8 +224,7 @@ async function main(): Promise<void> {
   }
 
   if (process.argv.includes("--without-debugger")) {
-    const state = { running: true, stopping: false, debugged: false, withoutDebugger: true };
-    await page.evaluate((state) => window.postMessage({ type: "liveState", state }, "*"), state);
+    await page.evaluate(() => window.postMessage({ type: "debuggerNotice", show: true }, "*"));
     await shot("4-without-debugger");
   }
 

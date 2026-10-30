@@ -19,7 +19,8 @@ let autoStartItem: vscode.StatusBarItem;
 
 /** The last run started, to run it again from the panel. */
 const LAST_RUN = "luciole.lastRun";
-/** Set once the user was told Run Live works better with the Python debugger installed. */
+/** Run Live ran in a terminal for want of the Python debugger: the panel offers it until it is installed. */
+let debuggerNotice = false;
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("Luciole");
@@ -87,6 +88,12 @@ export function activate(context: vscode.ExtensionContext): void {
       log: (line) => output.appendLine(line),
     }),
     vscode.debug.onDidChangeBreakpoints(() => panel?.postBreakpoints()),
+    // The Python debugger installed (from the panel's notice or elsewhere): the next Run Live uses it.
+    vscode.extensions.onDidChange(() => {
+      if (debuggerNotice && hasPythonDebugger()) {
+        showDebuggerNotice(false);
+      }
+    }),
     // A file graph follows the editor: switching to another Python file shows that file's graph.
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       const document = editor?.document;
@@ -333,6 +340,7 @@ async function startRun(context: vscode.ExtensionContext, config: RunConfigurati
   void context.workspaceState.update(LAST_RUN, { ...config, folder }); // runs again from the same folder
   panel?.post({ type: "liveStarted", script: run.label });
   if (!hasPythonDebugger()) {
+    showDebuggerNotice(true);
     await live.run(run, folder, pythonPath(folder), dir);
     return;
   }
@@ -343,6 +351,11 @@ async function startRun(context: vscode.ExtensionContext, config: RunConfigurati
     pythonPath: process.env.PYTHONPATH,
   });
   await live.debug(launch, vscode.workspace.getWorkspaceFolder(vscode.Uri.file(folder)));
+}
+
+function showDebuggerNotice(show: boolean): void {
+  debuggerNotice = show;
+  panel?.post({ type: "debuggerNotice", show });
 }
 
 function activePythonFile(): string | undefined {
@@ -457,6 +470,7 @@ class GraphPanel {
     if (message.type === "ready") {
       this.ready = true;
       this.post({ type: "liveState", state: live.current });
+      this.post({ type: "debuggerNotice", show: debuggerNotice });
       this.analyze();
     } else if (message.type === "refresh") {
       this.analyze();

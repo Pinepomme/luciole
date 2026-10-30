@@ -29,7 +29,7 @@ export interface EngineOptions {
   version: string;
 }
 
-const IDLE: LiveState = { running: false, stopping: false, debugged: false, withoutDebugger: false };
+const IDLE: LiveState = { running: false, stopping: false, debugged: false };
 
 /** What the engine sends: its handshake, processes coming and going, and their messages. */
 type EngineMessage = LiveFrame & {
@@ -183,7 +183,7 @@ export class LiveSession implements vscode.Disposable {
     this.launching = { pid: Promise.resolve(this.terminal.processId) };
     this.terminal.show(true);
     this.log.appendLine(`$ ${shellCommand([python, ...args])}`);
-    this.setState({ ...IDLE, running: true, withoutDebugger: true }); // only Run Live without the Python debugger runs here
+    this.setState({ ...IDLE, running: true });
   }
 
   /** Ends the previous Run Live: its debug session, or its terminal (its process exits, and leaves the engine with it). */
