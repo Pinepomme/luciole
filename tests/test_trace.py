@@ -1106,7 +1106,7 @@ def test_env_turns_tracing_on_and_off(tmp_path, monkeypatch):
     assert on["LUCIOLE_TRACE_SCOPE"] is None
     scoped = auto_start_env(None, None, off=False, trace=tmp_path, level=2, scope=["cart:*", "checkout"])
     assert scoped["LUCIOLE_TRACE_LEVEL"] == "2" and scoped["LUCIOLE_TRACE_SCOPE"] == "cart:*,checkout"
-    command = [sys.executable, "-m", "luciole", "env", "--trace", str(tmp_path)]
+    command = [sys.executable, "-m", "luciole", "env", "--shell", "sh", "--trace", str(tmp_path)]
     assert "LUCIOLE_TRACE_SCOPE=checkout" in subprocess.run([*command, "--scope", "checkout"], env=clean_env(), capture_output=True, text=True, timeout=60).stdout
     refused = subprocess.run([*command, "--level", "2"], env=clean_env(), capture_output=True, text=True, timeout=60)
     assert refused.returncode == 2 and "give them as a scope" in refused.stderr
