@@ -264,20 +264,28 @@ test("rows by call order: long rows wrap, nothing overlaps, the same graph gives
   assert.deepEqual([...rows(graph).positions], [...first.positions]);
 });
 
-test("rows by call order: lines bend only to miss the functions between their ends", () => {
-  const graph = project({ "m.py": ["top", "left", "right", "bottom"] }, ["m:top > m:left", "m:top > m:right", "m:left > m:right", "m:left > m:bottom", "m:right > m:bottom", "m:top > m:bottom"]);
-  const brain = buildBrain(graph);
-  const result = layoutByCalls(brain, nodesOf(graph));
-  const p = (id: string) => result.positions.get(id)!;
+test("rows by call order: a line bends only when it would run through a function", () => {
+  // top calls left and right, which both call bottom; top calls bottom too, past them.
+  const graph = project({ "m.py": ["top", "left", "right", "bottom"] }, ["m:top > m:left", "m:top > m:right", "m:left > m:bottom", "m:right > m:bottom", "m:top > m:bottom"]);
+  const result = layoutByCalls(buildBrain(graph), nodesOf(graph));
   assert.deepEqual(route(result, "m:top", "m:left"), []); // next row: straight
+  assert.deepEqual(route(result, "m:top", "m:bottom"), []); // skips a row, nothing in its way: straight
   const siblings = project({ "s.py": ["top", "a", "b"] }, ["s:top > s:a", "s:top > s:b"]);
   const flat = layoutByCalls(buildBrain(siblings), nodesOf(siblings));
   assert.equal(flat.positions.get("s:a")!.y, flat.positions.get("s:b")!.y);
   const [via] = route(flat, "s:a", "s:b"); // shared state between two functions of a row
   assert.ok(via.y > flat.positions.get("s:a")!.y); // arcs above its row
-  const skip = route(result, "m:top", "m:bottom");
-  assert.equal(skip.length, 1); // skips rows: bows to the side
-  assert.notEqual(skip[0].x, (p("m:top").x + p("m:bottom").x) / 2);
+  // top > middle > bottom, and top > bottom straight through middle: it bows around it.
+  const chain = project({ "c.py": ["top", "middle", "bottom"] }, ["c:top > c:middle", "c:middle > c:bottom", "c:top > c:bottom"]);
+  const brain = buildBrain(chain);
+  const column = layoutByCalls(brain, nodesOf(chain));
+  const p = (id: string) => column.positions.get(id)!;
+  assert.equal(p("c:top").x, p("c:middle").x);
+  const skip = route(column, "c:top", "c:bottom");
+  assert.equal(skip.length, 1);
+  const middle = brain.neurons.find((n) => n.id === "c:middle")!;
+  const curve = bundle(p("c:top"), skip, p("c:bottom"));
+  assert.ok(Math.min(...curve.map((q) => distance(q, p("c:middle")))) > neuronRadius(middle.degree));
 });
 
 test("rows by call order: the order of the graph's nodes and edges does not move anything", () => {

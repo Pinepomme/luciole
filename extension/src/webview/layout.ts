@@ -51,8 +51,11 @@ export interface Layout {
   /** Region ids from the root to the innermost region holding each neuron. */
   chains: Map<string, string[]>;
   positions: Map<string, Vec3>;
-  /** Rows by call order (`layoutByCalls`), this far apart: lines bend only to miss functions, no region names. */
-  byCalls?: { rowSpan: number };
+  /**
+   * Rows by call order (`layoutByCalls`): no region names, and lines bend only to miss the
+   * functions in their way, those within `clearance` of their centre (by neuron id).
+   */
+  byCalls?: { clearance: Map<string, number> };
 }
 
 /** Room between two neurons of the same region, by default. */
@@ -218,7 +221,10 @@ export function layoutBrain(brain: Brain, nodes: Map<string, GraphNode>, neuronG
   return { regions, chains, positions };
 }
 
-/** Most functions in a row of `layoutByCalls`; more go on the rows below. */
+/**
+ * Most functions in a row of `layoutByCalls`; more go on the rows below. Wider rows make the
+ * brain wide and flat: fitted to the view, it shrinks, and the names with it.
+ */
 const ROW_MAX = 6;
 
 /**
@@ -329,7 +335,8 @@ export function layoutByCalls(brain: Brain, nodes: Map<string, GraphNode>, neuro
     region.center = centre;
     region.radius = inside.reduce((r, p) => Math.max(r, length(sub(p, centre))), 0) + neuronGap;
   }
-  return { regions, chains, positions, byCalls: { rowSpan: lines.length > 1 ? -y / (lines.length - 1) : 1 } };
+  const clearance = new Map(neurons.map((n, a) => [n.id, radius(a) + neuronGap * 0.25]));
+  return { regions, chains, positions, byCalls: { clearance } };
 }
 
 /**
@@ -449,7 +456,7 @@ export function packItems(items: Item[], links: { a: string; b: string; weight: 
  */
 export function route(layout: Layout, source: string, target: string): Vec3[] {
   if (layout.byCalls) {
-    return bowed(layout.positions.get(source), layout.positions.get(target), layout.byCalls.rowSpan);
+    return bowed(layout, source, target, layout.byCalls.clearance);
   }
   const ca = layout.chains.get(source);
   const cb = layout.chains.get(target);
@@ -461,12 +468,19 @@ export function route(layout: Layout, source: string, target: string): Vec3[] {
   return [...ca.slice(common).reverse().map(centre), ...cb.slice(common).map(centre)];
 }
 
+/** How far a line that skips rows bows to the side, per unit of height it spans; tried once, then twice as far. */
+const BOW = 0.25;
+
 /**
  * In rows by call order, where a line bends: one between two functions of a row arcs above it
- * (straight, it would run behind the functions between them), and one that skips rows bows to
- * the side (straight, it could run through a function on a row it skips). Other lines are straight.
+ * (straight, it would run behind the functions between them). One that skips rows stays
+ * straight unless it would run through a function on a row it skips; then it bows to the side,
+ * away from the function nearest to it first, as little as clears them all (else the bow that
+ * hits the fewest). Lines between neighbouring rows are straight: nothing lies between.
  */
-function bowed(a: Vec3 | undefined, b: Vec3 | undefined, rowSpan: number): Vec3[] {
+function bowed(layout: Layout, source: string, target: string, clearance: Map<string, number>): Vec3[] {
+  const a = layout.positions.get(source);
+  const b = layout.positions.get(target);
   if (!a || !b) {
     return [];
   }
@@ -475,8 +489,44 @@ function bowed(a: Vec3 | undefined, b: Vec3 | undefined, rowSpan: number): Vec3[
   if (Math.abs(d.y) < 1e-6) {
     return Math.abs(d.x) > 1e-6 ? [add(middle, { x: 0, y: Math.abs(d.x) * 0.35, z: 0 })] : [];
   }
-  const rows = Math.abs(d.y) / rowSpan;
-  return rows > 1.5 ? [add(middle, { x: Math.abs(d.y) * 0.25 * (d.x >= 0 ? 1 : -1), y: 0, z: 0 })] : [];
+  // The functions on the rows strictly between the two ends.
+  const low = Math.min(a.y, b.y) + 1e-6;
+  const high = Math.max(a.y, b.y) - 1e-6;
+  const between = [...layout.positions].filter(([, p]) => p.y > low && p.y < high);
+  const hits = (via: Vec3[]) => {
+    const curve = bundle(a, via, b);
+    return between.filter(([id, p]) => curve.some((q, i) => i > 0 && segmentDistance(p, curve[i - 1], q) < clearance.get(id)!)).length;
+  };
+  if (!between.length || !hits([])) {
+    return [];
+  }
+  // Away from the function nearest to the straight line (at its height) first.
+  const offset = ([, p]: [string, Vec3]) => p.x - (a.x + (d.x * (p.y - a.y)) / d.y);
+  const nearest = between.reduce((best, item) => (Math.abs(offset(item)) < Math.abs(offset(best)) ? item : best));
+  const away = offset(nearest) > 0 ? -1 : offset(nearest) < 0 ? 1 : d.x >= 0 ? 1 : -1;
+  let best: Vec3[] = [];
+  let fewest = Infinity;
+  for (const times of [1, 2]) {
+    for (const side of [away, -away]) {
+      const via = [add(middle, { x: Math.abs(d.y) * BOW * times * side, y: 0, z: 0 })];
+      const count = hits(via);
+      if (!count) {
+        return via;
+      }
+      if (count < fewest) {
+        [best, fewest] = [via, count];
+      }
+    }
+  }
+  return best;
+}
+
+/** Distance from `p` to the segment from `a` to `b`. */
+function segmentDistance(p: Vec3, a: Vec3, b: Vec3): number {
+  const ab = sub(b, a);
+  const span = ab.x * ab.x + ab.y * ab.y + ab.z * ab.z;
+  const t = span ? Math.max(0, Math.min(1, ((p.x - a.x) * ab.x + (p.y - a.y) * ab.y + (p.z - a.z) * ab.z) / span)) : 0;
+  return length(sub(p, lerp(a, b, t)));
 }
 
 /**
