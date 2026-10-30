@@ -87,7 +87,7 @@ def test_initialize_and_list_tools(project):
     assert reply["result"]["capabilities"] == {"tools": {}}
     assert "run" in reply["result"]["instructions"]
     tools = {tool["name"]: tool for tool in client.request("tools/list")["result"]["tools"]}
-    assert set(tools) == {"run", "runs", "summary", "exceptions", "calls", "call_tree", "frame", "find", "neighbors"}
+    assert set(tools) == {"run", "runs", "summary", "exceptions", "traceback", "calls", "call_tree", "frame", "find", "neighbors"}
     assert tools["run"]["inputSchema"]["required"] == ["command"]
     assert client.request("no/such/method")["error"]["code"] == -32601
     client.close()
@@ -103,6 +103,10 @@ def test_run_records_calls_values_and_the_exception(client):
     calls = client.ok("calls", function="checkout")
     assert "checkout(items=[{'price': 3, 'qty': 2}, {'price': 5}], budget=20) -> 9" in calls
     assert "checkout(items=[{'price': 30}], budget=20) !! ValueError: over budget: 30 > 20" in calls
+
+    post_mortem = client.ok("traceback")
+    assert "in cart:checkout (#6), line 13: raised here" in post_mortem
+    assert "budget = 20" in post_mortem and "due = 30" in post_mortem and "not handled" in post_mortem
 
     exceptions = client.ok("exceptions")
     assert "ValueError: over budget: 30 > 20" in exceptions and "not handled" in exceptions

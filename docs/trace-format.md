@@ -92,7 +92,8 @@ CREATE TABLE frames (
     end_kind TEXT,
     exception INTEGER,
     args TEXT,
-    result INTEGER
+    result INTEGER,
+    locals TEXT
 );
 CREATE TABLE exceptions (
     id INTEGER PRIMARY KEY,
@@ -115,6 +116,7 @@ CREATE TABLE snapshots (
 CREATE INDEX frames_by_node ON frames (node, start_ns);
 CREATE INDEX frames_by_caller ON frames (caller);
 CREATE INDEX frames_by_time ON frames (start_ns);
+CREATE INDEX frames_by_exception ON frames (exception) WHERE exception IS NOT NULL;
 CREATE INDEX exceptions_by_frame ON exceptions (frame);
 CREATE INDEX exceptions_by_time ON exceptions (time_ns);
 ```
@@ -173,6 +175,12 @@ comprehensions have no node, and are not recorded.
   `NULL` at level 0.
 - `result` (level 1): snapshot id of the return value, for `return` frames (a generator's is the
   value it returns at the end, usually `None`).
+- `locals` (level 1): for `raise` and `unwind` frames, a JSON object `{"name": snapshot id}` of
+  the frame's local variables as the exception left it: what a post-mortem debugger shows. For a
+  module body, its globals. Names starting with `__`, modules, classes and functions are left out
+  (definitions, not state); secret names are redacted as arguments are; at most 50 per frame (then
+  `"…"`). Kept for 10,000 frames per run at most, so code that raises in a loop stays cheap.
+  `NULL` otherwise, and in traces written before this column existed.
 
 ### `exceptions`
 
@@ -251,6 +259,7 @@ luciole trace run.sqlite summary [--top 10]      # the run, counts, top function
 luciole trace run.sqlite calls NODE [--limit 20] [--offset 0]   # each call: caller, args, result or exception, duration
 luciole trace run.sqlite tree [--from FRAME] [--depth 4]         # call tree, repeated calls collapsed
 luciole trace run.sqlite exceptions [--limit 50]                 # where raised, chained from, handled where
+luciole trace run.sqlite traceback [EXCEPTION]                   # the frames it left, with their locals then
 ```
 
 `NODE` is a node id, or its end (`Cart.add` for `shop:Cart.add`). `--json` prints the same
@@ -264,12 +273,15 @@ with Trace("run.sqlite") as trace:
     trace.calls("Cart.add", limit=20, offset=0)   # {"nodes", "total", "calls": [...]}
     trace.tree(start=None, depth=4)               # [{"frame", "node", "count", "duration_ns", "end", "children", "more"}]
     trace.exceptions(limit=50, offset=0)          # {"total", "exceptions": [...]}
+    trace.traceback(exception_id=None)            # {"exception", "frames", "handled_in"}: innermost first
     trace.frame(7)            # one call, like an item of calls()
     trace.snapshot(3)         # {"type", "repr", "items"?, "truncated"?}
 ```
 
 In `tree`, consecutive calls of one function with the same subtree are one entry with a `count`;
-`more` counts the calls below an entry that are not shown. In `summary`, a function's `total_ns`
+`more` counts the calls below an entry that are not shown. In `traceback`, each frame (like an
+item of `calls()`, plus `locals`) has `at_line`, the line it was at when the exception left it;
+by default it is the last exception nothing handled, else the last one. In `summary`, a function's `total_ns`
 leaves out calls made while another call of it runs (recursion), and `self_ns` leaves out its
 callees (but not the threads and tasks it runs concurrently).
 
