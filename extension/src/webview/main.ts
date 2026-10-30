@@ -555,6 +555,10 @@ function declutterLabels(): void {
   const shown: { text: SpriteText; priority: number }[] = [];
   for (const node of nodes) {
     const parts = node.parts;
+    if (parts?.label) {
+      // Hidden last time for overlapping another: maybe not any more.
+      parts.label.visible = parts.label.userData.wanted === true;
+    }
     if (parts?.label?.visible) {
       // One height on screen, just above the sphere, its ring and its breakpoint dot.
       const text = parts.label;
@@ -724,6 +728,7 @@ function animate(now: number): void {
     const wantsLabel = showAll || node.heat > 0.15 || isWaiting || isFocused || node === hovered || hasBreakpoint;
     if (wantsLabel || parts.label) {
       const text = label(node);
+      text.userData.wanted = wantsLabel; // declutterLabels starts from it: a cold neuron's is not set again
       text.visible = wantsLabel;
       // What runs, waits, stopped or is pointed at is named in the text color, the rest in grey.
       const color = node.heat > 0.15 || isWaiting || isStopped || isFocused || node === hovered ? PRIMARY : SECONDARY;
