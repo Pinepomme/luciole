@@ -123,6 +123,8 @@ function moduleTint(module: string): THREE.Color {
 const ACCENT = new THREE.Color(themeAccent());
 /** Where the debugger stopped, and breakpoints (VS Code's breakpoint red). */
 const RED = new THREE.Color(cssColor("--vscode-debugIcon-breakpointForeground", "#e51400"));
+/** The ring around what the Map view points at: the text color, not the accent (it is not activity). */
+const FOCUS = new THREE.Color(PRIMARY);
 const ringTexture = makeRingTexture();
 const dotTexture = makeDotTexture();
 
@@ -174,6 +176,11 @@ let breakpointNodes = new Set<string>();
 /** Where the debugger stopped, and the function that holds it. */
 let debugStop: SourceLine | undefined;
 let stoppedIn: string | undefined;
+/** What the Map view points at: a neuron, or a region whose name is then shown. */
+let focused: string | undefined;
+let focusedRegion: string | undefined;
+/** The Map's focus changed: region names are placed again (the camera may not move). */
+let refocused = false;
 let callsThisSecond: { t: number; n: number }[] = [];
 
 const graph = new ForceGraph3D(document.getElementById("brain")!)
@@ -233,7 +240,20 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
     hovered = (node as NeuronNode | null) ?? undefined;
     document.body.style.cursor = node ? "pointer" : "";
   })
-  .onNodeClick((node: object) => reveal(node as NeuronNode))
+  .onNodeClick((node: object) => {
+    // Clicking another neuron moves on from what the Map pointed at.
+    if ((node as NeuronNode).id !== focused) {
+      focused = undefined;
+    }
+    focusedRegion = undefined;
+    refocused = true;
+    reveal(node as NeuronNode);
+  })
+  .onBackgroundClick(() => {
+    focused = undefined;
+    focusedRegion = undefined;
+    refocused = true;
+  })
   .onNodeRightClick((node: object) => {
     const { neuron } = node as NeuronNode;
     const action = breakpointAction(brain?.neurons ?? [], neuron, breakpoints);
@@ -494,10 +514,10 @@ function label(node: NeuronNode): SpriteText {
   return parts.label;
 }
 
-/** Which label stays when two overlap on screen: the hovered one, where the debugger stopped, what runs. */
+/** Which label stays when two overlap on screen: the hovered one, the Map's, where the debugger stopped, what runs. */
 function labelPriority(node: NeuronNode): number {
   const rank =
-    node === hovered ? 5 : node.id === stoppedIn ? 4 : onStack.has(node.id) ? 3 : node.heat > 0.15 || waiting.has(node.id) ? 2 : breakpointNodes.has(node.id) ? 1 : 0;
+    node === hovered ? 6 : node.id === focused ? 5 : node.id === stoppedIn ? 4 : onStack.has(node.id) ? 3 : node.heat > 0.15 || waiting.has(node.id) ? 2 : breakpointNodes.has(node.id) ? 1 : 0;
   return rank * 1000 + node.parts!.radius; // then bigger (more connected) neurons first
 }
 
@@ -559,9 +579,15 @@ function declutterLabels(): void {
     const distance = Math.max(1, camera.position.distanceTo(center.set(region.center.x, region.center.y, region.center.z)));
     const pixels = height / (distance * fovScale);
     const span = 2 * region.radius * pixels;
-    text.visible = span >= REGION_NAMED_MIN && span <= REGION_NAMED_MAX * Math.max(width, height);
+    // The region the Map points at is always named, in the text color.
+    const isFocused = region.id === focusedRegion;
+    text.visible = isFocused || (span >= REGION_NAMED_MIN && span <= REGION_NAMED_MAX * Math.max(width, height));
     if (!text.visible) {
       continue;
+    }
+    const color = isFocused ? PRIMARY : SECONDARY;
+    if (text.color !== color) {
+      text.color = color;
     }
     const tall = REGION_LABEL_PX[region.kind as keyof typeof REGION_LABEL_PX] / pixels;
     text.scale.set(tall * text.userData.aspect, tall, 1);
@@ -577,7 +603,7 @@ function declutterLabels(): void {
     text.visible = boxOf(text) !== undefined;
     if (text.visible) {
       // Between the functions that matter (1000 and up) and the others (below 100).
-      shown.push({ text, priority: 900 - region.depth * 100 + Math.min(region.radius, 999) / 10 });
+      shown.push({ text, priority: isFocused ? 9000 : 900 - region.depth * 100 + Math.min(region.radius, 999) / 10 });
     }
   }
   if (shown.length < 2 || shown.length > MAX_DECLUTTERED) {
@@ -662,8 +688,10 @@ function animate(now: number): void {
     // Waiting on an await: a ring and no fill, unless the function is also running or just ran.
     const isWaiting = waiting.has(node.id) && node.heat < 0.5 && !isStopped;
     const hasBreakpoint = breakpointNodes.has(node.id);
+    // What the Map points at gets a ring in the text color, while nothing lights it up.
+    const isFocused = node.id === focused;
     // A cold neuron whose look depends on nothing that changed is left as it is: most of them.
-    const look = (isStopped ? 1 : 0) | (isWaiting ? 2 : 0) | (node === hovered ? 4 : 0) | (hasBreakpoint ? 8 : 0) | (showAll ? 16 : 0);
+    const look = (isStopped ? 1 : 0) | (isWaiting ? 2 : 0) | (node === hovered ? 4 : 0) | (hasBreakpoint ? 8 : 0) | (showAll ? 16 : 0) | (isFocused ? 32 : 0);
     if (node.heat === 0 && node.look === look && !parts.ring?.visible) {
       continue;
     }
@@ -676,11 +704,16 @@ function animate(now: number): void {
     }
     const color = isStopped ? RED : ACCENT;
     parts.color.copy(parts.base).lerp(color, node.heat);
-    const ringOpacity = isWaiting ? 1 : node.heat;
+    let ringColor = color;
+    let ringOpacity = isWaiting ? 1 : node.heat;
+    if (isFocused && ringOpacity < 0.5) {
+      ringColor = FOCUS;
+      ringOpacity = 1;
+    }
     if (ringOpacity > 0 || parts.ring) {
       const ring = ringOf(parts);
       const material = ring.material as THREE.SpriteMaterial;
-      material.color.copy(color);
+      material.color.copy(ringColor);
       material.opacity = ringOpacity;
       ring.visible = ringOpacity > 0;
       if (ring.visible) {
@@ -688,12 +721,12 @@ function animate(now: number): void {
         ring.updateMatrix();
       }
     }
-    const wantsLabel = showAll || node.heat > 0.15 || isWaiting || node === hovered || hasBreakpoint;
+    const wantsLabel = showAll || node.heat > 0.15 || isWaiting || isFocused || node === hovered || hasBreakpoint;
     if (wantsLabel || parts.label) {
       const text = label(node);
       text.visible = wantsLabel;
-      // What runs, waits or stopped is named in the text color, the rest in grey.
-      const color = node.heat > 0.15 || isWaiting || isStopped || node === hovered ? PRIMARY : SECONDARY;
+      // What runs, waits, stopped or is pointed at is named in the text color, the rest in grey.
+      const color = node.heat > 0.15 || isWaiting || isStopped || isFocused || node === hovered ? PRIMARY : SECONDARY;
       if (wantsLabel && text.color !== color) {
         text.color = color;
       }
@@ -719,9 +752,10 @@ function animate(now: number): void {
     rayVersion++; // the camera came to rest: what is under the pointer now (not during the turn)
   }
   cameraWasMoving = cameraMoved;
-  // Placing labels compares them on screen: only when the camera, the view, a neuron or a label changed.
-  if (cameraMoved || spheresMoved || relabeled || resized) {
+  // Placing labels compares them on screen: only when the camera, the view, a neuron, a label or the Map's focus changed.
+  if (cameraMoved || spheresMoved || relabeled || resized || refocused) {
     resized = false;
+    refocused = false;
     declutterLabels();
   }
   if (links.length !== styledLinks) {
@@ -875,6 +909,8 @@ function load(graphData: Graph, newTarget: string): void {
   pathway = new Set();
   if (!sameTarget) {
     fitted = false;
+    focused = undefined;
+    focusedRegion = undefined;
   }
   document.body.dataset.state = "busy";
   placeDebugMarks();
@@ -1022,12 +1058,35 @@ function reveal(node: NeuronNode): void {
   flyTo(node);
 }
 
+/** The Map view points at a neuron: fly to it and ring it. */
+function focusNode(id: string): void {
+  const node = nodeById.get(id);
+  if (node) {
+    focused = id;
+    focusedRegion = undefined;
+    refocused = true;
+    flyTo(node);
+  }
+}
+
+/** The Map view points at a region: frame its neurons and name it. */
+function focusRegion(id: string): void {
+  const members = layout ? (regionMembers(layout).get(id) ?? []) : [];
+  const shown = members.map((member) => nodeById.get(member)).filter((node): node is NeuronNode => node !== undefined);
+  if (shown.length) {
+    focused = undefined;
+    focusedRegion = id;
+    refocused = true;
+    fit(800, shown);
+  }
+}
+
 /**
- * Frames the whole brain from where the camera looks: its extent across and up the screen, so
- * the flat map fills the view, and room for labels.
+ * Frames the whole brain (or `subset` of it) from where the camera looks: its extent across and
+ * up the screen, so the flat map fills the view, and room for labels.
  */
-function fit(duration: number): void {
-  if (!nodes.length) {
+function fit(duration: number, subset: NeuronNode[] = nodes): void {
+  if (!subset.length) {
     return;
   }
   const camera = graph.camera() as THREE.PerspectiveCamera;
@@ -1037,7 +1096,7 @@ function fit(duration: number): void {
   const point = new THREE.Vector3();
   const low = [Infinity, Infinity, Infinity];
   const high = [-Infinity, -Infinity, -Infinity];
-  for (const node of nodes) {
+  for (const node of subset) {
     point.set(node.x ?? 0, node.y ?? 0, node.z ?? 0);
     const r = node.parts?.radius ?? 0;
     [point.dot(right), point.dot(up), point.dot(forward)].forEach((v, i) => {
@@ -1113,6 +1172,10 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
     placeDebugMarks();
   } else if (message.type === "debugStopped") {
     onDebugStopped(message.at);
+  } else if (message.type === "focus") {
+    focusNode(message.node);
+  } else if (message.type === "focusRegion") {
+    focusRegion(message.region);
   } else if (message.type === "liveState") {
     const { running, stopping } = message.state;
     stopButton.hidden = !running || message.state.debugged; // the debug toolbar stops a debugged run

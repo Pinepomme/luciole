@@ -4,8 +4,10 @@
  *
  *   node out/dev/screenshot.js [path] [--events FILE [--frames N] [--every MS] [--zoom F]]
  *                              [--breakpoint FILE:LINE] [--stopped FILE:LINE] [--out dir] [--fps] [--cpu [--slow N] [--profile]]
- *                              [--theme light]
+ *                              [--theme light] [--focus ID]
  *
+ * --focus shows what a click in the Map view does: the camera flies to the neuron ID
+ * (`shop:Cart.add`) or the region ID (`mod:shop`, `cls:shop:Cart`, `pkg:src/app`).
  * --theme light uses VS Code's Light Modern colors instead of Dark Modern.
  * --cpu instead measures frame times with nothing drawn (what any machine pays, whatever its GPU):
  * idle, turning the camera, and the busiest neuron sliding back home after a drag. --slow N makes
@@ -231,6 +233,15 @@ async function main(): Promise<void> {
     await page.evaluate((at) => window.postMessage({ type: "debugStopped", at }, "*"), stopped);
     await page.waitForTimeout(1200); // the camera flies to the stop
     await shot("3-debugger");
+  }
+
+  // The Map view: fly to a neuron, or to a region (an id starting with pkg:, mod: or cls:).
+  const focus = option("--focus");
+  if (focus) {
+    const message = /^(pkg|mod|cls):/.test(focus) ? { type: "focusRegion", region: focus } : { type: "focus", node: focus };
+    await page.evaluate((message) => window.postMessage(message, "*"), message);
+    await page.waitForTimeout(1200); // the camera flies there
+    await shot("4-focus");
   }
 
   const status = await page.textContent("#status");

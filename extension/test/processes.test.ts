@@ -38,3 +38,23 @@ test("processes are named by module or script", () => {
   assert.equal(processLabel({ pid: 8, argv: ["C:\\Python\\python.exe", "-u", "C:\\app\\train.py"] }), "train.py (8)");
   assert.equal(processLabel(undefined), "python");
 });
+
+test("when a process is done or gone, the snapshot shows the ones still running", () => {
+  const processes = new Processes<string>();
+  for (const [key, pid] of [["server", 20], ["pytest", 21]] as const) {
+    processes.add(key);
+    processes.identify(key, { pid, argv: ["python", `${key}.py`] });
+  }
+  assert.equal(processes.snapshot(), undefined, "nothing active yet");
+  processes.merge("server", { stacks: [stack("MainThread", "app:serve")], waiting: { "app:accept": 1 } });
+  processes.merge("pytest", { stacks: [stack("MainThread", "tests:test_it")], calls: { "tests:test_it": 1 } });
+  // pytest finishes; the idle server sends nothing, so the picture must come from the snapshot.
+  assert.equal(processes.merge("pytest", { done: true }), undefined);
+  processes.remove("pytest");
+  const frame = processes.snapshot();
+  assert.deepEqual(frame?.stacks, [stack("MainThread", "app:serve")]);
+  assert.deepEqual(frame?.waiting, { "app:accept": 1 });
+  assert.equal(frame?.calls, undefined, "no new calls");
+  processes.remove("server");
+  assert.equal(processes.snapshot(), undefined);
+});
