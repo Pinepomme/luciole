@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
+- Right-click on a neuron adds or removes its breakpoint on big graphs too, where a neuron is a
+  few pixels wide: the click counts where the button went down, a few pixels of jitter are
+  allowed, and a click next to a small neuron picks the nearest one.
 - `luciole run` on a script that does not exist says so in one line, instead of a traceback and an
   empty trace file.
 - Graphs of 60 functions or fewer (whatever the number of files) are laid out in rows by call
