@@ -2,10 +2,11 @@
 
 ## Unreleased
 
-- Small graphs (a file or two, up to 60 functions) are laid out in rows by call order: what
-  nothing calls on top, each function above the ones it calls, so a file reads like an outline.
-  Lines between functions of one row arc above it, lines that skip rows bow to the side. Bigger
-  graphs keep the map of regions.
+- Graphs of 60 functions or fewer (whatever the number of files) are laid out in rows by call
+  order: what nothing calls on top, each function above the ones it calls, so a file reads like
+  an outline; there are no region names. Lines between functions of one row arc above it, lines
+  that skip rows bow to the side only to go around a function in their way. Graphs of more than
+  60 functions keep the map of regions.
 - Each file's functions get a muted tint of their own (Apple's system hues, half-way to grey), so you see which module a function is in; activity stays in the accent.
 - A calmer, minimal look: neutral greys at rest and one accent color for activity, the theme's
   own (its link color), with red only for breakpoints and the debugger. Smaller matte neurons,
