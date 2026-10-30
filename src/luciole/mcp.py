@@ -391,7 +391,8 @@ class Server:
         return render_history(found).replace("(--limit, --offset)", "(limit, offset)")
 
     def origin(self, trace: Trace, args: dict) -> str:
-        from luciole.origins import Graph, OriginError, origin, render_origin
+        from luciole.origins import OriginError, origin, render_origin
+        from luciole.slicing import Graph
 
         function, frame, at = args.get("function"), args.get("frame"), args.get("at")
         if not function and frame is None:
