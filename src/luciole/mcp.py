@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 
 from luciole import __version__, protocol
-from luciole.trace import Trace, TraceError, render_calls, render_exceptions, render_summary, render_traceback, render_tree
+from luciole.trace import Trace, TraceError, render_calls, render_exceptions, render_history, render_summary, render_traceback, render_tree
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first
 KEEP_RUNS = 50  # run folders kept per project; older ones are deleted
@@ -41,7 +41,10 @@ module) under the recorder: every call of project code is recorded with its argu
 value, and every exception with where it was raised and handled. Then ask: `exceptions` for what
 went wrong, `traceback` for the stack it went through with every frame's local variables at that
 moment (a post-mortem debugger's view, no re-run needed), `calls` for every call of a function
-with its values, `call_tree` for who called what, `frame` for one call in detail. `find` and `neighbors` answer from the static graph: where a
+with its values, `call_tree` for who called what, `frame` for one call in detail. When a wrong
+value was made inside a function, before anything failed, `run` again with `scope` naming the
+suspect functions (level 2): `variable_history` then shows every assignment in them, line by line,
+with the values. `find` and `neighbors` answer from the static graph: where a
 function is, who calls it, what it calls, which variables it reads and writes, even for code that
 did not run. Runs are kept: `runs` lists them, and every query takes a run id (default: the last).
 """
@@ -57,13 +60,18 @@ PAGE_ARGS = {
 TOOLS = [
     {
         "name": "run",
-        "description": "Run a command under Luciole's recorder (Python 3.12+) and record what happens: every call of project code with its arguments and return value, every exception. Returns the exit status, the output, and the exceptions that escaped. Child processes are recorded too.",
+        "description": "Run a command under Luciole's recorder (Python 3.12+) and record what happens: every call of project code with its arguments and return value, every exception. Returns the exit status, the output, and the exceptions that escaped. Child processes are recorded too. With `scope`, also every assignment to the local variables of those functions (for `variable_history`).",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "The command, as typed in a shell (no pipes): `python app.py --flag`, `pytest -x tests/test_cart.py`, `python -m pkg`."},
                 "cwd": {"type": "string", "description": "Folder to run in (default: the project root)."},
-                "level": {"type": "integer", "enum": [0, 1], "description": "1 (default): arguments and return values too. 0: calls and exceptions only, cheaper."},
+                "level": {"type": "integer", "enum": [0, 1, 2], "description": "1 (default): arguments and return values too. 0: calls and exceptions only, cheaper. 2 (the default with a `scope`): level 1, plus every assignment in the `scope` functions."},
+                "scope": {
+                    "type": ["string", "array"],
+                    "items": {"type": "string"},
+                    "description": "Functions whose local variables to record, line by line (level 2): node ids or their ends (`cart:checkout`, `Cart.add`, `checkout`), `*` as a wildcard (`cart:Cart.*`), as a list or comma-separated. Keep it to the few suspect functions: each line they run costs a few microseconds.",
+                },
                 "timeout": {"type": "number", "description": "Seconds before the program is stopped (default 600)."},
             },
             "required": ["command"],
@@ -102,6 +110,22 @@ TOOLS = [
         "name": "frame",
         "description": "One call in detail: its arguments, result or exception, caller, and the calls it made.",
         "inputSchema": {"type": "object", "properties": {"frame": FRAME_ARG, "run": RUN_ARG, "process": PROCESS_ARG}, "required": ["frame"]},
+    },
+    {
+        "name": "variable_history",
+        "description": "Every assignment to a function's local variables during a run, call by call and line by line, with the value assigned (rebinding, and changes to lists, dicts and sets): how a value was built. Needs a run made with `scope` covering the function (level 2); when it was not, says so: then `run` the command again with `scope: [\"<function>\"]`.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "function": {"type": "string", "description": "A node id (`pkg.mod:Class.method`) or its end (`Class.method`, `method`)."},
+                "variable": {"type": "string", "description": "One variable only."},
+                "frame": FRAME_ARG,
+                "run": RUN_ARG,
+                "process": PROCESS_ARG,
+                "limit": {"type": "integer", "description": "How many assignments to show (default 50)."},
+                "offset": {"type": "integer", "description": "How many to skip (default 0)."},
+            },
+        },
     },
     {
         "name": "find",
@@ -216,6 +240,8 @@ class Server:
                 return render_tree(entries) or "no calls recorded"
             if name == "frame":
                 return self.frame(trace, int(required(args, "frame")))
+            if name == "variable_history":
+                return self.history(trace, args)
         raise ToolError(f"unknown tool: {name}")
 
     def run(self, args: dict) -> str:
@@ -225,14 +251,19 @@ class Server:
         cwd = Path(args.get("cwd") or self.root)
         if not cwd.is_absolute():
             cwd = self.root / cwd
-        level = int(args.get("level", 1))
+        from luciole.cli import auto_start_env, scoped_level
+        from luciole.session import scope_patterns
+
+        scope = scope_patterns(args.get("scope"))
+        level, problem = scoped_level(int(args["level"]) if args.get("level") is not None else None, scope)
+        if problem:
+            raise ToolError(problem)
+        level = 1 if level is None else level
         timeout = float(args.get("timeout") or 600)
         run_id, folder = self.new_run()
-        (folder / "command.json").write_text(json.dumps({"command": command, "cwd": str(cwd), "level": level, "started_at": time.time()}))
-        from luciole.cli import auto_start_env
-
+        (folder / "command.json").write_text(json.dumps({"command": command, "cwd": str(cwd), "level": level, "scope": scope or None, "started_at": time.time()}))
         env = dict(os.environ)
-        for key, value in auto_start_env(None, self.root, False, folder, level).items():
+        for key, value in auto_start_env(None, self.root, False, folder, level, scope).items():
             if value is None:
                 env.pop(key, None)  # no port: the recorders find the engine's, if VS Code runs one
             else:
@@ -254,7 +285,10 @@ class Server:
         meta = json.loads((folder / "command.json").read_text())
         (folder / "command.json").write_text(json.dumps({**meta, "exit_status": None if timed_out else process.returncode}))
         status = f"stopped after {timeout:g} s (timeout)" if timed_out else f"exit status {process.returncode}"
-        lines = [f"run {run_id}: {shlex.join(command)}", f"  {status}, {elapsed:.2f} s", "", "output:", indent(clip(output.decode(errors="replace")))]
+        lines = [f"run {run_id}: {shlex.join(command)}", f"  {status}, {elapsed:.2f} s"]
+        if scope:
+            lines.append(f"  variable history (level 2) for {', '.join(scope)}: see `variable_history`")
+        lines += ["", "output:", indent(clip(output.decode(errors="replace")))]
         lines += [""] + self.recorded(folder)
         return "\n".join(lines)
 
@@ -311,6 +345,27 @@ class Server:
         if frame["exception"]:
             text += f"\n  exception !{frame['exception'].get('id')} (see `exceptions`)"
         return text
+
+    def history(self, trace: Trace, args: dict) -> str:
+        function, frame = args.get("function"), args.get("frame")
+        if not function and frame is None:
+            raise ToolError("missing argument: function (or frame)")
+        limit, offset = int(args.get("limit") or 50), int(args.get("offset") or 0)
+        found = trace.history(function, args.get("variable"), int(frame) if frame is not None else None, limit, offset)
+        if not found["nodes"]:
+            if frame is not None:
+                raise ToolError(f"no frame #{frame} in this process")
+            raise ToolError(f"no calls of {function} in this run: it did not run, or the name is wrong (`find` looks it up)")
+        if not found["recorded"]:
+            node = found["nodes"][0]
+            had = f"its scope was {', '.join(found['scope'])}" if found["scope"] else f"it was recorded at level {trace.run()['level']}, without a scope"
+            raise ToolError(
+                f"no variable history for {', '.join(found['nodes'])} in this run ({had}; {found['calls']} calls recorded, see `calls`). "
+                f'To record it, `run` the same command again with scope: ["{node}"] (level 2), then ask `variable_history` again.'
+            )
+        if args.get("variable") and not found["total"]:
+            return f"{args['variable']} was never assigned in {', '.join(found['nodes'])} ({found['calls']} calls): check the name, or ask without `variable`"
+        return render_history(found).replace("(--limit, --offset)", "(limit, offset)")
 
     # Static graph
 

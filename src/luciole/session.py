@@ -53,11 +53,12 @@ class Session:
     """The recorder installed in this interpreter: its monitoring callbacks, the pump thread that
     sends a frame every FRAME seconds, and the control thread that reads the view's commands."""
 
-    def __init__(self, root: Path, port: int | None, connection: socket.socket | None, events: Path | None, trace: Path | str | None = None, level: int = 0):
+    def __init__(self, root: Path, port: int | None, connection: socket.socket | None, events: Path | None, trace: Path | str | None = None, level: int = 0, scope: list[str] | None = None):
         self.port = port  # to connect again from a forked child
         self.connection = connection
         self.trace = trace  # trace file or directory (forked children write next to it)
         self.level = level
+        self.scope = scope  # level 2: whose variables are recorded
         self.file = events.open("w", encoding="utf-8") if events else None
         self.sinks: list[Callable[[str], None]] = []
         if connection:
@@ -71,7 +72,7 @@ class Session:
         if trace:
             from luciole.tracer import Tracer
 
-            self.recorder.tracer = Tracer(trace, level, self.recorder.root)
+            self.recorder.tracer = Tracer(trace, level, self.recorder.root, scope=scope)
         self.stopping = threading.Event()
         self.tool: int | None = None
         self.thread_start = threading.Thread.start
@@ -118,6 +119,8 @@ class Session:
         }
         if recorder.tracer is not None:
             callbacks[events.RAISE] = recorder.on_raise
+            # Level 2: LINE events for scoped code only, turned on as each first runs.
+            recorder.tracer.watch = lambda code: monitoring.set_local_events(tool, code, events.LINE)
             recorder.tracer.start_writer(own_thread)
         always = sum(callbacks) - events.LINE
         monitoring.use_tool_id(tool, "luciole")
@@ -165,6 +168,12 @@ class Session:
     def uninstall(self) -> None:
         monitoring = sys.monitoring
         monitoring.set_events(self.tool, 0)
+        tracer = self.recorder.tracer
+        if tracer is not None:
+            tracer.watch = None
+            for code in tracer.watched:  # free_tool_id() leaves them on, until 3.14's clear_tool_id()
+                monitoring.set_local_events(self.tool, code, 0)
+            tracer.watched = []
         for event in self.events:
             monitoring.register_callback(self.tool, event, None)
         monitoring.free_tool_id(self.tool)
@@ -259,6 +268,21 @@ def trace_level(level: int | str | None) -> int:
         return 0
 
 
+def trace_scope(scope: str | list[str] | None) -> list[str]:
+    """The level 2 scope asked for: node id patterns (default: LUCIOLE_TRACE_SCOPE, comma-separated)."""
+    return scope_patterns(scope if scope is not None else os.environ.get("LUCIOLE_TRACE_SCOPE"))
+
+
+def scope_patterns(scope: str | list[str] | tuple[str, ...] | None) -> list[str]:
+    """Scope patterns from a list, or from a comma-separated string (`--scope`, LUCIOLE_TRACE_SCOPE).
+    Matched against node ids by trace.in_scope(). Here, not in trace.py: auto-start cannot import
+    more of luciole once the program runs (see _autostart/sitecustomize.py, import_bundled)."""
+    if not scope:
+        return []
+    items = scope.split(",") if isinstance(scope, str) else [part for item in scope for part in str(item).split(",")]
+    return [item.strip() for item in items if item.strip()]
+
+
 def start(
     root: Path | str | None = None,
     port: int | str | None = None,
@@ -267,6 +291,7 @@ def start(
     connection: socket.socket | None = None,
     trace: Path | str | None = None,
     level: int | None = None,
+    scope: str | list[str] | None = None,
 ) -> bool:
     """Start recording this process, until stop() or the process exits. See luciole.start()."""
     global active
@@ -285,8 +310,13 @@ def start(
     if connection is None and events is None and trace is None:
         return False  # nothing would see the events: record nothing
     root = Path(root or os.environ.get("LUCIOLE_ROOT") or Path.cwd())
+    level, scope = trace_level(level), trace_scope(scope)
+    if trace and level >= 2 and not scope:
+        if not quiet:
+            log.warning("trace level 2 records the variables of chosen functions only: give a scope (LUCIOLE_TRACE_SCOPE); recording at level 1")
+        level = 1
     try:
-        session = Session(root, int(port) if port else None, connection, Path(events) if events else None, trace, trace_level(level))
+        session = Session(root, int(port) if port else None, connection, Path(events) if events else None, trace, level, scope)
     except Exception as error:  # the trace file cannot be written
         if not quiet:
             log.warning("could not start the recorder: %s", error)
@@ -409,7 +439,7 @@ def after_fork() -> None:
 
             session.recorder.tracer.forget()  # the parent's file: the child writes its own
             trace = child_target(session.trace)
-        if (session.connection or trace) and start(session.recorder.root, session.port, quiet=True, trace=trace, level=session.level):
+        if (session.connection or trace) and start(session.recorder.root, session.port, quiet=True, trace=trace, level=session.level, scope=session.scope or []):
             exit_ = os._exit
             if exit_.__name__ != "luciole_exit":
                 # Forked children usually end with os._exit (multiprocessing's do), which skips
@@ -426,18 +456,22 @@ def after_fork() -> None:
         pass
 
 
-def run(target: list[str], as_module: bool, root: Path, port: int | None, events: Path | None, trace: Path | str | None = None, level: int = 0) -> int:
+def run(target: list[str], as_module: bool, root: Path, port: int | None, events: Path | None, trace: Path | str | None = None, level: int = 0, scope: list[str] | None = None) -> int:
     """Run a script (or module, with `as_module`) under the recorder, writing a trace to `trace`
-    (a file, or a directory to make one in) at `level`. Returns its exit code."""
+    (a file, or a directory to make one in) at `level`, level 2 recording the variables of the
+    functions in `scope`. Returns its exit code."""
     global active
     if sys.version_info < (3, 12):
         log.error("live mode needs Python 3.12 or newer (sys.monitoring); this is %s", sys.version.split()[0])
         return 2
     stop()  # auto-started in this interpreter: this run records it instead, with its own options
+    if trace and level >= 2 and not scope:  # LUCIOLE_TRACE_LEVEL=2 alone (the options are checked)
+        log.warning("trace level 2 records the variables of chosen functions only: give a scope (--scope); recording at level 1")
+        level = 1
     # Without --port, the running engine's, if any: then nothing to warn about when there is none.
     connection = connect(port, quiet=not port)
     try:
-        session = Session(root, port, connection, events, trace, level)
+        session = Session(root, port, connection, events, trace, level, scope)
     except Exception as error:  # the trace file cannot be written (on Windows, open in a reader)
         log.error("could not write the trace %s: %s", trace, error)
         if connection:

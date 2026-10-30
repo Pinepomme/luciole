@@ -1,7 +1,8 @@
 # Luciole trace format (schema version 1)
 
 A trace is what one run of a program did: every call of project code (the call tree), how long
-each took, the exceptions, and at level 1 the arguments and return values. It is one SQLite file
+each took, the exceptions, at level 1 the arguments and return values, and at level 2 every
+assignment in the functions you choose (their variables' history). It is one SQLite file
 per process, written by the recorder ([`src/luciole/tracer.py`](../src/luciole/tracer.py)) and
 read by `luciole trace` and the Python API in [`src/luciole/trace.py`](../src/luciole/trace.py),
 which later tools (the MCP server, the timeline in VS Code) build on. Node ids are the graph's
@@ -11,6 +12,7 @@ which later tools (the MCP server, the timeline in VS Code) build on. Node ids a
 
 ```sh
 luciole run --trace run.sqlite [--level 0|1] script.py [args...]   # or -m module
+luciole run --trace run.sqlite --scope cart:checkout,Cart.* script.py   # level 2 in those functions
 luciole run --trace traces/ ...          # a directory: a new file in it
 eval "$(luciole env --trace traces/ --level 1)"   # every Python process of this shell
 ```
@@ -21,12 +23,13 @@ eval "$(luciole env --trace traces/ --level 1)"   # every Python process of this
   makes every Python process write its own trace in `DIR`, named
   `trace-<date>-<time>-<pid>.sqlite`, whether an engine runs or not. That covers terminal runs,
   test runners and child processes started with `subprocess` or multiprocessing's spawn.
-- `luciole.start(trace=..., level=...)` from the program itself.
+- `luciole.start(trace=..., level=..., scope=...)` from the program itself.
 - A forked child writes its own file: a new one in the directory, or `<name>-<pid>.sqlite` next
   to a trace file.
 
 Environment: `LUCIOLE_TRACE` (file or directory; the default of `--trace`), `LUCIOLE_TRACE_LEVEL`
-(0 or 1), `LUCIOLE_TRACE_MAX_FRAMES` (see Limits).
+(0, 1 or 2), `LUCIOLE_TRACE_SCOPE` (the default of `--scope`), `LUCIOLE_TRACE_MAX_FRAMES` and
+`LUCIOLE_TRACE_MAX_WRITES` (see Limits).
 
 **Levels.**
 
@@ -34,9 +37,17 @@ Environment: `LUCIOLE_TRACE` (file or directory; the default of `--trace`), `LUC
 |---|---|
 | 0 (default) | the call tree of project code: one row per call, with its caller, call site, thread and times; exceptions |
 | 1 | level 0, plus each call's arguments and return value, as capped snapshots |
+| 2 | level 1, plus every assignment to the local variables of the functions in a scope (`writes`) |
 
-Levels 2 (every assignment in chosen functions, a `writes` table) and 3 come later (see the
-roadmap); they will add tables, not change these.
+**Scope (level 2).** Recording every assignment everywhere would be far too slow, so level 2
+applies to chosen functions only, and everything else is recorded at level 1. The scope is a list
+of patterns (`--scope`, comma-separated): a node id (`cart:checkout`), with `*` wildcards
+(`cart:Cart.*`, `cart:*`), or the end of one, as `luciole trace ... calls` takes it (`checkout`,
+`Cart.add`, `Cart.*`). A function nested in a scoped one is not scoped by it (`cart:checkout`
+does not match `cart:checkout.inner`; `cart:checkout*` does). `--scope` alone means `--level 2`;
+level 2 without a scope is refused by `luciole run` and the MCP server, and recorded as level 1,
+with a warning, by `luciole.start()` and auto-start. Level 3 (instruction-level provenance) comes
+later (see the roadmap); it will add tables, not change these.
 
 What counts as project code is the recorder's rule (see "Live events" in
 [graph-format.md](graph-format.md)): `.py` files under the root, outside hidden and virtual
@@ -72,7 +83,10 @@ CREATE TABLE runs (
     ended_by TEXT,
     frames_total INTEGER,
     frames_stored INTEGER,
-    truncated INTEGER NOT NULL DEFAULT 0
+    truncated INTEGER NOT NULL DEFAULT 0,
+    scope TEXT,
+    writes_total INTEGER,
+    writes_stored INTEGER
 );
 CREATE TABLE threads (
     id INTEGER PRIMARY KEY,
@@ -93,7 +107,8 @@ CREATE TABLE frames (
     exception INTEGER,
     args TEXT,
     result INTEGER,
-    locals TEXT
+    locals TEXT,
+    suspended_ns INTEGER
 );
 CREATE TABLE exceptions (
     id INTEGER PRIMARY KEY,
@@ -113,12 +128,21 @@ CREATE TABLE snapshots (
     items TEXT,
     truncated INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE writes (
+    id INTEGER PRIMARY KEY,
+    frame INTEGER NOT NULL,
+    line INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    value INTEGER,
+    time_ns INTEGER NOT NULL
+);
 CREATE INDEX frames_by_node ON frames (node, start_ns);
 CREATE INDEX frames_by_caller ON frames (caller);
 CREATE INDEX frames_by_time ON frames (start_ns);
 CREATE INDEX frames_by_exception ON frames (exception) WHERE exception IS NOT NULL;
 CREATE INDEX exceptions_by_frame ON exceptions (frame);
 CREATE INDEX exceptions_by_time ON exceptions (time_ns);
+CREATE INDEX writes_by_frame ON writes (frame, time_ns);
 ```
 
 Times (`*_ns`) are nanoseconds since the run started, from a monotonic clock
@@ -134,7 +158,12 @@ One row (`id` 1): the process (`pid`, `parent_pid`, `argv` as a JSON list, the p
 - `ended_by`: `stop` (the program ended, or `luciole.stop()`) or `sigterm`.
 - `exit_status`: the program's exit code under `luciole run`; `NULL` when unknown (auto-start
   cannot see it).
-- `frames_total` calls seen, `frames_stored` rows kept, `truncated` 1 when some were not kept.
+- `frames_total` calls seen, `frames_stored` rows kept, `truncated` 1 when some were not kept
+  (frames, or writes at level 2).
+- `scope` (level 2): the scope's patterns, a JSON list; `NULL` at other levels (and in traces
+  written before this column existed). Only functions it matches have `writes`.
+- `writes_total` variable writes seen, `writes_stored` rows of `writes` kept (level 2; `NULL`
+  otherwise).
 
 ### `threads`
 
@@ -156,7 +185,9 @@ comprehensions have no node, and are not recorded.
   suspended (a coroutine gathering tasks); `NULL` when it already returned.
 - `thread`: `threads.id`.
 - A generator or coroutine is one frame however many times it is resumed: `start_ns` is its first
-  start, `end_ns` its end, the time suspended included.
+  start, `end_ns` its end, the time suspended included. `suspended_ns` is the time it spent
+  suspended (at a `yield` or an `await`) between the two: what it did not run. `NULL` for other
+  code, and in traces written before this column existed.
 - `end_kind`:
   - `return`;
   - `raise`: it exited with an exception raised in it (or in library code it called);
@@ -181,6 +212,29 @@ comprehensions have no node, and are not recorded.
   (definitions, not state); secret names are redacted as arguments are; at most 50 per frame (then
   `"…"`). Kept for 10,000 frames per run at most, so code that raises in a loop stays cheap.
   `NULL` otherwise, and in traces written before this column existed.
+
+### `writes`
+
+Level 2: one row per assignment to a local variable of a frame of scoped code (see "Scope"), in
+the order they happened.
+
+- `frame`: `frames.id`. `line`: the line that assigned it (a line that runs many times, a loop's,
+  has a row each time it writes).
+- `name`: the variable. `value`: snapshot id of its new value, under the same rules as arguments
+  (`self` as its identity, secret names redacted).
+- `time_ns`: when it was seen, at the start of the next line (or as the frame returned, raised or
+  yielded).
+
+How writes are seen: at each line of a scoped frame, its locals are compared with those it had at
+its previous line. A variable is written when it is newly bound, bound to another object
+(identity, so `x = x + 0` with the same small int is not a write), or, for a `list`, `dict`, `set`
+or `bytearray` (exact types), when its contents changed, as far as its length and its snapshot
+show: a change past the first 8 items (200 bytes of a `bytearray`) that keeps the length is not
+seen. Changes inside other objects (an
+attribute of `self`, a list inside a dict) are not variable writes. The loop variable of a `for`
+is written by the `for` line, a value sent into a generator by its `yield` line. Deleting a
+variable is not recorded. Names starting with `__`, and modules, classes and functions (definitions,
+not state), are left out, as for `locals`. A function's arguments are in `frames.args`, not here.
 
 ### `exceptions`
 
@@ -227,6 +281,8 @@ names, are redacted the same way. A secret inside another object's own repr is n
 - Per value: the repr and items caps above.
 - Per run: at most 2,000,000 frames (`LUCIOLE_TRACE_MAX_FRAMES`). Past it, new calls are counted
   (`frames_total`) but not stored, nor their exceptions, and the run is marked `truncated`.
+- Level 2: at most 1,000,000 writes per run (`LUCIOLE_TRACE_MAX_WRITES`). Past it, writes are
+  counted (`writes_total`) but not stored, and the run is marked `truncated`.
 
 ## How it is written
 
@@ -238,6 +294,12 @@ thread, a thread of the recorder's own (debuggers neither list nor pause it), dr
 every 0.2 s and inserts them in one transaction; a frame that ended by then is inserted once,
 complete, the others are updated when they end. Live lighting is unchanged: the same callbacks
 feed it, and the engine and `--events` get the same lines with or without a trace.
+
+Level 2 turns on `LINE` events (`sys.monitoring.set_local_events`) for the code of each scoped
+function as it first runs, and for nothing else: other code runs as at level 1. At each line, the
+thread running the frame compares the frame's locals with those of its previous line (kept in the
+frame's entry, so a generator resumed later, even in another thread, goes on from where it was),
+and buffers what changed; one last comparison happens when the frame returns, raises or yields.
 
 The file is in WAL mode while the run goes on, so it can be read meanwhile (without the indexes,
 which are made when the run ends: inserting is faster without them), and back to a single file
@@ -260,6 +322,7 @@ luciole trace run.sqlite calls NODE [--limit 20] [--offset 0]   # each call: cal
 luciole trace run.sqlite tree [--from FRAME] [--depth 4]         # call tree, repeated calls collapsed
 luciole trace run.sqlite exceptions [--limit 50]                 # where raised, chained from, handled where
 luciole trace run.sqlite traceback [EXCEPTION]                   # the frames it left, with their locals then
+luciole trace run.sqlite history NODE [--var NAME] [--frame N] [--limit 50]   # level 2: assignments, line by line
 ```
 
 `NODE` is a node id, or its end (`Cart.add` for `shop:Cart.add`). `--json` prints the same
@@ -274,6 +337,8 @@ with Trace("run.sqlite") as trace:
     trace.tree(start=None, depth=4)               # [{"frame", "node", "count", "duration_ns", "end", "children", "more"}]
     trace.exceptions(limit=50, offset=0)          # {"total", "exceptions": [...]}
     trace.traceback(exception_id=None)            # {"exception", "frames", "handled_in"}: innermost first
+    trace.history("checkout", name=None, frame=None, limit=20, offset=0)
+                              # {"nodes", "scope", "recorded", "calls", "total", "frames": [{..., "writes"}]}
     trace.frame(7)            # one call, like an item of calls()
     trace.snapshot(3)         # {"type", "repr", "items"?, "truncated"?}
 ```
@@ -281,9 +346,14 @@ with Trace("run.sqlite") as trace:
 In `tree`, consecutive calls of one function with the same subtree are one entry with a `count`;
 `more` counts the calls below an entry that are not shown. In `traceback`, each frame (like an
 item of `calls()`, plus `locals`) has `at_line`, the line it was at when the exception left it;
-by default it is the last exception nothing handled, else the last one. In `summary`, a function's `total_ns`
-leaves out calls made while another call of it runs (recursion), and `self_ns` leaves out its
-callees (but not the threads and tasks it runs concurrently).
+by default it is the last exception nothing handled, else the last one. In `history`, each item
+of `frames` is a call (like an item of `calls()`) with its `writes`, `{"line", "name", "value",
+"time_ns"}`; `limit` and `offset` count writes, `name` keeps one variable, and `recorded` is false
+when the run's scope did not cover the function (no level 2, or another scope): run it again
+with `--scope`. In `summary`, a function's `total_ns` leaves out calls made while another call of
+it runs (recursion); `active_ns` is the same without the time its generators and coroutines spent
+suspended; `self_ns` is its active time minus its callees' active time (but not the threads and
+tasks it runs concurrently), so a coroutine awaiting `asyncio.sleep` is not busy meanwhile.
 
 ## Worked example
 
@@ -338,5 +408,21 @@ analyzer building the graph of Luciole's sources.
 - The test suite runs mostly in subprocesses and in Luciole itself, so little of it is project
   code in the recording process: what tracing costs there is the work it has to do, nothing more.
 
+Level 2 costs per line run in the scoped functions, and nothing elsewhere: code outside the scope
+gets no `LINE` events at all. Measured the same way, on a loop of 200,000 iterations (three lines
+each, two variables written each time, four locals) in a function, timed inside the program:
+
+| The loop's function | Plain | Level 1 | Level 2 |
+|---|---|---|---|
+| in the scope (600,000 lines, 400,000 writes) | 0.008 s | 0.008 s | 1.00 s |
+| not in the scope | 0.008 s | 0.008 s | 0.008 s |
+
+- About 1.3 µs per line to compare the frame's locals with the previous line's (more with more
+  locals), and 0.5 µs more per write stored; about 65 bytes per write in the file. A list, dict,
+  set or bytearray is compared by its length and first items, not snapshotted, until it changes.
+- Calls of unscoped functions cost what they cost at level 1.
+- So keep the scope to the few functions in question: a hot loop in a scoped function runs about
+  100 times slower.
+
 Ways to make it cheaper, for later: record level 1 only in chosen functions (`sys.monitoring`
-can turn events on per code object), and sample very hot functions.
+can turn events on per code object, as level 2 does), and sample very hot functions.

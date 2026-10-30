@@ -278,8 +278,13 @@ class Recorder:
             step.left = True
 
     def on_line(self, code, line: int):
-        """LINE, only on while pausing or stepping: project code stops here."""
-        if self.node_id(code) is None:
+        """LINE, on while pausing or stepping (project code stops here), and for the code of
+        functions whose variables a trace records (level 2)."""
+        tracer = self.tracer
+        if tracer is not None and tracer.scope is not None and tracer.line(sys._getframe(1), line):
+            if self.step is None and not self.pausing:
+                return None  # scoped code, not paused: the common case, without node_id()'s lookup
+        elif self.node_id(code) is None:
             return sys.monitoring.DISABLE
         ident = threading.get_ident()
         step = self.step

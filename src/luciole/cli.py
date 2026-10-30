@@ -7,7 +7,8 @@
     luciole env [--port PORT] [--root DIR] [--off]  shell commands that turn auto-start on or off
     luciole tests FILE [--root DIR] [--json]      test files that import FILE's module
     luciole run --trace FILE [--level 0|1] ...      also write a trace of the run (SQLite)
-    luciole trace FILE summary|calls NODE|tree|exceptions [--json]   read a trace
+    luciole run --trace FILE --level 2 --scope PATTERN[,...] ...   also every assignment in those functions
+    luciole trace FILE summary|calls NODE|tree|exceptions|traceback|history NODE [--json]   read a trace
 """
 
 from __future__ import annotations
@@ -40,7 +41,8 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd.add_argument("--events", type=Path, help="also write events to this JSON Lines file")
     # A string, not a Path: Path("traces/") drops the separator that marks a directory to make.
     run_cmd.add_argument("--trace", default=os.environ.get("LUCIOLE_TRACE") or None, help="write a trace of the run to this SQLite file (or a new file in this directory)")
-    run_cmd.add_argument("--level", type=int, choices=[0, 1], default=None, help="trace level: 0 call tree, timings and exceptions (default); 1 also arguments and return values")
+    run_cmd.add_argument("--level", type=int, choices=[0, 1, 2], default=None, help="trace level: 0 call tree, timings and exceptions (default); 1 also arguments and return values; 2 also every assignment in the --scope functions")
+    run_cmd.add_argument("--scope", default=os.environ.get("LUCIOLE_TRACE_SCOPE") or None, help="level 2: the functions whose variables to record, as node ids or their ends, comma-separated, * as a wildcard (cart:checkout,Cart.*); implies --level 2")
     run_cmd.add_argument("-m", dest="as_module", action="store_true", help="run a module, like python -m")
     run_cmd.add_argument("target", nargs=argparse.REMAINDER, help="script (or module) and its arguments")
     env_cmd = commands.add_parser(
@@ -52,7 +54,8 @@ def main(argv: list[str] | None = None) -> int:
     env_cmd.add_argument("--port", type=int, help="report to the engine on this port rather than the running engine")
     env_cmd.add_argument("--root", type=Path, help="project directory: only code inside it is reported (default: each process's working directory)")
     env_cmd.add_argument("--trace", type=Path, help="also write a trace of each process to a new file in this directory")
-    env_cmd.add_argument("--level", type=int, choices=[0, 1], help="trace level (see luciole run)")
+    env_cmd.add_argument("--level", type=int, choices=[0, 1, 2], help="trace level (see luciole run)")
+    env_cmd.add_argument("--scope", help="level 2: the functions whose variables to record (see luciole run); implies --level 2")
     env_cmd.add_argument("--off", action="store_true", help="print the commands that turn it off")
     env_cmd.add_argument("--shell", choices=["sh", "powershell", "cmd"], default="powershell" if os.name == "nt" else "sh")
     engine_cmd = commands.add_parser("engine", help="run the engine that recorders connect to and viewers subscribe to")
@@ -82,17 +85,30 @@ def main(argv: list[str] | None = None) -> int:
     exceptions_cmd.add_argument("--offset", type=int, default=0)
     traceback_cmd = queries.add_parser("traceback", help="the frames an exception left, with their locals then (level 1)")
     traceback_cmd.add_argument("exception", type=int, nargs="?", help="exception id (default: the last one nothing handled)")
-    for query in (summary_cmd, calls_cmd, tree_cmd, exceptions_cmd, traceback_cmd):  # also accepted after the query
+    history_cmd = queries.add_parser("history", help="each call's variable assignments, line by line (level 2)")
+    history_cmd.add_argument("node", nargs="?", help="function's node id, or its end (not needed with --frame)")
+    history_cmd.add_argument("--var", help="one variable only")
+    history_cmd.add_argument("--frame", type=int, help="one call only: its frame id")
+    history_cmd.add_argument("--limit", type=int, default=50, help="writes shown")
+    history_cmd.add_argument("--offset", type=int, default=0)
+    for query in (summary_cmd, calls_cmd, tree_cmd, exceptions_cmd, traceback_cmd, history_cmd):  # also accepted after the query
         query.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
     args = parser.parse_args(argv)
 
     logging.basicConfig(format="luciole: %(message)s", level=logging.WARNING)
     if args.command == "trace":
+        if args.query == "history" and args.node is None and args.frame is None:
+            parser.error("trace history: give a function, or --frame")
         return trace_command(args)
+    if args.command in ("run", "env") and not getattr(args, "off", False):
+        level, problem = scoped_level(args.level, args.scope)
+        if problem:
+            parser.error(f"{args.command}: {problem}")
+        args.level = level
     if args.command == "env":
         if not args.off and not args.port and not engine_port() and not args.trace:
             print("luciole: no engine is running yet: programs light up once one runs (open the Luciole view in VS Code, or run `luciole engine`)", file=sys.stderr)
-        print(env_commands(auto_start_env(args.port, args.root, args.off, args.trace, args.level), args.shell))
+        print(env_commands(auto_start_env(args.port, args.root, args.off, args.trace, args.level, args.scope), args.shell))
         return 0
     if args.command == "mcp":
         from luciole.mcp import serve
@@ -115,9 +131,9 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("run: give a script or -m module to run")
         if not args.as_module and not Path(args.target[0]).exists():
             parser.error(f"run: no such file: {args.target[0]}")  # before a trace file is made for it
-        from luciole.session import run, trace_level
+        from luciole.session import run, trace_level, trace_scope
 
-        return run(args.target, args.as_module, args.root, args.port, args.events, args.trace, trace_level(args.level))
+        return run(args.target, args.as_module, args.root, args.port, args.events, args.trace, trace_level(args.level), trace_scope(args.scope or ""))
     if not args.path.exists():
         parser.error(f"no such file or directory: {args.path}")
     graph = build_graph(args.path)
@@ -137,13 +153,27 @@ def main(argv: list[str] | None = None) -> int:
 AUTO_START_DIR = Path(__file__).resolve().parent / "_autostart"
 
 
-def auto_start_env(port: int | None, root: Path | None, off: bool, trace: Path | None = None, level: int | None = None) -> dict[str, str | None]:
+def scoped_level(level: int | None, scope: str | list[str] | None) -> tuple[int | None, str | None]:
+    """The trace level for `level` and `scope`, or what is wrong with them: a scope means level 2
+    (the default with one), and level 2 needs one (it records the variables of chosen functions
+    only, being too slow everywhere)."""
+    from luciole.session import scope_patterns
+
+    patterns = scope_patterns(scope)
+    if patterns and level is not None and level < 2:
+        return level, f"a scope records variables, which is level 2, not {level}"
+    if level is not None and level >= 2 and not patterns:
+        return level, "level 2 records the variables of chosen functions only: give them as a scope (node ids or their ends, * as a wildcard: cart:checkout,Cart.*)"
+    return (2 if patterns else level), None
+
+
+def auto_start_env(port: int | None, root: Path | None, off: bool, trace: Path | None = None, level: int | None = None, scope: str | list[str] | None = None) -> dict[str, str | None]:
     """Variables that turn auto-start on (or off), from the current PYTHONPATH. None unsets."""
     entries = [entry for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep) if entry and Path(entry).resolve() != AUTO_START_DIR]
     if off:
         variables = {"PYTHONPATH": os.pathsep.join(entries) or None, "LUCIOLE_LIVE_PORT": None, "LUCIOLE_ROOT": None}
-        if os.environ.get("LUCIOLE_TRACE") or os.environ.get("LUCIOLE_TRACE_LEVEL"):
-            variables.update(LUCIOLE_TRACE=None, LUCIOLE_TRACE_LEVEL=None)
+        if os.environ.get("LUCIOLE_TRACE") or os.environ.get("LUCIOLE_TRACE_LEVEL") or os.environ.get("LUCIOLE_TRACE_SCOPE"):
+            variables.update(LUCIOLE_TRACE=None, LUCIOLE_TRACE_LEVEL=None, LUCIOLE_TRACE_SCOPE=None)
         return variables
     variables = {
         "PYTHONPATH": os.pathsep.join([str(AUTO_START_DIR), *entries]),
@@ -154,11 +184,14 @@ def auto_start_env(port: int | None, root: Path | None, off: bool, trace: Path |
         # A directory: each process writes a file of its own there.
         variables["LUCIOLE_TRACE"] = str(trace.resolve()) + os.sep
         variables["LUCIOLE_TRACE_LEVEL"] = str(level) if level is not None else None
+        from luciole.session import scope_patterns
+
+        variables["LUCIOLE_TRACE_SCOPE"] = ",".join(scope_patterns(scope)) or None
     return variables
 
 
 def trace_command(args) -> int:
-    from luciole.trace import Trace, TraceError, render_calls, render_exceptions, render_summary, render_traceback, render_tree
+    from luciole.trace import Trace, TraceError, render_calls, render_exceptions, render_history, render_summary, render_traceback, render_tree
 
     try:
         trace = Trace(args.file)
@@ -174,6 +207,8 @@ def trace_command(args) -> int:
             result, text = trace.tree(args.start, args.depth), render_tree
         elif args.query == "traceback":
             result, text = trace.traceback(args.exception), render_traceback
+        elif args.query == "history":
+            result, text = trace.history(args.node, args.var, args.frame, args.limit, args.offset), render_history
         else:
             result, text = trace.exceptions(args.limit, args.offset), render_exceptions
     print(json.dumps(result, indent=2, ensure_ascii=False) if args.json else text(result))

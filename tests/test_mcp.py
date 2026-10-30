@@ -87,7 +87,7 @@ def test_initialize_and_list_tools(project):
     assert reply["result"]["capabilities"] == {"tools": {}}
     assert "run" in reply["result"]["instructions"]
     tools = {tool["name"]: tool for tool in client.request("tools/list")["result"]["tools"]}
-    assert set(tools) == {"run", "runs", "summary", "exceptions", "traceback", "calls", "call_tree", "frame", "find", "neighbors"}
+    assert set(tools) == {"run", "runs", "summary", "exceptions", "traceback", "calls", "call_tree", "frame", "variable_history", "find", "neighbors"}
     assert tools["run"]["inputSchema"]["required"] == ["command"]
     assert client.request("no/such/method")["error"]["code"] == -32601
     client.close()
@@ -120,6 +120,30 @@ def test_run_records_calls_values_and_the_exception(client):
 
     runs = client.ok("runs")
     assert len(runs.splitlines()) == 1 and "(exit status 1, 1 process recorded)" in runs
+
+
+@needs_monitoring
+def test_variable_history_asks_for_a_scoped_run_first(client):
+    client.ok("run", command=f"{PYTHON} cart.py")
+    text, error = client.tool("variable_history", function="checkout")
+    assert error and "no variable history for cart:checkout in this run" in text and "recorded at level 1" in text
+    assert 'run` the same command again with scope: ["cart:checkout"]' in text
+
+    text = client.ok("run", command=f"{PYTHON} cart.py", scope="checkout")
+    assert "variable history (level 2) for checkout" in text
+    history = client.ok("variable_history", function="checkout")
+    assert history.startswith("2 writes in 2 calls of cart:checkout\n")
+    assert "checkout(items=[{'price': 3, 'qty': 2}, {'price': 5}], budget=20)" in history
+    assert "line 11   due = 11" in history and "line 11   due = 30" in history  # the second call raises after it
+    text, error = client.tool("variable_history", function="checkout", variable="nope")
+    assert not error and "nope was never assigned" in text
+    text, error = client.tool("variable_history", function="total")
+    assert error and "its scope was checkout" in text
+
+    text, error = client.tool("run", command=f"{PYTHON} cart.py", level=2)
+    assert error and "give them as a scope" in text
+    text, error = client.tool("run", command=f"{PYTHON} cart.py", level=0, scope=["checkout"])
+    assert error and "which is level 2" in text
 
 
 @needs_monitoring

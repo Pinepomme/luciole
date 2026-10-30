@@ -37,8 +37,19 @@ work with any Python 3.10+.
    - `calls FUNCTION`: every call, with arguments, return value or exception, caller, duration;
    - `call_tree` (from the top, or below a frame), repeated calls collapsed into `×N`;
    - `frame N`: one call in detail, and the calls it made;
-   - `summary`: duration, exit status, top functions by calls and by time.
-3. Ask the static graph, for code that did not run too: `find NAME` (where it is), `neighbors
+   - `summary`: duration, exit status, top functions by calls and by time (self time leaves out
+     the time coroutines spend awaiting);
+   - `variable_history FUNCTION [variable] [frame]`: every assignment to its local variables,
+     call by call and line by line, with the values. It needs a run with a `scope` covering the
+     function (below); otherwise it says so, and how to get one.
+3. When a wrong value was made inside a function, long before anything failed (so that the
+   locals `traceback` shows are not enough), `run` the same command again with `scope`, the
+   suspect functions: `scope: ["cart:checkout", "Cart.*"]` (node ids or their ends, `*` as a
+   wildcard). That is trace level 2: level 1 everywhere, plus every assignment in those functions
+   (rebinding, and changes to lists, dicts, sets and bytearrays), about 1.7 µs per line they run
+   and nothing elsewhere. `level: 2` without a `scope` is refused: recording every line of every
+   function would be far too slow.
+4. Ask the static graph, for code that did not run too: `find NAME` (where it is), `neighbors
    FUNCTION` (who calls it, what it calls, where its parameters' values come from, the globals and
    attributes it reads and writes, where its return value goes).
 
@@ -52,7 +63,7 @@ agent's programs run.
 ## Where runs are kept
 
 `~/.luciole/runs/<project>-<hash>/<run id>/`: one trace per process (`*.sqlite`, see
-[trace-format.md](trace-format.md)), `command.json` (command, folder, level, exit status) and
+[trace-format.md](trace-format.md)), `command.json` (command, folder, level, scope, exit status) and
 `output.txt` (the program's output). `luciole trace FILE ...` reads the traces too.
 
 ## Protocol

@@ -1,5 +1,6 @@
 """Trace recording: each run's call tree, timings and exceptions (level 0), plus argument and
-return values (level 1), written to a SQLite file (docs/trace-format.md, schema in trace.py).
+return values (level 1), plus every assignment in the functions of a scope (level 2), written to
+a SQLite file (docs/trace-format.md, schema in trace.py).
 
 The recorder's monitoring callbacks call the Tracer's hooks, in the thread where each event
 happens. The hooks never touch SQLite. Each thread keeps its own stack of frames, one list per
@@ -9,7 +10,13 @@ it) drains the buffers every WRITE_EVERY seconds and inserts them in one transac
 that has ended by then is inserted once, complete, and the others are updated when they end.
 
 A frame is one call: a generator or coroutine resumed many times stays one frame (found again
-by its Python frame object), whose time runs from its first start to its end.
+by its Python frame object), whose time runs from its first start to its end; the time it spent
+suspended is added up apart.
+
+Level 2 turns LINE events on for the code of scoped functions only, as each first runs (other
+code pays nothing). At each line of a scoped frame, its thread compares the frame's locals with
+those of its previous line: what was bound, rebound to another object, or (a list, dict, set or
+bytearray) changed since is a write of the line that just ran.
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ import threading
 import time
 import types
 from pathlib import Path
+from typing import Callable
 
 from luciole import __version__, trace, values
 
@@ -40,13 +48,18 @@ MESSAGE_CHARS = 500
 FLOW = (GeneratorExit, StopIteration, StopAsyncIteration)  # control flow, not errors: not recorded
 MAX_LOCALS = 50  # local variables kept per frame an exception leaves
 MAX_FAILURE_FRAMES = 10_000  # frames per run whose locals are kept; code that raises in loops stops there
+MAX_WRITES = 1_000_000  # variable writes stored per run (level 2); past it, writes are counted, not stored
+COMPARED = frozenset({list, dict, set, bytearray})  # mutable containers whose contents() show a change
 
 # An entry: a list, one per frame, with these fields. The thread fills the ones up to ARGS when
 # the frame starts, then END_NS, EXCEPTION, RESULT and LOCALS when it ends, and KIND last.
-FID, CODE, PYFRAME, NODE, CALLER, ORIGIN, THREAD, LINE, START_NS, ARGS, END_NS, KIND, EXCEPTION, RESULT, LOCALS = range(15)
+# SUSPENDED adds up the nanoseconds a generator or coroutine spent suspended (None for other
+# code); HISTORY, for a frame of scoped code at level 2, is [its previous line, {name: (value,
+# contents() of a list, dict, set or bytearray, else None)}] as that line started, None once it ends.
+FID, CODE, PYFRAME, NODE, CALLER, ORIGIN, THREAD, LINE, START_NS, ARGS, END_NS, KIND, EXCEPTION, RESULT, LOCALS, SUSPENDED, HISTORY = range(17)
 
 # Other buffered events are tuples starting with one of these.
-NEW_THREAD, RAISED, SEEN = range(3)
+NEW_THREAD, RAISED, SEEN, WRITE = range(4)
 
 REDACTED = ("str", values.REDACTED, None, False)
 SKIPPED_LOCALS = (types.ModuleType, type, types.FunctionType, types.BuiltinFunctionType)
@@ -91,16 +104,25 @@ def child_target(target: Path | str) -> Path:
     return target.with_name(f"{target.stem}-{os.getpid()}{target.suffix}")
 
 
+def env_limit(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
 class Tracer:
-    def __init__(self, target: Path | str, level: int, root: Path, max_frames: int | None = None):
+    def __init__(self, target: Path | str, level: int, root: Path, max_frames: int | None = None, scope: list[str] | None = None):
         self.path = trace_file(target)
-        self.level = level
-        if max_frames is None:
-            try:
-                max_frames = int(os.environ.get("LUCIOLE_TRACE_MAX_FRAMES") or MAX_FRAMES)
-            except ValueError:
-                max_frames = MAX_FRAMES
-        self.max_frames = max_frames
+        self.level = level if level < 2 or scope else 1  # level 2 without a scope would record nothing more
+        self.max_frames = max_frames if max_frames is not None else env_limit("LUCIOLE_TRACE_MAX_FRAMES", MAX_FRAMES)
+        # Level 2: the node id patterns whose functions' variables are recorded (see trace.in_scope).
+        self.scope = list(scope) if self.level >= 2 else None
+        self.max_writes = env_limit("LUCIOLE_TRACE_MAX_WRITES", MAX_WRITES)
+        self.writes_seen = 0
+        self.scoped: dict[object, bool] = {}  # code -> whether it is in the scope
+        self.watched: list = []  # code with LINE events on
+        self.watch: Callable[[object], None] | None = None  # turns LINE events on for a code object (set by the session)
         self.started = time.perf_counter_ns()
         self.frame_ids = itertools.count(1)
         self.thread_ids = itertools.count(1)
@@ -167,9 +189,17 @@ class Tracer:
         elif caller is None and state.origin:  # the thread's first frame: who started the thread
             origin, state.origin = state.origin, None
         args = self.arguments(code, frame) if self.level and fid <= self.max_frames else None  # past it, not stored
-        entry = [fid, code, id(frame), node_id, caller, origin, state.row, line, time.perf_counter_ns() - self.started, args, None, None, None, None, None]
+        history = None
+        if self.scope is not None and fid <= self.max_frames:
+            scoped = self.scoped.get(code)
+            if scoped is None:
+                scoped = self.scope_code(code, node_id)
+            if scoped:
+                history = [None, {}]
+        generator = code.co_flags & GENERATORS
+        entry = [fid, code, id(frame), node_id, caller, origin, state.row, line, time.perf_counter_ns() - self.started, args, None, None, None, None, None, 0 if generator else None, history]
         stack.append(entry)
-        if code.co_flags & GENERATORS:
+        if generator:
             suspended = self.suspended
             # A generator abandoned at a yield outside any `try` is closed without an event: its
             # entry stays here until its frame's address is reused (by this frame), or evicted.
@@ -193,16 +223,25 @@ class Tracer:
         if entry is None or entry[CODE] is not code:  # started before recording
             self.start(code, node_id, frame, None, None)
             return
+        suspended_at = entry[END_NS]
+        if suspended_at is not None:
+            entry[SUSPENDED] += time.perf_counter_ns() - self.started - suspended_at
         self.state().stack.append(entry)
 
     def suspend(self, code) -> None:
         """PY_YIELD: off the stack until it resumes."""
         state = self.threads.get(threading.get_ident())
         if state and state.stack and state.stack[-1][CODE] is code:
-            state.stack.pop()[END_NS] = time.perf_counter_ns() - self.started  # in case it never resumes
+            entry = state.stack.pop()
+            if entry[HISTORY] is not None:
+                frame = sys._getframe(2)  # suspend() <- Recorder.on_yield <- the generator
+                if frame.f_code is code:
+                    self.diff(state, entry, frame, None)
+            entry[END_NS] = time.perf_counter_ns() - self.started  # in case it never resumes
 
-    def end(self, code, kind: str, result=None, exception: int | None = None) -> None:
-        """PY_RETURN, PY_UNWIND: the frame of `code` on top of this thread's stack ends."""
+    def end(self, code, kind: str, result=None, exception: int | None = None, frame=None) -> None:
+        """PY_RETURN, PY_UNWIND: the frame of `code` on top of this thread's stack ends. `frame`
+        is its Python frame (None from returned(), which finds it only when level 2 needs it)."""
         state = self.threads.get(threading.get_ident())
         if not state or not state.stack:
             return  # started before recording
@@ -214,7 +253,14 @@ class Tracer:
             if index < 0:
                 return
             self.lose(state, index + 1)
-        entry = stack.pop()
+        entry = stack[-1]
+        if entry[HISTORY] is not None:  # what its last line wrote
+            if frame is None:
+                frame = sys._getframe(3)  # end() <- returned() <- Recorder.on_return <- the function
+            if frame.f_code is code:
+                self.diff(state, entry, frame, None)
+            entry[HISTORY] = None
+        stack.pop()
         if code.co_flags & GENERATORS:
             self.unsuspend(entry)
         entry[END_NS] = time.perf_counter_ns() - self.started
@@ -233,7 +279,7 @@ class Tracer:
         if not state or not state.stack:
             return
         if isinstance(error, GeneratorExit):
-            self.end(code, "close")
+            self.end(code, "close", frame=frame)
             return
         known = state.recent.get(id(error))
         if known and known[1] is type(error):
@@ -242,9 +288,9 @@ class Tracer:
                 self.failure_frames += 1
                 top[LOCALS] = self.local_values(frame)
             raised_here = known[2] == top[FID]
-            self.end(code, "raise" if raised_here else "unwind", exception=known[0])
+            self.end(code, "raise" if raised_here else "unwind", exception=known[0], frame=frame)
         else:
-            self.end(code, "raise")
+            self.end(code, "raise", frame=frame)
 
     def raised(self, code, frame, error: BaseException) -> None:
         """RAISE in project code: an exception is raised in `frame`, or reaches it from a call."""
@@ -309,6 +355,7 @@ class Tracer:
         now = self.now()
         for entry in state.stack[index:]:
             self.unsuspend(entry)
+            entry[HISTORY] = None
             entry[END_NS] = now
             entry[KIND] = "lost"
         del state.stack[index:]
@@ -377,6 +424,72 @@ class Tracer:
         except Exception as error:
             return (type(value).__qualname__, f"<snapshot failed: {type(error).__name__}>", None, True)
 
+    # Level 2: variable history
+
+    def scope_code(self, code, node_id: str) -> bool:
+        """Whether `code` is in the scope; the first time it is, LINE events are turned on for it."""
+        scoped = self.scoped[code] = trace.in_scope(node_id, self.scope)
+        if scoped and self.watch is not None:
+            try:
+                self.watch(code)
+                self.watched.append(code)
+            except Exception as error:  # never break the program
+                log.warning("cannot record the variables of %s: %s", node_id, error)
+        return scoped
+
+    def line(self, frame, line: int) -> bool:
+        """LINE: `line` is about to run in `frame`, so the previous line is done. Whether `frame`
+        is a recorded frame of scoped code (whose variables are recorded)."""
+        state = self.threads.get(threading.get_ident())
+        if state is None or not state.stack:
+            return False
+        entry = state.stack[-1]
+        if entry[HISTORY] is not None and entry[PYFRAME] == id(frame):
+            self.diff(state, entry, frame, line)
+            return True
+        return False
+
+    def diff(self, state: ThreadTrace, entry: list, frame, line: int | None) -> None:
+        """Record what the frame's previous line wrote, comparing its locals now with those it had
+        then; `line` is the line starting now (None when the frame returns, raises or yields)."""
+        history = entry[HISTORY]
+        previous, before = history
+        changes = []
+        try:
+            now = {}
+            for name, value in frame.f_locals.items():
+                compared = contents(value) if type(value) in COMPARED else None
+                now[name] = (value, compared)
+                if previous is not None:
+                    old = before.get(name)
+                    if old is None or old[0] is not value or old[1] != compared:
+                        changes.append((name, value))
+        except Exception:  # never break the program (a set changed size meanwhile, say)
+            return
+        history[1] = now
+        if line is not None:
+            history[0] = line
+        if not changes or entry[FID] > self.max_frames:
+            return
+        at = time.perf_counter_ns() - self.started
+        fid, buffer = entry[FID], state.buffer
+        for name, value in changes:
+            if name.startswith(("__", ".")) or isinstance(value, SKIPPED_LOCALS):
+                continue  # definitions, not state (as in local_values)
+            self.writes_seen += 1
+            if self.writes_seen > self.max_writes:
+                continue  # counted, not stored
+            if values.is_secret(name):
+                value = REDACTED
+            elif name == "self":
+                value = (IDENTITY, type(value), id(value))
+            else:
+                try:
+                    value = self.value(value)
+                except Exception as error:
+                    value = (type(value).__qualname__, f"<snapshot failed: {type(error).__name__}>", None, True)
+            buffer.append((WRITE, fid, previous, name, value, at))
+
     # Ending
 
     def close(self, ended_by: str, timeout: float | None = None) -> None:
@@ -394,6 +507,18 @@ class Tracer:
         abandoned.append(self.writer.db)
 
 
+def contents(value) -> tuple:
+    """What shows that a list, dict, set or bytearray changed: its length and its first items, as
+    far as a snapshot shows them (bytes themselves, other items by identity: comparing them would
+    run the program's __eq__). Much cheaper than a snapshot, which is taken only when it changed."""
+    kind = type(value)
+    if kind is bytearray:
+        return len(value), bytes(value[: values.REPR_CHARS])
+    if kind is dict:
+        return len(value), *map(id, itertools.islice(value, values.ITEMS)), *map(id, itertools.islice(value.values(), values.ITEMS))
+    return len(value), *map(id, itertools.islice(value, values.ITEMS))
+
+
 class Writer:
     """Inserts the buffered entries and events, in the writer thread (and once more at the end)."""
 
@@ -408,12 +533,13 @@ class Writer:
         self.open: list[list] = []  # entries inserted before they ended
         self.new_snapshots: list[tuple] = []
         self.frames_stored = 0
+        self.writes_stored = 0
         argv = getattr(sys, "orig_argv", sys.argv)
         python = sys.version.split()[0]
         parent = os.getppid() if hasattr(os, "getppid") else None
         self.db.execute(
-            "INSERT INTO runs (id, pid, parent_pid, argv, root, started_at, python, luciole, level) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (os.getpid(), parent, json.dumps(argv), str(root), time.time(), python, __version__, tracer.level),
+            "INSERT INTO runs (id, pid, parent_pid, argv, root, started_at, python, luciole, level, scope) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (os.getpid(), parent, json.dumps(argv), str(root), time.time(), python, __version__, tracer.level, json.dumps(tracer.scope) if tracer.scope else None),
         )
 
     def loop(self) -> None:
@@ -455,7 +581,7 @@ class Writer:
 
     def insert(self, events: list) -> None:
         level = self.tracer.level
-        frames, still_open, threads, raised, seen = [], [], [], {}, []
+        frames, still_open, threads, raised, seen, writes = [], [], [], {}, [], []
         for event in events:
             if type(event) is list:  # an entry
                 kind = event[KIND]  # first: the rest of its end is written before it
@@ -468,6 +594,9 @@ class Writer:
                 raised[event[1]] = [*event[1:], event[2]]  # handled in the frame raising it, so far
             elif event[0] == SEEN:
                 seen.append(event[1:])
+            elif event[0] == WRITE:
+                _, fid, line, name, value, at = event
+                writes.append((fid, line, name, self.snapshot(value), at))
             else:
                 threads.append(event[1:])
         updates = []
@@ -477,7 +606,7 @@ class Writer:
                 still_open.append(entry)
             else:
                 result = self.snapshot(entry[RESULT]) if level and kind == "return" else None
-                updates.append((entry[END_NS], kind, entry[EXCEPTION], result, self.locals_json(entry), entry[FID]))
+                updates.append((entry[END_NS], kind, entry[EXCEPTION], result, self.locals_json(entry), entry[SUSPENDED], entry[FID]))
         self.open = still_open
         handled = []
         for row_id, fid in seen:
@@ -488,15 +617,17 @@ class Writer:
         db = self.db
         db.execute("BEGIN")
         db.executemany("INSERT INTO threads VALUES (?, ?, ?, ?)", threads)
-        db.executemany("INSERT INTO frames VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", frames)
-        db.executemany("UPDATE frames SET end_ns = ?, end_kind = ?, exception = ?, result = ?, locals = ? WHERE id = ?", updates)
+        db.executemany("INSERT INTO frames VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", frames)
+        db.executemany("UPDATE frames SET end_ns = ?, end_kind = ?, exception = ?, result = ?, locals = ?, suspended_ns = ? WHERE id = ?", updates)
         db.executemany("INSERT INTO exceptions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", raised.values())
         db.executemany("UPDATE exceptions SET handled_in = ? WHERE id = ?", handled)
         if self.new_snapshots:
             db.executemany("INSERT INTO snapshots VALUES (?, ?, ?, ?, ?)", self.new_snapshots)
             self.new_snapshots = []
+        db.executemany("INSERT INTO writes (frame, line, name, value, time_ns) VALUES (?, ?, ?, ?, ?)", writes)
         db.execute("COMMIT")
         self.frames_stored += len(frames)
+        self.writes_stored += len(writes)
 
     def row(self, entry: list, kind: str | None, level: int) -> tuple:
         args = entry[ARGS]
@@ -505,9 +636,9 @@ class Writer:
             args = "{" + ", ".join(f'"{name}": {snapshot(value)}' for name, value in args) + "}" if args is not None else None
             entry[ARGS] = None  # stored: the values are not kept alive while the call runs on
         if kind is None:
-            return (entry[FID], entry[NODE], entry[CALLER], entry[ORIGIN], entry[THREAD], entry[LINE], entry[START_NS], None, None, None, args, None, None)
+            return (entry[FID], entry[NODE], entry[CALLER], entry[ORIGIN], entry[THREAD], entry[LINE], entry[START_NS], None, None, None, args, None, None, entry[SUSPENDED])
         result = self.snapshot(entry[RESULT]) if level and kind == "return" else None
-        return (entry[FID], entry[NODE], entry[CALLER], entry[ORIGIN], entry[THREAD], entry[LINE], entry[START_NS], entry[END_NS], kind, entry[EXCEPTION], args, result, self.locals_json(entry))
+        return (entry[FID], entry[NODE], entry[CALLER], entry[ORIGIN], entry[THREAD], entry[LINE], entry[START_NS], entry[END_NS], kind, entry[EXCEPTION], args, result, self.locals_json(entry), entry[SUSPENDED])
 
     def locals_json(self, entry: list) -> str | None:
         """The locals kept as an exception left the frame, `{"name": snapshot id}`; then let go."""
@@ -553,17 +684,23 @@ class Writer:
         self.insert(self.drain())
         total = next(tracer.frame_ids) - 1
         running = {id(entry) for state in list(tracer.all_threads) for entry in list(state.stack)}
-        suspended = [(entry[END_NS], entry[FID]) for entry in self.open if id(entry) not in running and entry[KIND] is None and entry[END_NS] is not None]
+        suspended = [(entry[END_NS], entry[SUSPENDED], entry[FID]) for entry in self.open if id(entry) not in running and entry[KIND] is None and entry[END_NS] is not None]
+        resumed = [(entry[SUSPENDED], entry[FID]) for entry in self.open if id(entry) in running and entry[SUSPENDED]]
         db = self.db
         db.execute("BEGIN")
         # Generators and coroutines left suspended (or abandoned): they end where they last stopped.
-        db.executemany("UPDATE frames SET end_ns = ?, end_kind = 'suspended' WHERE id = ? AND end_kind IS NULL", suspended)
+        db.executemany("UPDATE frames SET end_ns = ?, end_kind = 'suspended', suspended_ns = ? WHERE id = ? AND end_kind IS NULL", suspended)
+        db.executemany("UPDATE frames SET suspended_ns = ? WHERE id = ?", resumed)
         db.execute("UPDATE frames SET end_kind = 'running' WHERE end_kind IS NULL")
         # An exception is handled in the last frame it reached, unless that frame exited with it.
         db.execute("UPDATE exceptions SET handled_in = NULL WHERE EXISTS (SELECT 1 FROM frames WHERE frames.id = exceptions.handled_in AND frames.exception = exceptions.id)")
         db.execute(
-            "UPDATE runs SET ended_at = ?, duration_ns = ?, exit_status = ?, ended_by = ?, frames_total = ?, frames_stored = ?, truncated = ? WHERE id = 1",
-            (time.time(), tracer.now(), tracer.exit_status, ended_by, total, self.frames_stored, int(total > self.frames_stored)),
+            "UPDATE runs SET ended_at = ?, duration_ns = ?, exit_status = ?, ended_by = ?, frames_total = ?, frames_stored = ?, truncated = ?, writes_total = ?, writes_stored = ? WHERE id = 1",
+            (
+                time.time(), tracer.now(), tracer.exit_status, ended_by, total, self.frames_stored,
+                int(total > self.frames_stored or tracer.writes_seen > self.writes_stored),
+                tracer.writes_seen if tracer.scope else None, self.writes_stored if tracer.scope else None,
+            ),
         )
         db.execute("COMMIT")
         db.executescript(trace.INDEXES)

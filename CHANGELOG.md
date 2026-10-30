@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Variable history (trace level 2): `luciole run --trace FILE --scope cart:checkout,Cart.*`
+  records every assignment to the local variables of the functions named (node ids or their
+  ends, `*` as a wildcard): rebinding, and changes to lists, dicts, sets and bytearrays, each with
+  its line, time and value (secrets redacted). Only those functions pay for it (LINE events are
+  turned on for their code alone): about 1.7 µs per line they run, nothing elsewhere. `luciole
+  trace FILE history NODE [--var NAME]` reads it, and so does the MCP tool `variable_history`,
+  whose `run` takes a `scope`; it says when a run has no history for a function and how to get
+  one. Also `luciole.start(scope=...)`, `luciole env --scope` and `LUCIOLE_TRACE_SCOPE`; at most
+  1,000,000 writes per run (`LUCIOLE_TRACE_MAX_WRITES`).
+- Time a coroutine spends awaiting (or a generator suspended at a `yield`) is no longer counted as
+  busy: frames record it (`suspended_ns`), and `luciole trace FILE summary` shows each function's
+  active time, its self time being its active time minus its callees'. In `examples/workers.py`,
+  `download` (which awaits `asyncio.sleep`) went from 3.6 s of self time to under a millisecond.
+
 - Failure snapshots: at level 1, a frame that an exception leaves keeps its local variables as
   they were then (secrets redacted, 50 per frame, 10,000 frames per run). `luciole trace FILE
   traceback [ID]` and the MCP tool `traceback` show the frames an exception went through with
