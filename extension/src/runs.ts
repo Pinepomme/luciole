@@ -94,11 +94,10 @@ export function packageModule(file: string, source: string, isPackage: (dir: str
   if (parts.length === 1) {
     return undefined; // not in a package: the relative import fails however it runs
   }
-  if (parts[parts.length - 1] === "__init__") {
-    parts.pop();
-  } else if (parts[parts.length - 1] === "__main__") {
+  if (parts[parts.length - 1] === "__main__") {
     parts.pop(); // python -m pkg runs pkg/__main__.py
   }
+  // pkg/__init__.py stays `pkg.__init__`: `python -m pkg` would run pkg/__main__.py instead.
   return { module: parts.join("."), root: dir };
 }
 

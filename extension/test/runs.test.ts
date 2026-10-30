@@ -98,6 +98,7 @@ test("a package's file that imports relatively runs as a module", () => {
   assert.deepEqual(packageModule("/work/rich/rich/progress.py", "from . import filesize, get_console\n", isPackage), { module: "rich.progress", root: "/work/rich" });
   assert.deepEqual(packageModule("/work/src/app/core/engine.py", "from ..store import load\n", isPackage), { module: "app.core.engine", root: "/work/src" });
   assert.deepEqual(packageModule("/work/rich/rich/__main__.py", "from .console import Console\n", isPackage), { module: "rich", root: "/work/rich" });
+  assert.deepEqual(packageModule("/work/rich/rich/__init__.py", "from .console import Console\n", isPackage), { module: "rich.__init__", root: "/work/rich" });
   // Dotted relative imports.
   assert.deepEqual(packageModule("/work/rich/rich/progress.py", "from .a.b import c\n", isPackage), { module: "rich.progress", root: "/work/rich" });
   assert.deepEqual(packageModule("/work/src/app/core/engine.py", "from ..store.db import load\n", isPackage), { module: "app.core.engine", root: "/work/src" });
