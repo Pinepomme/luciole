@@ -237,8 +237,12 @@ inside a VS Code window connected to WSL.
 
 ```
 src/luciole/
-  analyzer.py      static graph: functions, classes, variables, calls (ast)
-  recorder.py      live recording with sys.monitoring (3.12+); luciole.start()
+  analyzer.py      static graph: files, pass 1 (nodes, bindings, call resolution) and build_graph
+  flows.py         static graph, pass 2: edges (calls, reads, writes, value flow)
+  scopes.py        what both passes share: scopes, bindings, AST helpers
+  recorder.py      live recording with sys.monitoring (3.12+): callbacks, frames, pause/step
+  session.py       the recorder in an interpreter: engine connection, luciole.start()/stop(),
+                   SIGTERM and fork, `luciole run`
   engine.py        the local engine that recorders connect to and viewers subscribe to
   protocol.py      protocol version and engine discovery (~/.luciole/engine-v1.json)
   _autostart/      sitecustomize.py: starts the recorder in any Python process when enabled
@@ -252,7 +256,9 @@ extension/
   src/live.ts        live runs (debug session or terminal); src/engine.ts finds or starts the engine
   src/debugging.ts   following the VS Code debugger; src/runs.ts what Run Live launches
   src/webview/       the 3D view (brain.ts = model, layout.ts = map of regions and bundled
-                     links, flow.ts = calls tracing their lines, main.ts = rendering and lighting)
+                     links, flow.ts = calls tracing their lines, main.ts = rendering and lighting,
+                     with theme.ts = colors, objects.ts = three.js objects and picking,
+                     labels.ts = names on the map, text.ts = tooltips, batches.ts = draw batches)
   test/              unit tests (npm test)
   package.mjs        builds luciole.vsix with a copy of src/luciole
 tests/             Python tests (uv run pytest)

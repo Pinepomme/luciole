@@ -44,7 +44,7 @@ def test_matches_hand_made_example():
 def test_analyzes_own_source():
     graph = build_graph(REPO / "src")
     assert_valid(graph)
-    assert "luciole.analyzer:FlowVisitor.call" in node_ids(graph)
+    assert "luciole.flows:FlowVisitor.call" in node_ids(graph)
     assert ("luciole.cli:main", "luciole.analyzer:build_graph") in edges(graph, "calls")
 
 

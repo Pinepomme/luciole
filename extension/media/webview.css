@@ -56,11 +56,6 @@ button.stop:hover {
   filter: brightness(1.15);
 }
 
-button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
 button[hidden] {
   display: none;
 }

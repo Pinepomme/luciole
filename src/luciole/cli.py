@@ -107,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("run: give a script or -m module to run")
         if not args.as_module and not Path(args.target[0]).exists():
             parser.error(f"run: no such file: {args.target[0]}")  # before a trace file is made for it
-        from luciole.recorder import run, trace_level
+        from luciole.session import run, trace_level
 
         return run(args.target, args.as_module, args.root, args.port, args.events, args.trace, trace_level(args.level))
     if not args.path.exists():

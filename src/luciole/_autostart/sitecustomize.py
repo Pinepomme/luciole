@@ -103,7 +103,7 @@ def start_luciole():
             connection = None
     if connection is None and not trace:
         return
-    import_bundled("recorder").start(port=port if connection else None, quiet=True, connection=connection, trace=trace)
+    import_bundled("session").start(port=port if connection else None, quiet=True, connection=connection, trace=trace)
 
 
 drop_working_directory()

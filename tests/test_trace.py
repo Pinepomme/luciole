@@ -198,14 +198,14 @@ def test_a_resumed_generator_or_coroutine_is_one_frame(tmp_path):
 def test_abandoned_generators_do_not_pile_up(tmp_path):
     result, path = traced(tmp_path, """
         import time
-        from luciole import recorder
+        from luciole import session
 
         def items():
             yield 1
             yield 2
 
         def main():
-            writer = recorder.active.recorder.tracer.writer
+            writer = session.active.recorder.tracer.writer
             for _ in range(3):
                 for _ in range(2000):
                     next(items())  # abandoned at a yield outside any try
@@ -224,13 +224,13 @@ def test_abandoned_generators_do_not_pile_up(tmp_path):
 def test_a_trace_that_cannot_be_written_stops_without_breaking_the_program(tmp_path):
     result, path = traced(tmp_path, """
         import time
-        from luciole import recorder
+        from luciole import session
 
         def work(n):
             return n + 1
 
         def main():
-            tracer = recorder.active.recorder.tracer
+            tracer = session.active.recorder.tracer
             for n in range(100):
                 work(n)
             with tracer.writer.lock:
