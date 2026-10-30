@@ -344,10 +344,22 @@ function neuronObject(node: NeuronNode): THREE.Object3D {
 /** Made the first time a neuron needs them (most never do): fewer objects for three.js to walk. */
 function sprite(parts: NonNullable<NeuronNode["parts"]>, material: THREE.SpriteMaterial): THREE.Sprite {
   const sprite = new THREE.Sprite(material);
-  sprite.raycast = () => {}; // hover is for the sphere: sprites cost a lot to raycast
+  sprite.raycast = () => {}; // rings: hover is for the sphere (sprites cost a lot to raycast)
   sprite.matrixAutoUpdate = false; // updated where it is resized
   parts.group.add(sprite);
   return sprite;
+}
+
+/**
+ * Hovered and clicked (as part of its neuron) while shown, never while hidden: the raycaster
+ * ignores `visible`, and most labels and dots are hidden.
+ */
+function pickableWhenShown(sprite: THREE.Sprite): void {
+  sprite.raycast = function (this: THREE.Sprite, raycaster, intersects) {
+    if (this.visible) {
+      THREE.Sprite.prototype.raycast.call(this, raycaster, intersects);
+    }
+  };
 }
 
 /**
@@ -366,6 +378,7 @@ function markOf(parts: NonNullable<NeuronNode["parts"]>): THREE.Sprite {
     mark.position.set(parts.radius * 0.9, parts.radius * 0.9, 0);
     mark.renderOrder = 2; // over labels
     mark.updateMatrix();
+    pickableWhenShown(mark); // right-click on the dot removes its breakpoints
     parts.mark = mark;
   }
   return parts.mark;
@@ -464,7 +477,7 @@ function label(node: NeuronNode): SpriteText {
     text.material.depthWrite = false;
     text.renderOrder = 1;
     text.userData = { aspect: text.scale.x / text.scale.y };
-    text.raycast = () => {};
+    pickableWhenShown(text); // a click on a function's name opens it, as on its sphere
     text.matrixAutoUpdate = false; // updated where it is placed (declutterLabels)
     parts.group.add(text);
     parts.label = text;
