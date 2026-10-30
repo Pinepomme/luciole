@@ -321,7 +321,7 @@ export function callItem(call: TraceCall, file: string, root: string): HistoryIt
   const lines = [
     `${name}${argsText(call.args, 400)} ${outcome}`.trim(),
     count > 1 ? `${count} calls in a row (#${call.frame} to #${call.last}), ${durationText(call.duration_ns)} in all` : `#${call.frame}, ${durationText(call.duration_ns)}, ${where}, thread ${call.thread}`,
-    call.calls ? `${call.calls} calls below` : "",
+    call.calls ? `${call.calls} ${call.calls === 1 ? "call" : "calls"} below` : "",
   ];
   return {
     kind: "call",

@@ -221,7 +221,8 @@ def test_origin_queries_for_the_editor(recorded):
         assert found["files"] == {"prog:leaf": "prog.py", "prog:main": "prog.py", "prog:middle": "prog.py"} and found["root"] == str(root)
         assert found["text"].startswith("where n in prog:leaf")
         several = query(trace, "origin", {"node": "middle", "variable": "total"}, graphs)["steps"]
-        assert several["kind"] == "needs_level_2" and several["rerun"] == "prog:middle" and [c["line"] for c in several["candidates"]] == [9, 11]
+        # Assigned on lines 9 and 11: middle returned 20 and line 9 assigns 0, so line 11 made it.
+        assert several["kind"] == "write" and several["line"] == 11 and several["value"] == "20" and "inferred" in several["note"]
         with pytest.raises(ValueError, match="no calls of nope"):
             query(trace, "origin", {"node": "nope", "variable": "x"}, graphs)
 

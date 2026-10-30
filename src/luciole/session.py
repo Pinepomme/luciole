@@ -516,6 +516,8 @@ def run(target: list[str], as_module: bool, root: Path, port: int | None, events
     status = None
     try:
         if as_module:
+            if os.getcwd() not in sys.path and "" not in sys.path:  # as `python -m` does; the luciole script has its own folder first
+                sys.path.insert(0, os.getcwd())
             runpy.run_module(target[0], run_name="__main__", alter_sys=True)
         else:
             sys.path.insert(0, str(Path(target[0]).resolve().parent))
