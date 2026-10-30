@@ -163,7 +163,10 @@ class Tracer:
             # entry stays here until its frame's address is reused (by this frame), or evicted.
             dead = suspended.get(id(frame))
             if dead is None and len(suspended) >= MAX_SUSPENDED:
-                dead = suspended.pop(next(iter(suspended)))
+                try:  # another thread may remove that one meanwhile: never raise into the program
+                    dead = suspended.pop(next(iter(suspended)), None)
+                except (RuntimeError, StopIteration):
+                    pass
             if dead is not None:
                 self.abandoned(dead)
             suspended[id(frame)] = entry
