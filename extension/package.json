@@ -20,7 +20,10 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onView:luciole.actions",
+    "onView:luciole.running",
+    "onView:luciole.map"
   ],
   "contributes": {
     "commands": [
