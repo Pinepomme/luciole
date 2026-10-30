@@ -68,9 +68,28 @@ the functions light up as they run.
   it starts at a speed that makes the replay last a few seconds. Only what is on screen is read
   from the recording, so long runs replay as fast as short ones. Coroutines waiting on an
   `await` are not ringed in a replay (a recording has their total waiting time, not when).
+- **Where did this value come from?** Right-click a variable in a Python file (the name under
+  the cursor, or selected: a local, a parameter, a global, `self.x`, or `return`) and pick
+  **Luciole: Where Did This Value Come From?**: Luciole finds the function around the cursor, the
+  newest recorded run that called it, and asks about its last call (or lets you pick one of its
+  calls, newest first). Or click **where from?** next to a value in **Show Values** (an
+  argument, the result, a local an exception left, a value over time), or **Where From?** on a
+  call or a value in the Calls view. The **Origin** view (in the Luciole sidebar) answers with the
+  chain that made the value: the assignment, the caller that passed it, the call that returned
+  it, the last call that set a global or an attribute, then what fed each of those, with values,
+  functions, call numbers (`#12`), lines and code. Click a step to open its line and make its
+  function pulse on the brain. The brain lights the path: its functions stand out, every other
+  one is dimmed, and each move of the value from one function to the next traces its line in the
+  accent, from the sources toward the question; the camera frames the whole path. When a local
+  is assigned on several lines, the answer lists them and offers **Record … line by line and
+  run again**: the same command runs again with that function's variables recorded (level 2);
+  ask again when it ends. Where the walk stopped (its depth limit), **go on from here** asks
+  again from that step. **Clear Origin** (the view's title bar) clears it; a Run Live or a
+  replay starting clears it too, since the brain then shows the run. See
+  [docs/origins.md](../docs/origins.md) for what each recording level can answer.
 - **Focus and filters**: **Focus Around** (on a function in the Map or a call in Calls, or from
   the command palette) shows only the functions a few calls around one, callers and callees (the
-  `luciole.focusDepth` setting, 1 by default); the others are dimmed. **Luciole: Filters…** (the
+  `luciole.focusDepth` setting, 1 by default); the others are dimmed, nearly to the background. **Luciole: Filters…** (the
   filter button of the Map) hides tests (test files, `test_` functions, `Test` classes) and private
   helpers (`_name`). Filtered functions stay where they are, nearly invisible, so the map keeps its
   shape; **Clear filters** in the panel shows everything again.
@@ -80,6 +99,7 @@ the functions light up as they run.
   command line, pid and state, and the last few that exited; a program in one of VS Code's debug
   sessions has a button to the Call Stack and is stopped from the debug toolbar, any other has a
   Stop button (press it again to kill it). **Calls**: the recorded runs (see History above).
+  **Origin** (while there is an answer): where a value came from (see above).
   **Map**: an outline of the graph in the panel,
   packages → modules → classes → functions, with how many functions each holds and which are running. Click an item and the
   view flies to it in the brain; a function also has **Go to Source**. The search button

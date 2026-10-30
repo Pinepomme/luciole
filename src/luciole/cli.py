@@ -11,7 +11,7 @@
     luciole trace FILE summary|calls NODE|tree|exceptions|traceback|history NODE [--json]   read a trace
     luciole trace FILE children|frame N|frames|serve ...  what VS Code's history views ask (browse.py)
     luciole runs [--root DIR] [--json]            recorded runs of a project (MCP and Run Live), newest first
-    luciole runs new --root DIR --command JSON [--cwd DIR] [--by vscode]   a new run folder; runs finish FOLDER
+    luciole runs new --root DIR --command JSON [--cwd DIR] [--level N] [--scope F,G] [--by vscode]   a new run folder; runs finish FOLDER
     luciole trace FILE origin NODE VARIABLE [--frame N] [--depth D] [--json]   where a value came from
 """
 
@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd.add_argument("--events", type=Path, help="also write events to this JSON Lines file")
     # A string, not a Path: Path("traces/") drops the separator that marks a directory to make.
     run_cmd.add_argument("--trace", default=os.environ.get("LUCIOLE_TRACE") or None, help="write a trace of the run to this SQLite file (or a new file in this directory)")
-    run_cmd.add_argument("--level", type=int, choices=[0, 1, 2], default=None, help="trace level: 0 call tree, timings and exceptions (default); 1 also arguments and return values; 2 also every assignment in the --scope functions")
+    run_cmd.add_argument("--level", type=int, choices=[0, 1, 2], default=None, help="trace level: 0 call tree, timings and exceptions; 1 also arguments, return values and failure locals (default); 2 also every assignment in the --scope functions")
     run_cmd.add_argument("--scope", default=os.environ.get("LUCIOLE_TRACE_SCOPE") or None, help="level 2: the functions whose variables to record, as node ids or their ends, comma-separated, * as a wildcard (cart:checkout,Cart.*); implies --level 2")
     run_cmd.add_argument("-m", dest="as_module", action="store_true", help="run a module, like python -m")
     run_cmd.add_argument("target", nargs=argparse.REMAINDER, help="script (or module) and its arguments")
@@ -77,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     runs_cmd.add_argument("--root", type=Path, default=Path.cwd(), help="project directory (default: the current directory)")
     runs_cmd.add_argument("--cwd", type=Path, help="new: the folder the command runs in (default: the root)")
     runs_cmd.add_argument("--level", type=int, default=1, help="new: the trace level it records at")
+    runs_cmd.add_argument("--scope", help="new: the functions level 2 records the variables of, comma-separated")
     runs_cmd.add_argument("--by", default="vscode", help="new: who started it (vscode, agent)")
     runs_cmd.add_argument("--exit-status", type=int, help="finish: the program's exit status, when known")
     runs_cmd.add_argument("--command", dest="run_command", help='new: the command, as a JSON list (["python", "app.py"])')
@@ -229,6 +230,7 @@ def auto_start_env(port: int | None, root: Path | None, off: bool, trace: Path |
 
 def runs_command(args, parser) -> int:
     from luciole.runs import finish_run, list_runs, new_run, render_runs
+    from luciole.session import scope_patterns
 
     if args.action == "finish":
         if not args.folder or not (args.folder / "command.json").is_file():
@@ -243,7 +245,7 @@ def runs_command(args, parser) -> int:
             command = None
         if not command or not isinstance(command, list):
             parser.error('runs new: give the command as a JSON list: --command \'["python", "app.py"]\'')
-        run_id, folder = new_run(root, command, (args.cwd or root).resolve(), args.level, by=args.by)
+        run_id, folder = new_run(root, command, (args.cwd or root).resolve(), args.level, scope_patterns(args.scope) or None, by=args.by)
         print(json.dumps({"id": run_id, "folder": str(folder)}) if args.json else folder)
         return 0
     listing = list_runs(root)

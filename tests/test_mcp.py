@@ -211,3 +211,14 @@ def test_mistakes_are_explained(client):
 def test_python_that_runs_no_project_code_says_so(client, tmp_path):
     text = client.ok("run", command=f"{PYTHON} -c pass")
     assert "no project code ran" in text
+
+
+@needs_monitoring
+def test_run_takes_variables_before_the_command(client, project):
+    (project / "lib").mkdir()
+    (project / "lib" / "helper.py").write_text("def twice(n):\n    return n * 2\n")
+    (project / "use.py").write_text("import os\nfrom helper import twice\n\ndef main():\n    print(twice(int(os.environ['N'])))\n\nmain()\n")
+    text = client.ok("run", command=f"PYTHONPATH=lib N=21 {PYTHON} use.py")
+    assert "exit status 0" in text and "42" in text
+    assert "use:main" in client.ok("call_tree")  # still recorded: the recorder's folder kept its place
+

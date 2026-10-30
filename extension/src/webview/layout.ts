@@ -649,3 +649,38 @@ function move(a: Vec3, d: Vec3, k: number): void {
   a.y += d.y * k;
   a.z += d.z * k;
 }
+
+/**
+ * A force (d3's, as 3d-force-graph runs it) that pulls each neuron to its place on the map. They
+ * start there: this undoes drags and glides refreshes. `away` is told, at each tick, how many
+ * are not home yet: none, and the layout engine can stop.
+ */
+export function homeForce(away: (count: number) => void) {
+  type Pulled = { home: Vec3; x?: number; y?: number; z?: number; vx: number; vy: number; vz: number };
+  let pulled: Pulled[] = [];
+  const force = (alpha: number) => {
+    const k = 0.3 * Math.max(alpha, 0.05);
+    let count = 0;
+    for (const n of pulled) {
+      const [dx, dy, dz] = [n.home.x - n.x!, n.home.y - n.y!, n.home.z - n.z!];
+      if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) < 0.05 && Math.abs(n.vx) + Math.abs(n.vy) + Math.abs(n.vz) < 0.05) {
+        // Home: exactly, and still. Pulled closer forever, every neuron would move a little each
+        // tick, and every line would be placed again.
+        n.x = n.home.x;
+        n.y = n.home.y;
+        n.z = n.home.z;
+        n.vx = n.vy = n.vz = 0;
+        continue;
+      }
+      count++;
+      n.vx += dx * k;
+      n.vy += dy * k;
+      n.vz += dz * k;
+    }
+    away(count);
+  };
+  force.initialize = (nodes: object[]) => {
+    pulled = nodes as Pulled[];
+  };
+  return force;
+}

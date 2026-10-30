@@ -3,10 +3,8 @@
  * MCP server uses, and the Calls view lists the workspace's runs, Run Live's and agents' alike,
  * with each process's call tree loaded a level at a time, its exceptions and their frames' locals.
  * A call opens in the editor and in the brain; Replay plays a run back on the brain; Show Values
- * opens a call's values. The items come from calls.ts, the queries go through traces.ts.
- *
- * Origin paths (where a value came from, lit on the brain) are a later step: `originHook` is
- * where they plug in.
+ * opens a call's values. The items come from calls.ts, the queries go through traces.ts. Its
+ * values (and the Values panel's) ask where they came from through `whereFrom` (originview.ts).
  */
 
 import { randomBytes } from "crypto";
@@ -35,6 +33,7 @@ import {
   valueItems,
 } from "./calls";
 import type { LiveFrame } from "./messages";
+import type { OriginTarget } from "./origin";
 import type { ResolvedRun } from "./runs";
 import { Traces } from "./traces";
 import { CallHistory, valuesBody, valuesHtml } from "./values";
@@ -48,6 +47,8 @@ export interface HistoryHooks {
   replay(root: string, file: string, label: string, start: number, end: number): void;
   /** Where `node` is defined (absolute file, 1-based line), from the graph shown. */
   locate(node: string): { file: string; line: number } | undefined;
+  /** "Where From?" on a value: the Origin view answers. */
+  whereFrom(target: OriginTarget): void;
   log(line: string): void;
 }
 
@@ -112,16 +113,18 @@ export class CallsView implements vscode.TreeDataProvider<HistoryItem>, vscode.D
 
   /**
    * A new run folder for `run` (under `root`), and the variables that make its processes record
-   * there at level 1; nothing when the `luciole.recordHistory` setting is off.
+   * there at level 1, or at level 2 for the functions of `scope` (comma-separated); nothing when
+   * the `luciole.recordHistory` setting is off, unless a scope is asked for.
    */
-  async record(root: string, run: ResolvedRun): Promise<{ folder: string; env: Record<string, string> } | undefined> {
-    if (!vscode.workspace.getConfiguration("luciole").get<boolean>("recordHistory", true)) {
+  async record(root: string, run: ResolvedRun, scope?: string): Promise<{ folder: string; env: Record<string, string> } | undefined> {
+    if (!scope && !vscode.workspace.getConfiguration("luciole").get<boolean>("recordHistory", true)) {
       return undefined;
     }
     try {
-      const folder = await this.traces.newRun(root, ["python", ...run.target], run.cwd);
-      this.hooks.log(`recording the run in ${folder}`);
-      return { folder, env: { LUCIOLE_TRACE: folder + path.sep, LUCIOLE_TRACE_LEVEL: "1" } };
+      const folder = await this.traces.newRun(root, ["python", ...run.target], run.cwd, scope);
+      this.hooks.log(`recording the run in ${folder}${scope ? `, the variables of ${scope} line by line` : ""}`);
+      const level: Record<string, string> = scope ? { LUCIOLE_TRACE_LEVEL: "2", LUCIOLE_TRACE_SCOPE: scope } : { LUCIOLE_TRACE_LEVEL: "1" };
+      return { folder, env: { LUCIOLE_TRACE: folder + path.sep, ...level } };
     } catch (error) {
       this.hooks.log(`could not make a run folder, so this run is not recorded: ${error}`);
       return undefined;
@@ -251,8 +254,10 @@ export class CallsView implements vscode.TreeDataProvider<HistoryItem>, vscode.D
         const traceback = await this.traces.query<Traceback | null>(item.file, "traceback", { exception: item.exception.id });
         return traceback ? tracebackItems(traceback, item.file, item.root) : [];
       }
-      case "where":
-        return valueItems(item.call.locals ?? {}, item.key, item.root);
+      case "where": {
+        const { file, root, call } = item;
+        return valueItems(call.locals ?? {}, item.key, root, (variable) => ({ file, root, frame: call.frame, node: call.node, variable }));
+      }
       default:
         return [];
     }
@@ -295,7 +300,7 @@ export class CallsView implements vscode.TreeDataProvider<HistoryItem>, vscode.D
     tree.id = item.key;
     tree.description = item.description;
     tree.tooltip = item.tooltip;
-    tree.contextValue = item.kind === "run" && !item.run.processes.length ? "run.empty" : item.kind;
+    tree.contextValue = item.kind === "run" && !item.run.processes.length ? "run.empty" : item.kind === "value" && item.origin ? "value.origin" : item.kind;
     if (item.icon) {
       tree.iconPath = new vscode.ThemeIcon(item.icon, item.error ? new vscode.ThemeColor("errorForeground") : undefined);
     }
@@ -350,6 +355,11 @@ export class CallsView implements vscode.TreeDataProvider<HistoryItem>, vscode.D
     this.hooks.replay(target.root, process.file, label, process.first_ns, process.duration_ns);
   }
 
+  /** The runs listed, for the Origin view to look for calls in. */
+  get runs(): RunListing[] {
+    return this.listings;
+  }
+
   /** Frames for the replay of `file`, as the panel's timeline asks for them. */
   frames(file: string, from: number, to: number, every: number): Promise<LiveFrame[]> {
     return this.traces.query<LiveFrame[]>(file, "frames", { from: Math.round(from), to: Math.round(to), every: Math.max(1, Math.round(every)) });
@@ -372,23 +382,29 @@ export class CallsView implements vscode.TreeDataProvider<HistoryItem>, vscode.D
       history: history instanceof Error ? undefined : history,
       problem: history instanceof Error ? history.message : undefined,
       scopeHint: `luciole run --trace DIR --scope ${shortNode(call.node)} …`,
+      askOrigin: true,
     });
     const panel = (this.valuesPanel ??= this.makeValuesPanel());
     panel.title = `Values: ${shortNode(call.node)} #${call.frame}`;
     const nonce = randomBytes(16).toString("hex");
     panel.webview.html = valuesHtml(body, nonce, panel.webview.cspSource);
-    this.valuesCall = { root: item.root, call };
+    this.valuesCall = { root: item.root, file: item.file, call };
     panel.reveal(vscode.ViewColumn.Beside, true);
   }
 
-  private valuesCall: { root: string; call: TraceCall } | undefined;
+  private valuesCall: { root: string; file: string; call: TraceCall } | undefined;
 
   private makeValuesPanel(): vscode.WebviewPanel {
     const panel = vscode.window.createWebviewPanel("luciole.values", "Values", { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true }, { enableScripts: true });
     panel.onDidDispose(() => (this.valuesPanel = undefined));
-    panel.webview.onDidReceiveMessage((message: { type: string; line: number }) => {
+    panel.webview.onDidReceiveMessage((message: { type: string; line: number; name?: string; at?: number }) => {
       const shown = this.valuesCall;
       if (!shown) {
+        return;
+      }
+      if (message.type === "origin" && message.name) {
+        const { root, file, call } = shown;
+        this.hooks.whereFrom({ file, root, frame: call.frame, node: call.node, variable: message.name, ...(message.at !== undefined ? { at: message.at } : {}) });
         return;
       }
       const node = message.type === "openCaller" ? shown.call.caller?.node : shown.call.node;
@@ -401,10 +417,3 @@ export class CallsView implements vscode.TreeDataProvider<HistoryItem>, vscode.D
     return panel;
   }
 }
-
-/**
- * Where origin queries (phase 3, step 5: `src/luciole/origins.py`) will plug into the view: given
- * a call and one of its values, the path that value took, to list under the call and light on
- * the brain. Not built yet.
- */
-export type OriginHook = (file: string, frame: number, name: string) => Promise<{ node: string; frame: number; line: number }[]>;

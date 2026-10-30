@@ -5,7 +5,7 @@
  *   node out/dev/screenshot.js [path] [--events FILE [--frames N] [--every MS] [--zoom F]]
  *                              [--breakpoint FILE:LINE] [--stopped FILE:LINE] [--out dir] [--fps] [--cpu [--slow N] [--profile]]
  *                              [--theme light] [--focus ID] [--without-debugger]
- *                              [--trace FILE [--at SECONDS]] [--around ID [--depth N]] [--hide-tests] [--hide-private]
+ *                              [--trace FILE [--at SECONDS] [--origin NODE:VARIABLE[@FRAME]]] [--around ID [--depth N]] [--hide-tests] [--hide-private]
  *
  * --focus shows what a click in the Map view does: the camera flies to the neuron ID
  * (`shop:Cart.add`) or the region ID (`mod:shop`, `cls:shop:Cart`, `pkg:src/app`).
@@ -28,6 +28,9 @@
  * ~/.luciole/runs) as the Calls view's Replay does, pauses at SECONDS (default: the deepest
  * stacks) and takes 6-replay.png. --around ID (with --depth N), --hide-tests and --hide-private
  * show focus and filters: 7-filters.png.
+ * --trace FILE --origin NODE:VARIABLE[@FRAME] instead asks where that variable's value came from
+ * (in FRAME, else the function's last call), as the Origin view does, prints the answer and the
+ * view's items, lights its path on the brain and takes 8-origin.png.
  *
  * Needs a Chromium: set CHROME_PATH, or have one in the Playwright cache (~/.cache/ms-playwright).
  */
@@ -38,6 +41,7 @@ import * as os from "os";
 import * as path from "path";
 import { chromium } from "playwright-core";
 import { webviewHtml } from "../src/html";
+import { OriginAnswer, OriginItem, originItems, originPath } from "../src/origin";
 
 const extensionDir = path.resolve(__dirname, "../..");
 const repo = path.resolve(extensionDir, "..");
@@ -252,7 +256,11 @@ async function main(): Promise<void> {
 
   // Replay: a moment of a recorded run (a trace), the way the Calls view's Replay shows it.
   const traceFile = option("--trace");
-  if (traceFile) {
+  const originAsked = option("--origin");
+  if (traceFile && originAsked) {
+    await originShot(page, path.resolve(traceFile), originAsked, shot);
+    await fps(" with an origin path");
+  } else if (traceFile) {
     await replayShot(page, path.resolve(traceFile), option("--at"), shot);
   }
 
@@ -346,6 +354,45 @@ async function replayShot(page: import("playwright-core").Page, file: string, at
   console.log(`replay at ${(moment / 1e9).toFixed(4)} s of ${(end / 1e9).toFixed(4)} s: ${await page.textContent("#replayTime")}, path: ${await page.textContent("#path")}`);
   await shot("6-replay");
   server.stdin.end();
+}
+
+/**
+ * --trace FILE --origin NODE:VARIABLE[@FRAME]: the origin query the Origin view makes (through
+ * `luciole trace FILE serve`), its tree as the view lists it, and its path lit on the brain.
+ */
+async function originShot(page: import("playwright-core").Page, file: string, asked: string, shot: (name: string) => Promise<void>): Promise<void> {
+  const [question, frame] = asked.split("@");
+  const colon = question.lastIndexOf(":");
+  const args = { node: question.slice(0, colon), variable: question.slice(colon + 1), ...(frame ? { frame: Number(frame) } : {}) };
+  const reply = JSON.parse(
+    execFileSync("python3", ["-m", "luciole", "trace", file, "serve"], {
+      cwd: path.join(repo, "src"),
+      env: { ...process.env, PYTHONPATH: path.join(repo, "src") },
+      input: JSON.stringify({ id: 1, query: "origin", args }) + "\n",
+      maxBuffer: 1 << 28,
+    }).toString(),
+  ) as { result?: OriginAnswer; error?: string };
+  if (!reply.result) {
+    throw new Error(`origin: ${reply.error}`);
+  }
+  console.log(reply.result.text);
+  const print = (item: OriginItem, depth: number): void => {
+    console.log(`${"  ".repeat(depth)}[${item.icon}] ${item.label}${item.description ? `  —  ${item.description}` : ""}`);
+    item.children.forEach((child) => print(child, depth + 1));
+  };
+  console.log("Origin view:");
+  originItems(reply.result).forEach((item) => print(item, 1));
+  const lit = originPath(reply.result);
+  console.log(`path: ${lit.nodes.join(", ")}; moves: ${lit.links.map((l) => `${l.from} > ${l.to}`).join(", ")}`);
+  await page.evaluate((path) => window.postMessage({ type: "origin", path }, "*"), lit);
+  await page.waitForTimeout(1500); // the camera frames the path, the strokes trace themselves
+  await shot("8-origin");
+  // A step selected pulses its function; Clear Origin restores the brain.
+  await page.evaluate((node) => window.postMessage({ type: "originPulse", node }, "*"), lit.links[lit.links.length - 1]?.from ?? lit.start);
+  await page.waitForTimeout(300);
+  await page.evaluate(() => window.postMessage({ type: "originClear" }, "*"));
+  await page.waitForTimeout(300);
+  console.log(`after Clear Origin: ${await page.textContent("#status")}`);
 }
 
 /**

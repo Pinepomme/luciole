@@ -6,6 +6,7 @@
  */
 
 import * as path from "path";
+import type { OriginTarget } from "./origin";
 import { commandLine } from "./running";
 
 /** A value as the trace recorded it (docs/trace-format.md, "snapshots"). */
@@ -134,7 +135,8 @@ export type HistoryItem =
   | (Base & { kind: "exceptions"; file: string })
   | (Base & { kind: "exception"; file: string; exception: TraceException })
   | (Base & { kind: "where"; file: string; call: TraceCall })
-  | (Base & { kind: "value" })
+  /** `origin`: the question "Where From?" asks about it. */
+  | (Base & { kind: "value"; origin?: OriginTarget })
   | (Base & { kind: "note" });
 
 /** Calls asked for per page, and exceptions listed per process. */
@@ -319,7 +321,7 @@ export function callItem(call: TraceCall, file: string, root: string): HistoryIt
   const lines = [
     `${name}${argsText(call.args, 400)} ${outcome}`.trim(),
     count > 1 ? `${count} calls in a row (#${call.frame} to #${call.last}), ${durationText(call.duration_ns)} in all` : `#${call.frame}, ${durationText(call.duration_ns)}, ${where}, thread ${call.thread}`,
-    call.calls ? `${call.calls} calls below` : "",
+    call.calls ? `${call.calls} ${call.calls === 1 ? "call" : "calls"} below` : "",
   ];
   return {
     kind: "call",
@@ -402,8 +404,8 @@ function whereItem(call: TraceCall, file: string, root: string, key: string, wha
   };
 }
 
-/** Values by name: a frame's locals, or a call's arguments. */
-export function valueItems(values: Record<string, Snapshot | null>, keyPrefix: string, root: string): HistoryItem[] {
+/** Values by name: a frame's locals, or a call's arguments; `origin` makes each one's "Where From?" question. */
+export function valueItems(values: Record<string, Snapshot | null>, keyPrefix: string, root: string, origin?: (name: string) => OriginTarget): HistoryItem[] {
   return Object.entries(values).map(([name, value]) => ({
     kind: "value",
     key: `value:${keyPrefix}:${name}`,
@@ -413,6 +415,7 @@ export function valueItems(values: Record<string, Snapshot | null>, keyPrefix: s
     icon: "symbol-variable",
     expandable: false,
     root,
+    ...(origin ? { origin: origin(name) } : {}),
   }));
 }
 

@@ -61,11 +61,13 @@ def engine_port():
         return None
 
 
-def import_bundled(name):
+def import_bundled(name, use=None):
     """Import luciole.<name> from the package around this folder (the same version as the view
     that turned auto-start on), without leaving it as `luciole` in sys.modules: the program may
     import a luciole of its own (another version, or the luciole repository's tests), which must
-    be the one it gets. The modules imported keep working: they hold their own references."""
+    be the one it gets. The modules imported keep working: they hold their own references, but they
+    cannot import more of luciole afterwards: `use(module)` runs while they still can (the recorder
+    imports what tracing needs as it starts)."""
 
     def ours(key):
         return key == "luciole" or key.startswith("luciole.")
@@ -78,7 +80,10 @@ def import_bundled(name):
     try:
         from importlib import import_module
 
-        return import_module(f"luciole.{name}")
+        module = import_module(f"luciole.{name}")
+        if use is not None:
+            use(module)
+        return module
     finally:
         sys.path.remove(package_parent)
         for key in [key for key in sys.modules if ours(key)]:
@@ -103,7 +108,7 @@ def start_luciole():
             connection = None
     if connection is None and not trace:
         return
-    import_bundled("session").start(port=port if connection else None, quiet=True, connection=connection, trace=trace)
+    import_bundled("session", lambda session: session.start(port=port if connection else None, quiet=True, connection=connection, trace=trace))
 
 
 drop_working_directory()

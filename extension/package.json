@@ -150,6 +150,34 @@
         "title": "Clear Focus and Filters",
         "category": "Luciole",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "luciole.whereFrom",
+        "title": "Where Did This Value Come From?",
+        "category": "Luciole",
+        "icon": "$(references)"
+      },
+      {
+        "command": "luciole.clearOrigin",
+        "title": "Clear Origin",
+        "category": "Luciole",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "luciole.originStep",
+        "title": "Show Step",
+        "category": "Luciole"
+      },
+      {
+        "command": "luciole.originContinue",
+        "title": "Go On From Here",
+        "category": "Luciole"
+      },
+      {
+        "command": "luciole.originRerun",
+        "title": "Record Line by Line and Run Again",
+        "category": "Luciole",
+        "icon": "$(debug-rerun)"
       }
     ],
     "viewsContainers": {
@@ -177,6 +205,12 @@
           "id": "luciole.calls",
           "name": "Calls",
           "icon": "media/activity.svg"
+        },
+        {
+          "id": "luciole.origin",
+          "name": "Origin",
+          "icon": "media/activity.svg",
+          "when": "luciole.hasOrigin"
         },
         {
           "id": "luciole.map",
@@ -353,6 +387,26 @@
         {
           "command": "luciole.clearFilters",
           "when": "luciole.filtered"
+        },
+        {
+          "command": "luciole.whereFrom",
+          "when": "editorLangId == python && luciole.hasRuns"
+        },
+        {
+          "command": "luciole.clearOrigin",
+          "when": "luciole.hasOrigin"
+        },
+        {
+          "command": "luciole.originStep",
+          "when": "false"
+        },
+        {
+          "command": "luciole.originContinue",
+          "when": "false"
+        },
+        {
+          "command": "luciole.originRerun",
+          "when": "false"
         }
       ],
       "view/title": [
@@ -390,6 +444,11 @@
           "command": "luciole.clearFilters",
           "when": "view == luciole.map && luciole.filtered",
           "group": "navigation@3"
+        },
+        {
+          "command": "luciole.clearOrigin",
+          "when": "view == luciole.origin",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -452,6 +511,28 @@
           "command": "luciole.focusAround",
           "when": "view == luciole.map && viewItem == function",
           "group": "navigation@3"
+        },
+        {
+          "command": "luciole.whereFrom",
+          "when": "view == luciole.calls && viewItem == value.origin",
+          "group": "inline"
+        },
+        {
+          "command": "luciole.whereFrom",
+          "when": "view == luciole.calls && viewItem =~ /^(call|where|value\\.origin)$/",
+          "group": "navigation@4"
+        },
+        {
+          "command": "luciole.originRerun",
+          "when": "view == luciole.origin && viewItem == origin.rerun",
+          "group": "inline"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "luciole.whereFrom",
+          "when": "editorLangId == python && luciole.hasRuns",
+          "group": "luciole@1"
         }
       ]
     }

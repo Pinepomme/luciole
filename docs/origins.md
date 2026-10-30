@@ -28,6 +28,19 @@ of `self` (`self.subtotal`), a global the function reads (`RATE`), or a variable
 (`shop:Cart#subtotal`). The static graph is built from the trace's recorded root (`runs.root`),
 so the source must still be there (and unchanged, for the lines to match).
 
+In VS Code, put the cursor on a variable (or `return`) and run **Luciole: Where Did This Value
+Come From?** from the editor's context menu, or click **where from?** on a value in **Show
+Values**, or **Where From?** on a call in the **Calls** view. The answer shows in the **Origin**
+view, one step per item with the same information as below (a step opens its line and pulses its
+function on the brain), and the brain lights the path: the steps' functions stand out, the others
+are dimmed, and each move of the value between two functions traces their line in the accent,
+from the sources toward the question. A `needs_level_2` step offers to run the same command again
+with that function in the scope; a step cut by the depth limit offers to go on from there. The
+extension asks through the trace's query server (`luciole trace FILE serve`, query `origin`, which
+also gives each step's function's file, and `function_at` and `last_calls` to find the call under
+the cursor; see [trace-format.md](trace-format.md)). A live run or a replay starting clears the
+path.
+
 From an agent, the MCP server's `origin` tool takes the same (`function`, `variable`, `frame`,
 `at`, `depth`, plus `run` and `process`; see [mcp.md](mcp.md)). In Python:
 

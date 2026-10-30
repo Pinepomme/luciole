@@ -35,8 +35,8 @@ Environment: `LUCIOLE_TRACE` (file or directory; the default of `--trace`), `LUC
 
 | Level | Records |
 |---|---|
-| 0 (default) | the call tree of project code: one row per call, with its caller, call site, thread and times; exceptions |
-| 1 | level 0, plus each call's arguments and return value, as capped snapshots |
+| 0 | the call tree of project code: one row per call, with its caller, call site, thread and times; exceptions |
+| 1 (default) | level 0, plus each call's arguments and return value, as capped snapshots, and the locals of frames an exception leaves |
 | 2 | level 1, plus every assignment to the local variables of the functions in a scope (`writes`) |
 
 **Scope (level 2).** Recording every assignment everywhere would be far too slow, so level 2
@@ -351,7 +351,12 @@ luciole trace run.sqlite serve                                    # JSON queries
 - `serve`: answers `{"id": 1, "query": "children", "args": {"frame": 3}}` lines with
   `{"id": 1, "result": ...}` (or `"error"`), the queries being `run`, `summary`, `children`,
   `frame`, `exceptions`, `traceback`, `history` and `frames` with the arguments above (`from`,
-  `to`, `every` in nanoseconds). The trace is opened again for each request, so a run still
+  `to`, `every` in nanoseconds); also `origin` (`node`, `variable`, `frame`, `at`, `depth`,
+  `branches`: the JSON answer of [origins.md](origins.md), plus `root`, `files` (each step's
+  function's file, relative to the root) and `text`), `function_at` (`file`, `line`: the
+  innermost function holding that line, else the module's code) and `last_calls` (`node`,
+  `limit`: its calls, newest first, and `total`). The static graph those need is built from the
+  run's root once per server. The trace is opened again for each request, so a run still
   recording is read as it is now.
 `origin` walks a value back through the assignments, arguments, return values, globals and
 attributes that made it, across functions, with the static graph: see [origins.md](origins.md),

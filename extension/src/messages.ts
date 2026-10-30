@@ -1,6 +1,7 @@
 /** Messages between the extension host and the graph webview. */
 
 import type { Graph } from "./graph";
+import type { OriginPath } from "./origin";
 import type { Filters } from "./webview/filters";
 
 export interface ThreadStack {
@@ -57,7 +58,11 @@ export type ToWebview =
   | { type: "replayFailed"; seq: number; message: string }
   | { type: "replayStop" }
   /** Focus and filters: what stands out, what is dimmed or hidden. */
-  | { type: "filters"; filters: Filters };
+  | { type: "filters"; filters: Filters }
+  /** Where a value came from: light its path (the Origin view's answer), pulse one step's function, or clear it. */
+  | { type: "origin"; path: OriginPath }
+  | { type: "originPulse"; node: string }
+  | { type: "originClear" };
 
 /** A line of a file, relative to the graph's root. */
 export interface SourceLine {
@@ -83,4 +88,6 @@ export type FromWebview =
   /** The panel's Replay button: the newest recorded run. */
   | { type: "replayLatest" }
   | { type: "replayClosed" }
-  | { type: "clearFilters" };
+  | { type: "clearFilters" }
+  /** A live run or a replay started, and cleared the origin path. */
+  | { type: "originCleared" };

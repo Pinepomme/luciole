@@ -10,7 +10,7 @@ import pytest
 
 from graphcheck import REPO
 from luciole import runs
-from luciole.browse import replay_frames, stacks_at
+from luciole.browse import query, replay_frames, stacks_at
 from luciole.trace import Trace
 
 needs_monitoring = pytest.mark.skipif(sys.version_info < (3, 12), reason="sys.monitoring needs Python 3.12")
@@ -198,3 +198,46 @@ def test_cli_queries(recorded):
     frames = json.loads(luciole("trace", path, "frames", "--every", 1000, "--json"))
     assert frames and frames[0]["calls"]["prog"] == 1
     assert "started: prog ×1" in luciole("trace", path, "frames", "--every", 1000)
+
+
+@needs_monitoring
+def test_origin_queries_for_the_editor(recorded):
+    """What VS Code's "Where did this value come from?" asks: the function at a line, its last
+    calls, then the origin, with the files of the steps' functions; the graph is built once."""
+    root, _, path = recorded
+    graphs = {}
+    with Trace(path) as trace:
+        assert query(trace, "function_at", {"file": str(root / "prog.py"), "line": 11}, graphs) == {"node": "prog:middle", "kind": "function", "line": 8}
+        assert query(trace, "function_at", {"file": "prog.py", "line": 36}, graphs)["node"] == "prog"  # module code
+        assert query(trace, "function_at", {"file": str(root.parent / "elsewhere.py"), "line": 1}, graphs) is None
+        assert len(graphs) == 1
+        calls = query(trace, "last_calls", {"node": "prog:leaf", "limit": 2})
+        assert calls["total"] == 8 and [c["args"]["n"]["repr"] for c in calls["calls"]] == ["100", "2"]  # newest first
+        first = trace.calls("prog:leaf", limit=1)["calls"][0]["frame"]
+        found = query(trace, "origin", {"node": "prog:leaf", "variable": "n", "frame": first}, graphs)
+        steps = found["steps"]
+        assert steps["kind"] == "argument" and steps["value"] == "0" and steps["caller"]["node"] == "prog:middle"
+        assert steps["children"][0]["node"] == "prog:middle" and steps["children"][0]["children"][0]["value"] == "5"
+        assert found["files"] == {"prog:leaf": "prog.py", "prog:main": "prog.py", "prog:middle": "prog.py"} and found["root"] == str(root)
+        assert found["text"].startswith("where n in prog:leaf")
+        several = query(trace, "origin", {"node": "middle", "variable": "total"}, graphs)["steps"]
+        # Assigned on lines 9 and 11: middle returned 20 and line 9 assigns 0, so line 11 made it.
+        assert several["kind"] == "write" and several["line"] == 11 and several["value"] == "20" and "inferred" in several["note"]
+        with pytest.raises(ValueError, match="no calls of nope"):
+            query(trace, "origin", {"node": "nope", "variable": "x"}, graphs)
+
+
+@needs_monitoring
+def test_serve_answers_origin_and_runs_new_takes_a_scope(recorded):
+    root, _, path = recorded
+    requests = [{"id": 1, "query": "origin", "args": {"node": "leaf", "variable": "return"}}, {"id": 2, "query": "origin", "args": {"node": "nope", "variable": "x"}}]
+    process = subprocess.run(
+        [sys.executable, "-m", "luciole", "trace", str(path), "serve"],
+        input="\n".join(json.dumps(r) for r in requests) + "\n", env=env(), capture_output=True, text=True, timeout=60,
+    )
+    replies = [json.loads(line) for line in process.stdout.splitlines()]
+    assert replies[0]["result"]["steps"]["kind"] == "returned_by" and replies[0]["result"]["steps"]["value"] == "200"
+    assert "no calls of nope" in replies[1]["error"]
+    made = json.loads(luciole("runs", "new", "--root", root, "--command", json.dumps(["python", "prog.py"]), "--level", 2, "--scope", "prog:middle,leaf", "--json"))
+    meta = json.loads((runs.Path(made["folder"]) / "command.json").read_text())
+    assert meta["level"] == 2 and meta["scope"] == ["prog:middle", "leaf"]
