@@ -338,6 +338,7 @@ export class LiveSession implements vscode.Disposable {
         this.changed.fire();
       }
       this.update();
+      this.showRemaining();
       return;
     }
     const id = message.from;
@@ -356,6 +357,16 @@ export class LiveSession implements vscode.Disposable {
         this.listener.started(processLabel(this.processes.info(id)));
         this.update();
       }
+      this.listener.frame(frame);
+    } else if (done) {
+      this.showRemaining();
+    }
+  }
+
+  /** A process left the picture while others still run: show theirs now, not at their next frame. */
+  private showRemaining(): void {
+    const frame = this.processes.snapshot();
+    if (frame && this.state.running) {
       this.listener.frame(frame);
     }
   }
