@@ -10,12 +10,17 @@ import type { Graph } from "./graph";
 import { webviewHtml } from "./html";
 import { LiveSession } from "./live";
 import type { FromWebview, ToWebview } from "./messages";
+import type { MapEntry } from "./map";
+import type { ProcessItem } from "./running";
 import { RunConfiguration, debugConfiguration, fileRunKind, pytestRun, resolveRun, splitArgs } from "./runs";
+import { ActionsView, MapView, RunningView } from "./sidebar";
 
 let panel: GraphPanel | undefined;
 let output: vscode.OutputChannel;
 let live: LiveSession;
 let autoStartItem: vscode.StatusBarItem;
+let map: MapView;
+let actions: ActionsView;
 
 /** The last run started, to run it again from the panel. */
 const LAST_RUN = "luciole.lastRun";
@@ -26,7 +31,10 @@ export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("Luciole");
   live = new LiveSession(
     {
-      frame: (frame) => panel?.post({ type: "live", frame }),
+      frame: (frame) => {
+        panel?.post({ type: "live", frame });
+        map.setRunning(frame.done ? [] : (frame.stacks ?? []).flatMap(({ stack }) => stack));
+      },
       state: (state) => panel?.post({ type: "liveState", state }),
       started: (label) => {
         // A program started in a terminal with auto-start on: show the project it lights up.
@@ -48,7 +56,27 @@ export function activate(context: vscode.ExtensionContext): void {
   autoStartItem = vscode.window.createStatusBarItem("luciole.autoStart", vscode.StatusBarAlignment.Left);
   autoStartItem.name = "Luciole Auto-Start";
   autoStartItem.command = "luciole.toggleAutoStart";
+  actions = new ActionsView();
+  map = new MapView();
+  map.view = vscode.window.createTreeView("luciole.map", { treeDataProvider: map, showCollapseAll: true });
+  const running = new RunningView(live);
   context.subscriptions.push(
+    actions,
+    running,
+    map,
+    vscode.window.createTreeView("luciole.actions", { treeDataProvider: actions }),
+    vscode.window.createTreeView("luciole.running", { treeDataProvider: running }),
+    map.view,
+    vscode.commands.registerCommand("luciole.revealInBrain", (entry: MapEntry) => panel?.focus(entry)),
+    vscode.commands.registerCommand("luciole.goToSource", (entry: MapEntry) => {
+      if (map.root && entry.file) {
+        openSource(map.root, entry.file, entry.line ?? 1, entry.col ?? 0, false);
+      }
+    }),
+    vscode.commands.registerCommand("luciole.findInMap", () => findInMap()),
+    vscode.commands.registerCommand("luciole.stopProcess", (process: ProcessItem) => live.stopProcess(process.id)),
+    vscode.commands.registerCommand("luciole.showCallStack", () => vscode.commands.executeCommand("workbench.debug.action.focusCallStackView")),
+    vscode.commands.registerCommand("luciole.clearExited", () => live.clearExited()),
     output,
     live,
     vscode.commands.registerCommand("luciole.runLive", () => runFile(context, fileTarget())),
@@ -64,6 +92,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("luciole.autoStart")) {
         void applyAutoStart(context);
+        actions.refresh();
       }
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => applyAutoStart(context)),
@@ -85,6 +114,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       },
       continued: () => panel?.post({ type: "debugStopped", at: undefined }),
+      process: (session, pid) => live.debuggedProcess(session, pid),
       log: (line) => output.appendLine(line),
     }),
     vscode.debug.onDidChangeBreakpoints(() => panel?.postBreakpoints()),
@@ -357,6 +387,33 @@ function activePythonFile(): string | undefined {
   return document?.languageId === "python" && document.uri.scheme === "file" ? document.uri.fsPath : undefined;
 }
 
+/** Lists the functions of the graph in the panel; the one chosen is shown in the Map and in the brain. */
+async function findInMap(): Promise<void> {
+  const functions = map.functions;
+  if (!functions.length) {
+    void vscode.window.showInformationMessage("Luciole: show a graph first.");
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    functions.map((entry) => ({ label: `$(symbol-function) ${entry.label}`, description: entry.container, entry })),
+    { title: "Luciole: Find in Map", placeHolder: "Function to show in the brain", matchOnDescription: true },
+  );
+  if (picked) {
+    await map.view?.reveal(picked.entry, { select: true, focus: false, expand: true });
+    panel?.focus(picked.entry);
+  }
+}
+
+/** Opens `file` (relative to `root`) at `line` (1-based) and `col` in the first editor column. */
+function openSource(root: string, file: string, line: number, col: number, preserveFocus: boolean): void {
+  const position = new vscode.Position(line - 1, col);
+  void vscode.window.showTextDocument(vscode.Uri.file(path.resolve(root, file)), {
+    viewColumn: vscode.ViewColumn.One,
+    preserveFocus,
+    selection: new vscode.Range(position, position),
+  });
+}
+
 function showGraph(context: vscode.ExtensionContext, target: string | undefined, followEditor: boolean): void {
   if (!target) {
     return;
@@ -397,7 +454,16 @@ class GraphPanel {
     this.panel.onDidDispose(() => {
       this.running?.kill();
       panel = undefined;
+      map.setGraph(undefined);
+      void vscode.commands.executeCommand("setContext", "luciole.graphOpen", false);
     });
+    void vscode.commands.executeCommand("setContext", "luciole.graphOpen", true);
+  }
+
+  /** Shows a Map item in the brain: the camera flies to its neuron or region, which is marked. */
+  focus(entry: MapEntry): void {
+    this.panel.reveal(undefined, true);
+    this.post(entry.kind === "function" ? { type: "focus", node: entry.target } : { type: "focusRegion", region: entry.target });
   }
 
   show(target: string, followEditor: boolean): void {
@@ -478,12 +544,7 @@ class GraphPanel {
     } else if (message.type === "removeBreakpoints" && this.root) {
       removeBreakpoints(path.resolve(this.root, message.file), message.lines);
     } else if (message.type === "reveal" && this.root) {
-      const position = new vscode.Position(message.line - 1, message.col);
-      void vscode.window.showTextDocument(vscode.Uri.file(path.resolve(this.root, message.file)), {
-        viewColumn: vscode.ViewColumn.One,
-        preserveFocus: true,
-        selection: new vscode.Range(position, position),
-      });
+      openSource(this.root, message.file, message.line, message.col, true);
     }
   }
 
@@ -493,13 +554,17 @@ class GraphPanel {
     }
     this.running?.kill();
     this.post({ type: "loading", target: path.basename(this.target) });
+    map.loading(path.basename(this.target));
     this.running = runAnalyzer(this.context, this.target, (result) => {
       this.running = undefined;
       if ("error" in result) {
         this.post({ type: "error", message: result.error });
+        map.setGraph(undefined);
+        map.failed();
       } else {
         this.root = result.graph.root;
         this.post({ type: "graph", target: this.target, graph: result.graph, warnings: result.warnings });
+        map.setGraph(result.graph, path.basename(this.target));
         this.postBreakpoints();
       }
     });
