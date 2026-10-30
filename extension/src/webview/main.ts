@@ -306,13 +306,20 @@ graph.onEngineStop(() => {
 
 // Three.js objects
 
-/** Bumped when the pointer moves or the camera comes to rest: what the pointer is over may have changed. */
+/**
+ * Bumped when the pointer moves, the camera comes to rest or the graph's objects are made (a new
+ * graph, synapses found at runtime): what the pointer is over may have changed.
+ */
 let rayVersion = 0;
 
 /**
  * Hover raycasts every object of the brain, several times a second even with the pointer still
  * (say, while a dragged neuron slides back or the camera eases to a stop): a pass over the same
  * objects answers as the last one did until the pointer moves or the camera comes to rest.
+ *
+ * The patch is global (DragControls and anything else raycasting share it) and keyed on
+ * `objects` and rayVersion only, not on the ray: anything that changes what a ray would hit
+ * without moving the pointer must bump rayVersion. Callers get the same Intersection objects.
  */
 const intersectObjects = THREE.Raycaster.prototype.intersectObjects;
 let lastPass: { objects: unknown; version: number; hits: THREE.Intersection[] } | undefined;
@@ -325,6 +332,7 @@ THREE.Raycaster.prototype.intersectObjects = function (this: THREE.Raycaster, ob
 } as typeof intersectObjects;
 
 function neuronObject(node: NeuronNode): THREE.Object3D {
+  rayVersion++; // made with a new graph, its old objects gone: a cached hover would name them
   const radius = neuronRadius(node.neuron.degree) * SPHERE_SCALE;
   const base = moduleTint(node.neuron.module);
   // three.js would compute every object's matrix at every frame (thousands of them, most still):
@@ -385,6 +393,7 @@ function markOf(parts: NonNullable<NeuronNode["parts"]>): THREE.Sprite {
 }
 
 function synapseObject(link: SynapseLink): THREE.Object3D {
+  rayVersion++; // see neuronObject
   const geometry = new THREE.BufferGeometry();
   link.via = layout ? route(layout, link.synapse.source, link.synapse.target) : [];
   const count = bundle({ x: 0, y: 0, z: 0 }, link.via, { x: 0, y: 0, z: 0 }).length;
@@ -866,13 +875,18 @@ function load(graphData: Graph, newTarget: string): void {
   }
   document.body.dataset.state = "busy";
   placeDebugMarks();
-  startEngine();
-  graph.graphData({ nodes, links });
+  setGraph();
   messageEl.hidden = nodes.length > 0;
   if (!nodes.length) {
     showMessage(`No Python functions found in ${graphData.root}.`);
   }
   setStatus(summary());
+}
+
+/** Hands nodes and links to 3d-force-graph, which places them (its layout engine) and makes their objects. */
+function setGraph(): void {
+  startEngine();
+  graph.graphData({ nodes, links }); // their objects are made a moment later (neuronObject, synapseObject)
 }
 
 function summary(): string {
@@ -968,8 +982,7 @@ function onLive(frame: LiveFrame): void {
   use(frame.links, callLinks, "runtime");
   use(frame.spawns, spawnLinks, "spawn");
   if (added) {
-    startEngine();
-  graph.graphData({ nodes, links }); // their lines, and their traced calls, appear with the next frame
+    setGraph(); // their lines, and their traced calls, appear with the next frame
   }
   const now = performance.now();
   callsThisSecond = callsThisSecond.filter((c) => now - c.t < 1000);
