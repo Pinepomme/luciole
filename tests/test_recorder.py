@@ -240,6 +240,24 @@ def test_exit_code_and_module_mode(tmp_path):
     assert totals(frames, "calls") == {"app": 1, "app.__main__": 1}
 
 
+@pytest.mark.parametrize("module", [False, True])
+def test_traceback_starts_in_the_program(tmp_path, module):
+    """As with `python prog.py`: no frame of Luciole's command line, run() or runpy above the program's."""
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/__init__.py").write_text("")
+    (tmp_path / "app/__main__.py").write_text("def fail():\n    raise ValueError('boom')\n\nfail()\n")
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    env.pop("LUCIOLE_LIVE_PORT", None)
+    target = ["-m", "app"] if module else ["app/__main__.py"]
+    result = subprocess.run([sys.executable, "-m", "luciole", "run", "--root", str(tmp_path), *target], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 1
+    lines = result.stderr.strip().splitlines()
+    files = [line for line in lines if line.lstrip().startswith("File ")]
+    assert lines[0] == "Traceback (most recent call last):" and lines[-1] == "ValueError: boom"
+    assert len(files) == 2 and all("__main__.py" in line for line in files)
+    assert "<module>" in files[0] and "in fail" in files[1]
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="no SIGINT to a child process on Windows")
 def test_ctrl_c_stops_the_program_and_its_traceback_ends_in_project_code(tmp_path):
     """What Stop in the view does: SIGINT, then the program unwinds as it would without Luciole."""

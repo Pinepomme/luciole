@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 
 from luciole import __version__, protocol
-from luciole.trace import Trace, TraceError, render_calls, render_exceptions, render_history, render_summary, render_traceback, render_tree
+from luciole.trace import Trace, TraceError, plural, render_calls, render_exceptions, render_history, render_summary, render_traceback, render_tree
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first
 KEEP_RUNS = 50  # run folders kept per project; older ones are deleted
@@ -330,7 +330,7 @@ class Server:
                 run = trace.run()
                 frames = trace.db.execute("SELECT COUNT(*) FROM frames").fetchone()[0]
                 calls += frames
-                lines.append(f"  pid {run['pid']}: {shlex.join(run['argv'])}  ({frames} calls, {exit_text(run)})")
+                lines.append(f"  pid {run['pid']}: {shlex.join(run['argv'])}  ({plural(frames, 'call')}, {exit_text(run)})")
                 for e in trace.exceptions(1000)["exceptions"]:
                     if e["handled_in"] is None and e["frame"]:
                         uncaught.append((run["pid"], e))
@@ -383,11 +383,11 @@ class Server:
             node = found["nodes"][0]
             had = f"its scope was {', '.join(found['scope'])}" if found["scope"] else f"it was recorded at level {trace.run()['level']}, without a scope"
             raise ToolError(
-                f"no variable history for {', '.join(found['nodes'])} in this run ({had}; {found['calls']} calls recorded, see `calls`). "
+                f"no variable history for {', '.join(found['nodes'])} in this run ({had}; {plural(found['calls'], 'call')} recorded, see `calls`). "
                 f'To record it, `run` the same command again with scope: ["{node}"] (level 2), then ask `variable_history` again.'
             )
         if args.get("variable") and not found["total"]:
-            return f"{args['variable']} was never assigned in {', '.join(found['nodes'])} ({found['calls']} calls): check the name, or ask without `variable`"
+            return f"{args['variable']} was never assigned in {', '.join(found['nodes'])} ({plural(found['calls'], 'call')}): check the name, or ask without `variable`"
         return render_history(found).replace("(--limit, --offset)", "(limit, offset)")
 
     def origin(self, trace: Trace, args: dict) -> str:
@@ -539,10 +539,6 @@ def exit_text(run: dict) -> str:
     return "ended by SIGTERM" if run["ended_by"] == "sigterm" else "finished"
 
 
-def plural(count: int, word: str) -> str:
-    return f"{count} {word}" if count == 1 else f"{count} {word}es" if word.endswith("s") else f"{count} {word}s"
-
-
 def matches(node_id: str, name: str) -> bool:
     return node_id == name or node_id.endswith((f":{name}", f".{name}"))
 
@@ -558,7 +554,7 @@ def clip(text: str) -> str:
     if not lines:
         return "(none)"
     if len(lines) > OUTPUT_HEAD + OUTPUT_TAIL:
-        lines = lines[:OUTPUT_HEAD] + [f"... {len(lines) - OUTPUT_HEAD - OUTPUT_TAIL} lines ..."] + lines[-OUTPUT_TAIL:]
+        lines = lines[:OUTPUT_HEAD] + [f"... {plural(len(lines) - OUTPUT_HEAD - OUTPUT_TAIL, 'line')} ..."] + lines[-OUTPUT_TAIL:]
     return "\n".join(line[:500] for line in lines)
 
 
