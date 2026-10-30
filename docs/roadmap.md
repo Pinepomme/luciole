@@ -180,7 +180,7 @@ on the suspect functions. Most bugs reproduce under a test, which makes that che
 | 1 | Done: trace store, call tree, arguments/returns, exceptions (levels 0–1) | — |
 | 2 | Done: `luciole mcp` (docs/mcp.md), trace queries plus graph queries (find, neighbors); its `run` records at level 1 by default | — |
 | 3 | Done: failure snapshots, the locals of every frame an exception leaves (level 1), `traceback` | — |
-| 4 | Scoped variable history (level 2), redaction, limits; coroutine suspend/resume, so time spent awaiting is not counted as busy | 1–2 weeks |
+| 4 | Done: scoped variable history (level 2: `--scope`, a `writes` table, `luciole trace ... history`, MCP `variable_history`), redaction, limits; coroutine suspend/resume (`suspended_ns`), so time spent awaiting is not counted as busy | — |
 | 5 | Origin queries: dynamic slicing over static edges and the trace | ~2 weeks |
 | 6 | In VS Code: the call tree in the Luciole sidebar, a timeline to scrub (the brain replays), a function's variables and their values over time, origin paths lit on the brain, focus and filters | ~2 weeks |
 | 7 | Later: stepping backwards in the debugger over a recording; level 3 provenance | — |

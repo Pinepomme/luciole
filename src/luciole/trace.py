@@ -7,6 +7,7 @@ The recorder writes traces (see tracer.py); this module defines their schema and
         trace.calls("shop:Cart.add")     # each call: caller, arguments, result or exception, duration
         trace.tree(depth=3)              # the call tree, repeated calls collapsed
         trace.exceptions()               # raised, where, chained from, handled where
+        trace.history("Cart.add")        # level 2: each call's variable assignments, in order
 
 Every method returns plain dicts and lists (JSON-ready); render() turns them into text for
 `luciole trace`. Frames, exceptions and snapshots are referred to by their ids in the file.
@@ -17,6 +18,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 FORMAT = "luciole-trace"
@@ -44,7 +46,10 @@ CREATE TABLE runs (
     ended_by TEXT,
     frames_total INTEGER,
     frames_stored INTEGER,
-    truncated INTEGER NOT NULL DEFAULT 0
+    truncated INTEGER NOT NULL DEFAULT 0,
+    scope TEXT,
+    writes_total INTEGER,
+    writes_stored INTEGER
 );
 CREATE TABLE threads (
     id INTEGER PRIMARY KEY,
@@ -65,7 +70,8 @@ CREATE TABLE frames (
     exception INTEGER,
     args TEXT,
     result INTEGER,
-    locals TEXT
+    locals TEXT,
+    suspended_ns INTEGER
 );
 CREATE TABLE exceptions (
     id INTEGER PRIMARY KEY,
@@ -85,6 +91,14 @@ CREATE TABLE snapshots (
     items TEXT,
     truncated INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE writes (
+    id INTEGER PRIMARY KEY,
+    frame INTEGER NOT NULL,
+    line INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    value INTEGER,
+    time_ns INTEGER NOT NULL
+);
 """
 
 # Made when the run ends: inserting is faster without them.
@@ -95,6 +109,7 @@ CREATE INDEX frames_by_time ON frames (start_ns);
 CREATE INDEX frames_by_exception ON frames (exception) WHERE exception IS NOT NULL;
 CREATE INDEX exceptions_by_frame ON exceptions (frame);
 CREATE INDEX exceptions_by_time ON exceptions (time_ns);
+CREATE INDEX writes_by_frame ON writes (frame, time_ns);
 """
 SCHEMA = TABLES + INDEXES
 
@@ -161,6 +176,7 @@ class Trace:
         run = dict(row)
         run["argv"] = json.loads(run["argv"])
         run["truncated"] = bool(run["truncated"])
+        run["scope"] = json.loads(run["scope"]) if run.get("scope") else None  # level 2 only
         if run["duration_ns"] is None:  # still recording, or died without its last write
             run["duration_ns"] = self.db.execute("SELECT MAX(COALESCE(end_ns, start_ns)) FROM frames").fetchone()[0] or 0
         return run
@@ -169,26 +185,57 @@ class Trace:
         """The run, how much it holds, and the functions with the most calls and the most time.
 
         `total_ns` counts a function's calls from start to end, leaving out calls made while
-        another call of the same function runs (recursion); `self_ns` leaves out its callees
-        (but not the threads and asyncio tasks it runs concurrently)."""
+        another call of the same function runs (recursion); `active_ns` is the same without the
+        time its generators and coroutines spent suspended (at a `yield` or an `await`); `self_ns`
+        is its active time minus its callees' active time, and minus the time it waited on the
+        asyncio tasks run by the event loop it runs (`asyncio.run(main())` in a module: a task's
+        caller is the frame running the loop, on the same thread). That is the union of the tasks'
+        spans, their suspended time included: while a task exists, the frame is in the event loop,
+        running a task or waiting for one to be ready. Threads it starts run concurrently with it,
+        and are not subtracted."""
         run = self.run()
         end = run["duration_ns"]
         counts = self.db.execute("SELECT (SELECT COUNT(*) FROM frames), (SELECT COUNT(*) FROM exceptions), (SELECT COUNT(*) FROM threads)").fetchone()
+        # Traces written before frames had `suspended_ns` count suspended time as active.
+        own, inner = ("COALESCE(f.suspended_ns, 0)", "COALESCE(suspended_ns, 0)") if self._has_column("frames", "suspended_ns") else ("0", "0")
+        # A frame's active time minus its callees' (not the tasks and threads it started).
+        busy = f"COALESCE(f.end_ns, :end) - f.start_ns - {own} - COALESCE(k.inner_ns, 0)"
+        callees = f"""LEFT JOIN (SELECT caller, SUM(COALESCE(end_ns, :end) - start_ns - {inner}) AS inner_ns FROM frames
+                       WHERE caller IS NOT NULL AND origin IS NULL GROUP BY caller) k ON k.caller = f.id"""
         functions = self.db.execute(
-            """
+            f"""
             SELECT f.node, COUNT(*) AS calls,
                    SUM(CASE WHEN c.node IS f.node THEN 0 ELSE COALESCE(f.end_ns, :end) - f.start_ns END) AS total_ns,
-                   SUM(MAX(0, COALESCE(f.end_ns, :end) - f.start_ns - COALESCE(k.inner_ns, 0))) AS self_ns,
+                   SUM(CASE WHEN c.node IS f.node THEN 0 ELSE COALESCE(f.end_ns, :end) - f.start_ns - {own} END) AS active_ns,
+                   SUM(MAX(0, {busy})) AS self_ns,
                    SUM(f.end_kind IN ('raise', 'unwind')) AS raised
             FROM frames f
             LEFT JOIN frames c ON c.id = f.caller
-            LEFT JOIN (SELECT caller, SUM(COALESCE(end_ns, :end) - start_ns) AS inner_ns FROM frames
-                       WHERE caller IS NOT NULL AND origin IS NULL GROUP BY caller) k ON k.caller = f.id
+            {callees}
             GROUP BY f.node
             """,
             {"end": end},
         ).fetchall()
-        functions = [dict(row) for row in functions]
+        functions = {row["node"]: dict(row) for row in functions}
+        # Tasks the event loop ran in a frame: started by someone else, called from it, on its thread.
+        tasks = self.db.execute(
+            """
+            SELECT t.caller, t.start_ns, MIN(COALESCE(t.end_ns, :end), COALESCE(p.end_ns, :end)) FROM frames t
+            JOIN frames p ON p.id = t.caller WHERE t.origin IS NOT NULL AND t.thread = p.thread ORDER BY t.caller, t.start_ns
+            """,
+            {"end": end},
+        ).fetchall()
+        waited: dict[int, int] = {}  # frame: the union of its tasks' spans (gathered tasks overlap)
+        reached: dict[int, int] = {}
+        for caller, start, stop in tasks:
+            begin = max(start, reached.get(caller, start))
+            waited[caller] = waited.get(caller, 0) + max(0, stop - begin)
+            reached[caller] = max(stop, reached.get(caller, stop))
+        if waited:
+            frames = ",".join(str(int(frame)) for frame in waited)
+            for frame, node, alone in self.db.execute(f"SELECT f.id, f.node, {busy} FROM frames f {callees} WHERE f.id IN ({frames})", {"end": end}):
+                functions[node]["self_ns"] -= max(0, alone) - max(0, alone - waited[frame])
+        functions = list(functions.values())
         return {
             "run": run,
             "frames": counts[0],
@@ -290,6 +337,47 @@ class Trace:
             handled["at_line"] = line
         return {"exception": exception, "frames": frames, "handled_in": handled}
 
+    def history(self, node: str | None = None, name: str | None = None, frame: int | None = None, limit: int = 20, offset: int = 0) -> dict:
+        """What a function's local variables were assigned, call by call (level 2, for functions in
+        the run's scope): `{"nodes", "scope", "recorded", "calls", "total", "frames"}`. `node` is
+        as for calls(), or `frame` one call; `name` keeps one variable. Each item of `frames` is a
+        call (like an item of calls()) with its `writes`, `{"line", "name", "value", "time_ns"}`
+        in order: the line that assigned it, and the value then. `limit` and `offset` count writes;
+        `recorded` says whether the run recorded these functions' variables at all."""
+        scope = self.run()["scope"]
+        if frame is not None:
+            row = self.db.execute("SELECT node FROM frames WHERE id = ?", (frame,)).fetchone()
+            nodes = [row[0]] if row else []
+        else:
+            nodes = self.nodes(node) if node else []
+        recorded = bool(scope) and self._has_table("writes") and any(in_scope(found, scope) for found in nodes)
+        found = {"nodes": nodes, "scope": scope, "recorded": recorded, "calls": 0, "total": 0, "frames": []}
+        if not nodes:
+            return found
+        if frame is not None:
+            where, params = "f.id = ?", [frame]
+        else:
+            where, params = f"f.node IN ({','.join('?' * len(nodes))})", list(nodes)
+        found["calls"] = self.db.execute(f"SELECT COUNT(*) FROM frames f WHERE {where}", params).fetchone()[0]
+        if not recorded:
+            return found
+        if name is not None:
+            where, params = where + " AND w.name = ?", [*params, name]
+        found["total"] = self.db.execute(f"SELECT COUNT(*) FROM writes w JOIN frames f ON f.id = w.frame WHERE {where}", params).fetchone()[0]
+        rows = self.db.execute(
+            f"SELECT w.* FROM writes w JOIN frames f ON f.id = w.frame WHERE {where} ORDER BY f.start_ns, f.id, w.time_ns, w.id LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        ).fetchall()
+        frames: dict[int, dict] = {}
+        for row in rows:
+            call = frames.get(row["frame"])
+            if call is None:
+                call = frames[row["frame"]] = self.frame(row["frame"])
+                call["writes"] = []
+            call["writes"].append({"line": row["line"], "name": row["name"], "value": self.snapshot(row["value"]), "time_ns": row["time_ns"]})
+        found["frames"] = list(frames.values())
+        return found
+
     def exceptions_by_id(self, ids: list[int]) -> list[dict]:
         marks = ",".join("?" * len(ids))
         rows = self.db.execute(
@@ -324,6 +412,13 @@ class Trace:
         return value
 
     # Helpers
+
+    def _has_table(self, table: str) -> bool:
+        """Whether this trace has `table`: traces written before it was added do not."""
+        return self.db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone() is not None
+
+    def _has_column(self, table: str, column: str) -> bool:
+        return any(row[1] == column for row in self.db.execute(f"PRAGMA table_info({table})"))
 
     def _frame(self, row: sqlite3.Row) -> dict:
         caller = self.db.execute("SELECT node FROM frames WHERE id = ?", (row["caller"],)).fetchone() if row["caller"] else None
@@ -376,6 +471,13 @@ class Trace:
             query = f"SELECT caller, COUNT(*) FROM frames WHERE caller IN ({','.join('?' * len(chunk))}) GROUP BY caller"
             counts.update(self.db.execute(query, chunk).fetchall())
         return counts
+
+
+def in_scope(node: str, patterns: list[str]) -> bool:
+    """Whether level 2 records the variables of `node`: a pattern matches its node id, with
+    fnmatch wildcards (`cart:checkout`, `cart:Cart.*`, `cart:*`), or the end of it as nodes()
+    matches names (`checkout`, `Cart.add`, `Cart.*`)."""
+    return any(fnmatchcase(node, pattern) or fnmatchcase(node, f"*:{pattern}") or fnmatchcase(node, f"*.{pattern}") for pattern in patterns)
 
 
 def _like(text: str) -> str:
@@ -437,14 +539,21 @@ def render_summary(summary: dict) -> str:
         f"run: {' '.join(run['argv'])}",
         f"  pid {run['pid']}, Python {run['python']}, luciole {run['luciole']}, level {run['level']}, root {run['root']}",
         f"  started {started}, {duration(run['duration_ns'])}, {status}",
-        f"  {summary['frames']} frames, {summary['exceptions']} exceptions, {summary['threads']} threads",
+        f"  {plural(summary['frames'], 'frame')}, {plural(summary['exceptions'], 'exception')}, {plural(summary['threads'], 'thread')}",
     ]
+    if run.get("scope"):
+        lines.append(f"  variable history (level 2) for {', '.join(run['scope'])}: {plural(run.get('writes_stored') or 0, 'write')}")
     if run["truncated"]:
-        lines.append(f"  truncated: {run['frames_stored']} of {run['frames_total']} frames kept")
+        if (run["frames_total"] or 0) > (run["frames_stored"] or 0):
+            lines.append(f"  truncated: {run['frames_stored']} of {plural(run['frames_total'], 'frame')} kept")
+        if (run.get("writes_total") or 0) > (run.get("writes_stored") or 0):
+            lines.append(f"  truncated: {run['writes_stored']} of {plural(run['writes_total'], 'write')} kept")
     for title, key in (("by calls", "by_calls"), ("by time (self)", "by_time")):
-        lines += ["", f"top functions {title}:", f"  {'calls':>8}  {'total':>10}  {'self':>10}  function"]
+        lines += ["", f"top functions {title}:", f"  {'calls':>8}  {'total':>10}  {'active':>10}  {'self':>10}  function"]
         for f in summary[key]:
-            lines.append(f"  {f['calls']:>8}  {duration(f['total_ns']):>10}  {duration(f['self_ns']):>10}  {f['node']}")
+            lines.append(f"  {f['calls']:>8}  {duration(f['total_ns']):>10}  {duration(f['active_ns']):>10}  {duration(f['self_ns']):>10}  {f['node']}")
+    if any(f["active_ns"] != f["total_ns"] for f in summary["by_calls"] + summary["by_time"]):
+        lines += ["", "active: total without the time generators and coroutines spent suspended (yield, await)"]
     return "\n".join(lines)
 
 
@@ -455,7 +564,7 @@ def value_text(value: dict | None) -> str:
 def render_calls(found: dict) -> str:
     if not found["nodes"]:
         return "no calls recorded for this function"
-    lines = [f"{found['total']} calls of {', '.join(found['nodes'])}"]
+    lines = [f"{plural(found['total'], 'call')} of {', '.join(found['nodes'])}"]
     for call in found["calls"]:
         caller = call["caller"]
         where = f"from {caller['node']}:{caller['line']} (#{caller['frame']})" if caller else "root"
@@ -484,7 +593,7 @@ def render_tree(entries: list[dict], indent: int = 0) -> str:
     for entry in entries:
         count = f" ×{entry['count']}" if entry["count"] > 1 else ""
         end = "" if entry["end"] == "return" else f" [{entry['end']}]"
-        more = f"  (+{entry['more']} calls below)" if entry["more"] else ""
+        more = f"  (+{plural(entry['more'], 'call')} below)" if entry["more"] else ""
         lines.append(f"{'  ' * indent}{entry['node']}{count}  #{entry['frame']}  {duration(entry['duration_ns'])}{end}{more}")
         if entry["children"]:
             lines.append(render_tree(entry["children"], indent + 1))
@@ -513,10 +622,39 @@ def render_traceback(found: dict | None) -> str:
     return "\n".join(lines)
 
 
+def render_history(found: dict) -> str:
+    if not found["nodes"]:
+        return "no calls recorded for this function"
+    names = ", ".join(found["nodes"])
+    if not found["recorded"]:
+        scope = f"its scope was {', '.join(found['scope'])}" if found["scope"] else "it was not recorded at level 2"
+        return f"no variable history for {names}: {scope}. Run again with --level 2 --scope {found['nodes'][0]}"
+    if not found["total"]:
+        return f"{plural(found['calls'], 'call')} of {names}, no variable written"
+    lines = [f"{plural(found['total'], 'write')} in {plural(found['calls'], 'call')} of {names}"]
+    shown = 0
+    for call in found["frames"]:
+        args = ", ".join(f"{name}={value_text(value)}" for name, value in call.get("args", {}).items())
+        name = call["node"] if len(found["nodes"]) > 1 else call["node"].rsplit(":", 1)[-1]
+        lines.append(f"  #{call['frame']} {name}({args})" if "args" in call else f"  #{call['frame']} {name}")
+        for write in call["writes"]:
+            after = f"+{duration(write['time_ns'] - call['start_ns'])}"
+            lines.append(f"    line {write['line']:<4} {write['name']} = {value_text(write['value'])}   {after}")
+        shown += len(call["writes"])
+    if shown < found["total"]:
+        lines.append(f"  ... {plural(found['total'] - shown, 'more write')} (--limit, --offset)")
+    return "\n".join(lines)
+
+
+def plural(count: int, word: str) -> str:
+    """`1 call`, `2 calls`, `3 processes`."""
+    return f"{count} {word}" if count == 1 else f"{count} {word}es" if word.endswith("s") else f"{count} {word}s"
+
+
 def render_exceptions(found: dict) -> str:
     if not found["total"]:
         return "no exceptions"
-    lines = [f"{found['total']} exceptions"]
+    lines = [f"{plural(found['total'], 'exception')}"]
     for e in found["exceptions"]:
         where = f"{e['node']}:{e['line']} (#{e['frame']})" if e["frame"] else f"line {e['line']}"
         lines.append(f"  !{e['id']} {e['type']}: {e['message']}")

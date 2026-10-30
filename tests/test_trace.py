@@ -597,6 +597,278 @@ def test_too_many_frames_are_counted_not_stored(tmp_path):
         assert "truncated: 50 of 101 frames kept" in trace.render_summary(found.summary())
 
 
+# Level 2: variable history
+
+HISTORY = """
+    class Cart:
+        def __init__(self):
+            self.items = []
+
+        def add(self, price):
+            self.items.append(price)
+            return self
+
+    def double(x):
+        y = x * 2
+        return y
+
+    def checkout(prices, token):
+        cart = Cart()
+        total = 0
+        seen = []
+        for price in prices:
+            total = total + double(price)
+            seen.append(price)
+        cart = Cart().add(total)
+        token = "tok-zz-987"
+        label = f"total {total}"
+        return label
+
+    def fails(n):
+        left = n
+        left = left - 10
+        raise ValueError(left)
+
+    checkout([1, 2], "tok-zz-123")
+    checkout([5], None)
+    try:
+        fails(3)
+    except ValueError:
+        pass
+"""
+
+
+def writes(path, node):
+    """[(frame, line, name, repr)] of a function's writes, in order; objects as `<Class object>`."""
+    query = """
+        SELECT w.frame, w.line, w.name, s.repr FROM writes w JOIN frames f ON f.id = w.frame
+        LEFT JOIN snapshots s ON s.id = w.value WHERE f.node = ? ORDER BY w.time_ns, w.id
+    """
+    return [(frame, line, name, re.sub(r"<__main__\.(\w+) object at 0x\w+>", r"<\1 object>", value)) for frame, line, name, value in rows(path, query, node)]
+
+
+def test_variable_history_of_scoped_functions(tmp_path):
+    result, path = traced(tmp_path, HISTORY, level=2, env={"LUCIOLE_TRACE_SCOPE": "checkout,prog:fails"})
+    assert result.returncode == 0, result.stderr
+    [(first, *_), (second, *_)] = by_node(path, "prog:checkout")
+    found = [(frame, line, name, value) for frame, line, name, value in writes(path, "prog:checkout") if frame == first]
+    # Rebinding (cart, total), a list's mutation (seen), the loop variable (written by the `for`
+    # line), each with the line that wrote it; the arguments are in frames.args, not here.
+    assert [(line, name, value) for _, line, name, value in found] == [
+        (15, "cart", "<Cart object>"),  # no repr of its own: its identity
+        (16, "total", "0"),
+        (17, "seen", "[]"),
+        (18, "price", "1"),
+        (19, "total", "2"),
+        (20, "seen", "[1]"),
+        (18, "price", "2"),
+        (19, "total", "6"),
+        (20, "seen", "[1, 2]"),
+        (21, "cart", "<Cart object>"),  # another one
+        (22, "token", "<redacted>"),  # a secret name, as for arguments
+        (23, "label", "'total 6'"),
+    ]
+    carts = rows(path, "SELECT DISTINCT w.value FROM writes w WHERE w.frame = ? AND w.name = 'cart'", first)
+    assert len(carts) == 2
+    assert rows(path, "SELECT COUNT(*) FROM writes WHERE frame = ?", second) == [(9,)]
+    assert b"tok-zz-987" not in path.read_bytes() and b"tok-zz-123" not in path.read_bytes()
+    # Unscoped functions (and methods called from scoped ones) have no writes: no LINE events at all.
+    assert writes(path, "prog:double") == [] and writes(path, "prog:Cart.add") == []
+    # The last line of a frame that raises is seen as it unwinds.
+    assert [(line, name, value) for _, line, name, value in writes(path, "prog:fails")] == [(27, "left", "3"), (28, "left", "-7")]
+    [run] = rows(path, "SELECT level, scope, writes_total, writes_stored, truncated FROM runs")
+    assert run == (2, '["checkout", "prog:fails"]', 23, 23, 0)
+    with Trace(path) as trace_:
+        found = trace_.history("checkout", name="total")
+        assert found["recorded"] and found["calls"] == 2 and found["total"] == 5
+        assert [[(w["line"], w["value"]["repr"]) for w in call["writes"]] for call in found["frames"]] == [[(16, "0"), (19, "2"), (19, "6")], [(16, "0"), (19, "10")]]
+        assert found["frames"][0]["args"]["prices"]["repr"] == "[1, 2]"
+        page = trace_.history("checkout", limit=3, offset=11)
+        assert [(call["frame"], [w["name"] for w in call["writes"]]) for call in page["frames"]] == [(first, ["label"]), (second, ["cart", "total"])]
+        assert trace_.history(frame=second)["total"] == 9
+        unscoped = trace_.history("double")
+        assert not unscoped["recorded"] and unscoped["calls"] == 3 and unscoped["frames"] == []
+        assert "Run again with --level 2 --scope prog:double" in trace.render_history(unscoped)
+        assert "variable history (level 2) for checkout, prog:fails: 23 writes" in trace.render_summary(trace_.summary())
+    text = cli(path, "history", "checkout", "--var", "total")
+    assert text.startswith("5 writes in 2 calls of prog:checkout\n") and "checkout(prices=[1, 2], token=<redacted>)" in text
+    assert re.search(r"\n    line 19   total = 6   \+[\d.]+ .s\n", text)
+    assert cli(path, "history", "--frame", second, "--limit", "2").endswith("... 7 more writes (--limit, --offset)\n")
+    assert json.loads(cli(path, "--json", "history", "fails"))["total"] == 2
+
+
+def test_variable_history_follows_a_generator_across_resumes(tmp_path):
+    result, path = traced(tmp_path, """
+        import threading
+
+        def running_total():
+            total = 0
+            while True:
+                got = yield total
+                total += got
+
+        gen = running_total()
+        next(gen)
+        gen.send(5)
+        thread = threading.Thread(target=gen.send, args=(7,))  # resumed in another thread
+        thread.start()
+        thread.join()
+        gen.send(1)
+    """, level=2, env={"LUCIOLE_TRACE_SCOPE": "running_total"})
+    assert result.returncode == 0, result.stderr
+    [(frame, *_)] = by_node(path, "prog:running_total")
+    assert [(line, name, value) for _, line, name, value in writes(path, "prog:running_total")] == [
+        (5, "total", "0"),
+        (7, "got", "5"),  # sent in: written by the yield line
+        (8, "total", "5"),
+        (7, "got", "7"),
+        (8, "total", "12"),
+        (7, "got", "1"),
+        (8, "total", "13"),
+    ]
+
+
+def test_scope_patterns():
+    assert trace.in_scope("pkg.cart:checkout", ["checkout"]) and trace.in_scope("pkg.cart:checkout", ["cart:checkout"])
+    assert trace.in_scope("pkg.cart:Cart.add", ["Cart.*"]) and trace.in_scope("pkg.cart:Cart.add", ["pkg.cart:*"])
+    assert trace.in_scope("pkg.cart:Cart.add", ["add"]) and trace.in_scope("pkg.cart", ["cart"])  # a module body
+    assert not trace.in_scope("pkg.cart:checkout.inner", ["checkout"]) and trace.in_scope("pkg.cart:checkout.inner", ["checkout*"])
+    assert not trace.in_scope("pkg.cart:checkout_all", ["checkout"]) and not trace.in_scope("pkg.cart:Cart.add", ["Cart"])
+    from luciole.session import scope_patterns
+
+    assert scope_patterns(" a, b ,,c ") == ["a", "b", "c"] and scope_patterns(["a,b", "c"]) == ["a", "b", "c"] and scope_patterns(None) == []
+
+
+def test_too_many_writes_are_counted_not_stored(tmp_path):
+    result, path = traced(tmp_path, """
+        def count():
+            n = 0
+            for i in range(10):
+                n += 1
+
+        count()
+    """, "--scope", "count", "prog.py", level=2, env={"LUCIOLE_TRACE_MAX_WRITES": "5"})
+    assert result.returncode == 0, result.stderr
+    assert rows(path, "SELECT writes_total, writes_stored, truncated FROM runs") == [(21, 5, 1)]
+    assert rows(path, "SELECT COUNT(*) FROM writes") == [(5,)]
+    with Trace(path) as found:
+        assert "truncated: 5 of 21 writes kept" in trace.render_summary(found.summary())
+
+
+def test_level_2_needs_a_scope(tmp_path):
+    write(tmp_path, {"prog.py": "def f():\n    x = 1\n\nf()\n"})
+    base = [sys.executable, "-m", "luciole", "run", "--root", str(tmp_path), "--trace", "t.sqlite"]
+
+    def run(*args, **env):
+        return subprocess.run([*base, *args, "prog.py"], cwd=tmp_path, env=clean_env(**env), capture_output=True, text=True, timeout=60)
+
+    refused = run("--level", "2")
+    assert refused.returncode == 2 and "level 2 records the variables of chosen functions only" in refused.stderr
+    assert not (tmp_path / "t.sqlite").exists()
+    mixed = run("--level", "1", "--scope", "f")
+    assert mixed.returncode == 2 and "a scope records variables, which is level 2" in mixed.stderr
+    assert run("--scope", "f").returncode == 0  # a scope alone means level 2
+    assert rows(tmp_path / "t.sqlite", "SELECT level, scope FROM runs") == [(2, '["f"]')]
+    assert rows(tmp_path / "t.sqlite", "SELECT name, line FROM writes") == [("x", 2)]
+    from_env = run(LUCIOLE_TRACE_LEVEL="2")  # no scope: level 1, said
+    assert from_env.returncode == 0 and "give a scope" in from_env.stderr
+    assert rows(tmp_path / "t.sqlite", "SELECT level, scope FROM runs") == [(1, None)]
+    write(tmp_path, {"code.py": """
+        import luciole
+
+        def f():
+            x = 1
+
+        luciole.start(trace="from-code.sqlite", level=2)
+        f()
+    """})
+    from_code = subprocess.run([sys.executable, "code.py"], cwd=tmp_path, env=clean_env(), capture_output=True, text=True, timeout=60)
+    assert from_code.returncode == 0 and "give a scope" in from_code.stderr
+    assert rows(tmp_path / "from-code.sqlite", "SELECT level FROM runs") == [(1,)]
+
+
+def test_auto_start_records_the_scope_of_every_process(tmp_path):
+    result = autostart(tmp_path, """
+        import subprocess, sys
+
+        def parent():
+            x = 1
+            subprocess.run([sys.executable, "-c", "import prog"])
+
+        if __name__ == "__main__":
+            parent()
+        else:
+            def child():
+                y = 2
+            child()
+    """, LUCIOLE_TRACE_LEVEL="2", LUCIOLE_TRACE_SCOPE="parent,child")
+    assert result.returncode == 0, result.stderr
+    found = {}
+    for path in (tmp_path / "traces").glob("*.sqlite"):
+        found.update(rows(path, "SELECT name, line FROM writes"))
+        assert rows(path, "SELECT scope FROM runs") == [('["parent", "child"]',)]
+    assert found == {"x": 5, "y": 12}
+
+
+# Suspended time
+
+
+def test_time_suspended_is_not_busy(tmp_path):
+    result, path = traced(tmp_path, """
+        import asyncio, time
+
+        async def download():
+            await asyncio.sleep(0.3)
+            return 1
+
+        async def parse():
+            return await download() * 2
+
+        def numbers():
+            yield 1
+            time.sleep(0.1)  # busy, for the generator
+            yield 2
+
+        async def main():
+            await asyncio.gather(parse(), parse())
+            for n in numbers():
+                time.sleep(0.1)  # not the generator's
+
+        asyncio.run(main())
+    """, level=0)
+    assert result.returncode == 0, result.stderr
+    for _, start, end, suspended in rows(path, "SELECT id, start_ns, end_ns, suspended_ns FROM frames WHERE node = 'prog:download'"):
+        assert end - start >= 0.3e9 and suspended >= 0.29e9
+    assert rows(path, "SELECT suspended_ns FROM frames WHERE node = 'prog:main'")[0][0] >= 0.29e9
+    assert rows(path, "SELECT COUNT(*) FROM frames WHERE suspended_ns IS NOT NULL AND node NOT IN ('prog:download', 'prog:parse', 'prog:main', 'prog:numbers')") == [(0,)]
+    [(numbers_wall, numbers_suspended)] = rows(path, "SELECT end_ns - start_ns, suspended_ns FROM frames WHERE node = 'prog:numbers'")
+    assert numbers_wall >= 0.3e9 and numbers_suspended >= 0.19e9
+    assert numbers_wall - numbers_suspended >= 0.09e9  # its own sleep is active, whatever the machine's speed
+    with Trace(path) as found:
+        summary = {f["node"]: f for f in found.summary()["by_calls"]}
+    download, parse, numbers = summary["prog:download"], summary["prog:parse"], summary["prog:numbers"]
+    assert download["total_ns"] >= 0.6e9 and download["self_ns"] < 0.05e9 and download["active_ns"] < 0.05e9
+    assert parse["total_ns"] >= 0.6e9 and parse["self_ns"] < 0.05e9
+    assert 0.09e9 < numbers["self_ns"] < 0.2e9  # its own sleep only
+    assert summary["prog:main"]["self_ns"] >= 0.19e9  # the sleeps in its loop
+    # The module only waited in asyncio.run, while main and the gathered tasks ran or slept.
+    assert summary["prog"]["total_ns"] >= 0.5e9 and summary["prog"]["self_ns"] < summary["prog"]["total_ns"] - summary["prog:main"]["total_ns"] + 0.05e9
+
+
+def test_readers_take_traces_without_the_newer_tables_and_columns(tmp_path):
+    result, path = traced(tmp_path, "def f():\n    x = 1\n\nf()\n", "--scope", "f", "prog.py", level=2)
+    assert result.returncode == 0, result.stderr
+    with contextlib.closing(sqlite3.connect(path)) as db:
+        db.execute("DROP TABLE writes")
+        db.execute("ALTER TABLE frames DROP COLUMN suspended_ns")
+        db.execute("ALTER TABLE runs DROP COLUMN scope")
+        db.commit()
+    with Trace(path) as found:
+        assert found.summary()["by_calls"][0]["self_ns"] >= 0
+        assert found.run()["scope"] is None
+        assert not found.history("f")["recorded"]
+
+
 # Where it plugs in
 
 
@@ -779,7 +1051,7 @@ def test_cli_output(tmp_path):
     assert json.loads(cli(path, "summary", "--json"))["by_calls"][0]["node"] == "prog:fib"
 
     calls = cli(path, "calls", "fails")
-    assert calls.startswith("1 calls of prog:fails\n")
+    assert calls.startswith("1 call of prog:fails\n")
     assert "fails(x=1) !! ValueError: bad 1" in calls and "from prog:wraps:7" in calls
     assert "middle !! RuntimeError: wrapped (from #" in cli(path, "calls", "middle").replace("middle()", "middle")
     limited = cli(path, "calls", "prog:fib", "--limit", "2")
@@ -819,6 +1091,13 @@ def test_luciole_run_says_when_the_trace_cannot_be_written(tmp_path):
     assert "Traceback" not in result.stderr and "ran" not in result.stdout
 
 
+def test_counts_are_singular_for_one():
+    assert [trace.plural(n, word) for n, word in ((1, "call"), (2, "call"), (0, "exception"), (1, "process"), (3, "process"))] == [
+        "1 call", "2 calls", "0 exceptions", "1 process", "3 processes"]
+    one = {"total": 1, "exceptions": [{"id": 1, "type": "ValueError", "message": "x", "node": "prog:f", "line": 2, "frame": 2, "time_ns": 5, "cause": None, "chain": None, "handled_in": None, "handled_node": None}]}
+    assert trace.render_exceptions(one).startswith("1 exception\n")
+
+
 def test_cli_rejects_what_is_not_a_trace(tmp_path):
     (tmp_path / "x.sqlite").write_text("nope")
     result = subprocess.run([sys.executable, "-m", "luciole", "trace", str(tmp_path / "x.sqlite"), "summary"], env=clean_env(), capture_output=True, text=True, timeout=60)
@@ -833,4 +1112,11 @@ def test_env_turns_tracing_on_and_off(tmp_path, monkeypatch):
     assert on["LUCIOLE_TRACE"] == str(tmp_path.resolve()) + os.sep and on["LUCIOLE_TRACE_LEVEL"] == "1"
     monkeypatch.setenv("LUCIOLE_TRACE", on["LUCIOLE_TRACE"])
     off = auto_start_env(None, None, off=True)
-    assert off["LUCIOLE_TRACE"] is None and off["LUCIOLE_TRACE_LEVEL"] is None
+    assert off["LUCIOLE_TRACE"] is None and off["LUCIOLE_TRACE_LEVEL"] is None and off["LUCIOLE_TRACE_SCOPE"] is None
+    assert on["LUCIOLE_TRACE_SCOPE"] is None
+    scoped = auto_start_env(None, None, off=False, trace=tmp_path, level=2, scope=["cart:*", "checkout"])
+    assert scoped["LUCIOLE_TRACE_LEVEL"] == "2" and scoped["LUCIOLE_TRACE_SCOPE"] == "cart:*,checkout"
+    command = [sys.executable, "-m", "luciole", "env", "--shell", "sh", "--trace", str(tmp_path)]
+    assert "LUCIOLE_TRACE_SCOPE=checkout" in subprocess.run([*command, "--scope", "checkout"], env=clean_env(), capture_output=True, text=True, timeout=60).stdout
+    refused = subprocess.run([*command, "--level", "2"], env=clean_env(), capture_output=True, text=True, timeout=60)
+    assert refused.returncode == 2 and "give them as a scope" in refused.stderr
