@@ -255,15 +255,6 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
     focused = undefined;
     focusedRegion = undefined;
     refocused = true;
-  })
-  .onNodeRightClick((node: object) => {
-    const { neuron } = node as NeuronNode;
-    const action = breakpointAction(brain?.neurons ?? [], neuron, breakpoints);
-    if (action && "add" in action) {
-      vscode.postMessage({ type: "addBreakpoint", file: neuron.node.file, line: action.add });
-    } else if (action) {
-      vscode.postMessage({ type: "removeBreakpoints", file: neuron.node.file, lines: action.remove });
-    }
   });
 
 graph.scene().add(regionLabels, flows);
@@ -832,6 +823,75 @@ for (const type of ["pointerdown", "pointermove", "pointerup", "wheel", "keydown
     },
     { capture: true, passive: true },
   );
+}
+
+/**
+ * Right-click adds or removes a neuron's breakpoints. Handled here, not by 3d-force-graph's
+ * onNodeRightClick: that acts on the last hover, which on a big brain can be a slow frame behind
+ * the pointer, and drops the click if the mouse moved a single pixel with the button down.
+ */
+let rightDown: { x: number; y: number } | undefined;
+const brainElement = document.getElementById("brain")!;
+brainElement.addEventListener("contextmenu", (event) => event.preventDefault());
+brainElement.addEventListener(
+  "pointerdown",
+  (event) => {
+    rightDown = event.button === 2 ? { x: event.clientX, y: event.clientY } : undefined;
+  },
+  { capture: true }, // before the camera controls see it
+);
+brainElement.addEventListener(
+  "pointerup",
+  (event) => {
+    const from = rightDown;
+    rightDown = undefined;
+    if (event.button !== 2 || !from || Math.hypot(event.clientX - from.x, event.clientY - from.y) > 6) {
+      return; // not a right-click, or a pan
+    }
+    const node = neuronUnder(from.x, from.y); // where it was pressed: zoomed out, a neuron is a few pixels wide
+    const action = node && breakpointAction(brain?.neurons ?? [], node.neuron, breakpoints);
+    if (action && "add" in action) {
+      vscode.postMessage({ type: "addBreakpoint", file: node.neuron.node.file, line: action.add });
+    } else if (action) {
+      vscode.postMessage({ type: "removeBreakpoints", file: node.neuron.node.file, lines: action.remove });
+    }
+  },
+  { capture: true },
+);
+
+const rightRay = new THREE.Raycaster();
+/**
+ * The neuron drawn at a point of the window: its sphere, or its label or dot when shown; else the
+ * nearest within a few pixels, as zoomed out on a big brain spheres are smaller than the pointer.
+ */
+function neuronUnder(clientX: number, clientY: number): NeuronNode | undefined {
+  const box = brainElement.getBoundingClientRect();
+  const at = new THREE.Vector2(((clientX - box.left) / box.width) * 2 - 1, -((clientY - box.top) / box.height) * 2 + 1);
+  rightRay.setFromCamera(at, graph.camera());
+  const owners = new Map<THREE.Object3D, NeuronNode>();
+  for (const node of graph.graphData().nodes as NeuronNode[]) {
+    if (node.parts) {
+      owners.set(node.parts.group, node);
+    }
+  }
+  for (const { object } of rightRay.intersectObjects([...owners.keys()], true)) {
+    for (let o: THREE.Object3D | null = object; o; o = o.parent) {
+      const node = owners.get(o);
+      if (node) {
+        return node;
+      }
+    }
+  }
+  let nearest: NeuronNode | undefined;
+  let best = 8 * 8;
+  for (const node of owners.values()) {
+    const { x, y } = graph.graph2ScreenCoords(node.x!, node.y!, node.z!);
+    const d = (box.left + x - clientX) ** 2 + (box.top + y - clientY) ** 2;
+    if (d < best && node.neuron.node.kind === "function") {
+      [nearest, best] = [node, d];
+    }
+  }
+  return nearest;
 }
 
 const worldPoint = new THREE.Vector3();
