@@ -31,6 +31,9 @@ work with any Python 3.10+.
 2. Ask about the run:
    - `exceptions`: type, message, the function and line that raised it, its chain, where it was
      handled;
+   - `traceback` (default: the last exception nothing handled): the frames it went through,
+     innermost first, each with its local variables as the exception left it, the view a
+     post-mortem debugger gives, with no re-run;
    - `calls FUNCTION`: every call, with arguments, return value or exception, caller, duration;
    - `call_tree` (from the top, or below a frame), repeated calls collapsed into `×N`;
    - `frame N`: one call in detail, and the calls it made;

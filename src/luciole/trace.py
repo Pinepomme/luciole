@@ -64,7 +64,8 @@ CREATE TABLE frames (
     end_kind TEXT,
     exception INTEGER,
     args TEXT,
-    result INTEGER
+    result INTEGER,
+    locals TEXT
 );
 CREATE TABLE exceptions (
     id INTEGER PRIMARY KEY,
@@ -91,6 +92,7 @@ INDEXES = """\
 CREATE INDEX frames_by_node ON frames (node, start_ns);
 CREATE INDEX frames_by_caller ON frames (caller);
 CREATE INDEX frames_by_time ON frames (start_ns);
+CREATE INDEX frames_by_exception ON frames (exception) WHERE exception IS NOT NULL;
 CREATE INDEX exceptions_by_frame ON exceptions (frame);
 CREATE INDEX exceptions_by_time ON exceptions (time_ns);
 """
@@ -262,6 +264,44 @@ class Trace:
         ).fetchall()
         return {"total": total, "exceptions": [dict(row) for row in rows]}
 
+    def traceback(self, exception_id: int | None = None) -> dict | None:
+        """The frames an exception left, innermost first, each with the line it was at and (level
+        1) its locals then: `{"exception", "frames", "handled_in"}`. Default: the last exception
+        nothing handled, else the last one."""
+        if exception_id is None:
+            row = self.db.execute("SELECT id FROM exceptions WHERE handled_in IS NULL AND frame IS NOT NULL ORDER BY time_ns DESC, id DESC LIMIT 1").fetchone()
+            row = row or self.db.execute("SELECT id FROM exceptions ORDER BY time_ns DESC, id DESC LIMIT 1").fetchone()
+            if row is None:
+                return None
+            exception_id = row[0]
+        found = self.exceptions_by_id([exception_id])
+        if not found:
+            return None
+        exception = found[0]
+        rows = self.db.execute("SELECT * FROM frames WHERE exception = ? ORDER BY start_ns DESC, id DESC", (exception_id,)).fetchall()
+        frames, line = [], exception["line"]
+        for row in rows:
+            frame = self._frame(row)
+            frame["at_line"] = line
+            line = row["line"]  # the call site, in the frame below
+            frames.append(frame)
+        handled = self.frame(exception["handled_in"]) if exception["handled_in"] else None
+        if handled is not None:
+            handled["at_line"] = line
+        return {"exception": exception, "frames": frames, "handled_in": handled}
+
+    def exceptions_by_id(self, ids: list[int]) -> list[dict]:
+        marks = ",".join("?" * len(ids))
+        rows = self.db.execute(
+            f"""
+            SELECT e.*, f.node AS node, h.node AS handled_node FROM exceptions e
+            LEFT JOIN frames f ON f.id = e.frame LEFT JOIN frames h ON h.id = e.handled_in
+            WHERE e.id IN ({marks})
+            """,
+            ids,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def snapshot(self, snapshot_id: int | None) -> dict | None:
         """A value as recorded: `{"type", "repr"}`, plus `items` (a container's first items, with
         its `len`) and `truncated` when they apply."""
@@ -307,6 +347,8 @@ class Trace:
             frame["args"] = {name: self.snapshot(value) for name, value in json.loads(row["args"]).items()}
         if row["end_kind"] == "return" and row["args"] is not None:
             frame["result"] = self.snapshot(row["result"])
+        if "locals" in row.keys() and row["locals"] is not None:  # traces before 0.3 have no column
+            frame["locals"] = {name: self.snapshot(value) for name, value in json.loads(row["locals"]).items()}
         return frame
 
     def _entry(self, row: sqlite3.Row, end: int) -> dict:
@@ -446,6 +488,28 @@ def render_tree(entries: list[dict], indent: int = 0) -> str:
         lines.append(f"{'  ' * indent}{entry['node']}{count}  #{entry['frame']}  {duration(entry['duration_ns'])}{end}{more}")
         if entry["children"]:
             lines.append(render_tree(entry["children"], indent + 1))
+    return "\n".join(lines)
+
+
+def render_traceback(found: dict | None) -> str:
+    if found is None:
+        return "no exceptions"
+    e = found["exception"]
+    lines = [f"!{e['id']} {e['type']}: {e['message']}"]
+    if e["cause"]:
+        lines.append(f"  {'caused by' if e['chain'] == 'cause' else 'while handling'} !{e['cause']}")
+    for frame in found["frames"]:
+        here = "raised here" if frame["end"] == "raise" else "passed through"
+        lines.append(f"  in {frame['node']} (#{frame['frame']}), line {frame['at_line']}: {here}")
+        for name, value in frame.get("locals", {}).items():
+            lines.append(f"      {name} = {value_text(value)}")
+    handled = found["handled_in"]
+    if handled:
+        lines.append(f"  handled in {handled['node']} (#{handled['frame']}), line {handled['at_line']}")
+    elif found["frames"]:
+        lines.append("  not handled")
+    if found["frames"] and not any("locals" in frame for frame in found["frames"]):
+        lines.append("  (no locals: recorded at level 0)")
     return "\n".join(lines)
 
 

@@ -23,6 +23,7 @@ import os
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 from luciole import __version__, trace, values
@@ -37,15 +38,18 @@ MAX_SUSPENDED = 100_000  # generators and coroutines remembered between two resu
 GENERATORS = inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ITERABLE_COROUTINE | inspect.CO_ASYNC_GENERATOR
 MESSAGE_CHARS = 500
 FLOW = (GeneratorExit, StopIteration, StopAsyncIteration)  # control flow, not errors: not recorded
+MAX_LOCALS = 50  # local variables kept per frame an exception leaves
+MAX_FAILURE_FRAMES = 10_000  # frames per run whose locals are kept; code that raises in loops stops there
 
 # An entry: a list, one per frame, with these fields. The thread fills the ones up to ARGS when
-# the frame starts, then END_NS, EXCEPTION and RESULT when it ends, and KIND last.
-FID, CODE, PYFRAME, NODE, CALLER, ORIGIN, THREAD, LINE, START_NS, ARGS, END_NS, KIND, EXCEPTION, RESULT = range(14)
+# the frame starts, then END_NS, EXCEPTION, RESULT and LOCALS when it ends, and KIND last.
+FID, CODE, PYFRAME, NODE, CALLER, ORIGIN, THREAD, LINE, START_NS, ARGS, END_NS, KIND, EXCEPTION, RESULT, LOCALS = range(15)
 
 # Other buffered events are tuples starting with one of these.
 NEW_THREAD, RAISED, SEEN = range(3)
 
 REDACTED = ("str", values.REDACTED, None, False)
+SKIPPED_LOCALS = (types.ModuleType, type, types.FunctionType, types.BuiltinFunctionType)
 IDENTITY = object()  # (IDENTITY, class, id): `<module.Class object at 0x…>`, formatted by the writer
 
 # Connections of the parent, in a forked child: never used, never closed (closing would touch
@@ -107,6 +111,7 @@ class Tracer:
         self.suspended_fids: dict[str, dict[int, None]] = {}  # node -> ids of its frames in `suspended`, oldest first
         self.arg_names: dict[object, tuple] = {}  # code -> ((name, secret), ...)
         self.exit_status: int | None = None
+        self.failure_frames = 0  # frames whose locals were kept as an exception left them
         self.off = False  # set when the trace cannot be written: the hooks then record nothing
         self.writer = Writer(self, root)
         self.writer_thread: threading.Thread | None = None
@@ -162,7 +167,7 @@ class Tracer:
         elif caller is None and state.origin:  # the thread's first frame: who started the thread
             origin, state.origin = state.origin, None
         args = self.arguments(code, frame) if self.level and fid <= self.max_frames else None  # past it, not stored
-        entry = [fid, code, id(frame), node_id, caller, origin, state.row, line, time.perf_counter_ns() - self.started, args, None, None, None, None]
+        entry = [fid, code, id(frame), node_id, caller, origin, state.row, line, time.perf_counter_ns() - self.started, args, None, None, None, None, None]
         stack.append(entry)
         if code.co_flags & GENERATORS:
             suspended = self.suspended
@@ -221,8 +226,9 @@ class Tracer:
     def returned(self, code, value) -> None:
         self.end(code, "return", value)
 
-    def unwound(self, code, error: BaseException) -> None:
-        """PY_UNWIND: the frame exits with `error`, raised there ("raise") or below ("unwind")."""
+    def unwound(self, code, frame, error: BaseException) -> None:
+        """PY_UNWIND: the frame exits with `error`, raised there ("raise") or below ("unwind").
+        At level 1, its locals are kept as they are now: what a post-mortem debugger would show."""
         state = self.threads.get(threading.get_ident())
         if not state or not state.stack:
             return
@@ -231,7 +237,11 @@ class Tracer:
             return
         known = state.recent.get(id(error))
         if known and known[1] is type(error):
-            raised_here = known[2] == state.stack[-1][FID]
+            top = state.stack[-1]
+            if self.level and top[CODE] is code and top[FID] <= self.max_frames and self.failure_frames < MAX_FAILURE_FRAMES:
+                self.failure_frames += 1
+                top[LOCALS] = self.local_values(frame)
+            raised_here = known[2] == top[FID]
             self.end(code, "raise" if raised_here else "unwind", exception=known[0])
         else:
             self.end(code, "raise")
@@ -329,6 +339,27 @@ class Tracer:
                 else:
                     args.append((name, self.value(value)))
             return tuple(args)
+        except Exception:  # never break the program
+            return None
+
+    def local_values(self, frame) -> tuple | None:
+        """A frame's local variables, as `arguments` keeps arguments; for a module body, its
+        globals. Modules, classes and functions are left out (definitions, not state)."""
+        try:
+            items = []
+            for name, value in frame.f_locals.items():
+                if name.startswith("__") or isinstance(value, SKIPPED_LOCALS):
+                    continue
+                if len(items) == MAX_LOCALS:
+                    items.append(("…", "more locals not kept"))
+                    break
+                if values.is_secret(name):
+                    items.append((name, REDACTED))
+                elif name == "self":
+                    items.append((name, (IDENTITY, type(value), id(value))))
+                else:
+                    items.append((name, self.value(value)))
+            return tuple(items)
         except Exception:  # never break the program
             return None
 
@@ -446,7 +477,7 @@ class Writer:
                 still_open.append(entry)
             else:
                 result = self.snapshot(entry[RESULT]) if level and kind == "return" else None
-                updates.append((entry[END_NS], kind, entry[EXCEPTION], result, entry[FID]))
+                updates.append((entry[END_NS], kind, entry[EXCEPTION], result, self.locals_json(entry), entry[FID]))
         self.open = still_open
         handled = []
         for row_id, fid in seen:
@@ -457,8 +488,8 @@ class Writer:
         db = self.db
         db.execute("BEGIN")
         db.executemany("INSERT INTO threads VALUES (?, ?, ?, ?)", threads)
-        db.executemany("INSERT INTO frames VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", frames)
-        db.executemany("UPDATE frames SET end_ns = ?, end_kind = ?, exception = ?, result = ? WHERE id = ?", updates)
+        db.executemany("INSERT INTO frames VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", frames)
+        db.executemany("UPDATE frames SET end_ns = ?, end_kind = ?, exception = ?, result = ?, locals = ? WHERE id = ?", updates)
         db.executemany("INSERT INTO exceptions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", raised.values())
         db.executemany("UPDATE exceptions SET handled_in = ? WHERE id = ?", handled)
         if self.new_snapshots:
@@ -474,9 +505,17 @@ class Writer:
             args = "{" + ", ".join(f'"{name}": {snapshot(value)}' for name, value in args) + "}" if args is not None else None
             entry[ARGS] = None  # stored: the values are not kept alive while the call runs on
         if kind is None:
-            return (entry[FID], entry[NODE], entry[CALLER], entry[ORIGIN], entry[THREAD], entry[LINE], entry[START_NS], None, None, None, args, None)
+            return (entry[FID], entry[NODE], entry[CALLER], entry[ORIGIN], entry[THREAD], entry[LINE], entry[START_NS], None, None, None, args, None, None)
         result = self.snapshot(entry[RESULT]) if level and kind == "return" else None
-        return (entry[FID], entry[NODE], entry[CALLER], entry[ORIGIN], entry[THREAD], entry[LINE], entry[START_NS], entry[END_NS], kind, entry[EXCEPTION], args, result)
+        return (entry[FID], entry[NODE], entry[CALLER], entry[ORIGIN], entry[THREAD], entry[LINE], entry[START_NS], entry[END_NS], kind, entry[EXCEPTION], args, result, self.locals_json(entry))
+
+    def locals_json(self, entry: list) -> str | None:
+        """The locals kept as an exception left the frame, `{"name": snapshot id}`; then let go."""
+        local = entry[LOCALS]
+        if local is None:
+            return None
+        entry[LOCALS] = None
+        return json.dumps({name: self.snapshot(value) for name, value in local})
 
     def snapshot(self, value) -> int:
         """Id of the snapshot of `value` (taken now when the tracer left it for later), stored once."""
@@ -521,7 +560,7 @@ class Writer:
         db.executemany("UPDATE frames SET end_ns = ?, end_kind = 'suspended' WHERE id = ? AND end_kind IS NULL", suspended)
         db.execute("UPDATE frames SET end_kind = 'running' WHERE end_kind IS NULL")
         # An exception is handled in the last frame it reached, unless that frame exited with it.
-        db.execute("UPDATE exceptions SET handled_in = NULL WHERE handled_in IN (SELECT id FROM frames WHERE exception = exceptions.id)")
+        db.execute("UPDATE exceptions SET handled_in = NULL WHERE EXISTS (SELECT 1 FROM frames WHERE frames.id = exceptions.handled_in AND frames.exception = exceptions.id)")
         db.execute(
             "UPDATE runs SET ended_at = ?, duration_ns = ?, exit_status = ?, ended_by = ?, frames_total = ?, frames_stored = ?, truncated = ? WHERE id = 1",
             (time.time(), tracer.now(), tracer.exit_status, ended_by, total, self.frames_stored, int(total > self.frames_stored)),

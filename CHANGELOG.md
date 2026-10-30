@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Failure snapshots: at level 1, a frame that an exception leaves keeps its local variables as
+  they were then (secrets redacted, 50 per frame, 10,000 frames per run). `luciole trace FILE
+  traceback [ID]` and the MCP tool `traceback` show the frames an exception went through with
+  their locals, as a post-mortem debugger would, without running the program again.
+- Traces of programs that raise and catch many exceptions no longer take seconds to finish: 20,000
+  caught exceptions took 10 s at exit, now a fraction of a second.
 - `luciole mcp`: an MCP server for agents (Claude Code, Cursor, any MCP client). `run` runs a
   command as typed (a script, pytest, a module) with every Python process it starts recording a
   trace at level 1, and answers with the exit status, the output and the exceptions nothing

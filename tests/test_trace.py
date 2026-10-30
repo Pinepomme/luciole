@@ -389,6 +389,88 @@ def test_exceptions_while_handling_are_chained_as_context(tmp_path):
     assert (cause, chain) == (key, "context")
 
 
+# Failure snapshots
+
+
+FAILING = """
+    LIMIT = 10
+
+    def parse(text, password):
+        parts = text.split(",")
+        count = len(parts)
+        return int(parts[count])
+
+    def load(name):
+        lines = [name, "a,b"]
+        total = 0
+        for line in lines:
+            total += parse(line, password="hunter2")
+        return total
+
+    def safe():
+        try:
+            return load("x")
+        except IndexError:
+            return -1
+
+    safe()
+    load("y")
+"""
+
+
+def test_an_exception_keeps_the_locals_of_every_frame_it_leaves(tmp_path):
+    result, path = traced(tmp_path, FAILING)
+    assert result.returncode == 1 and "IndexError" in result.stderr
+    with Trace(path) as found:
+        first = found.traceback(1)
+        last = found.traceback()  # default: the last one nothing handled
+    assert first["exception"]["type"] == "IndexError" and first["handled_in"]["node"] == "prog:safe"
+    assert last["exception"]["id"] == 2 and last["handled_in"] is None
+    parse, load, module = last["frames"]
+    assert (parse["node"], parse["end"], parse["at_line"]) == ("prog:parse", "raise", 7)
+    assert {name: value["repr"] for name, value in parse["locals"].items()} == {
+        "text": "'y'", "password": "<redacted>", "parts": "['y']", "count": "1",
+    }
+    assert (load["node"], load["end"], load["at_line"]) == ("prog:load", "unwind", 13)
+    assert {name: value["repr"] for name, value in load["locals"].items()} == {"name": "'y'", "lines": "['y', 'a,b']", "total": "0", "line": "'y'"}
+    assert (module["node"], module["at_line"]) == ("prog", 23)
+    assert {name: value["repr"] for name, value in module["locals"].items()} == {"LIMIT": "10"}  # no functions
+    assert b"hunter2" not in path.read_bytes()
+    text = trace.render_traceback(last)
+    assert text.splitlines()[:3] == ["!2 IndexError: list index out of range", "  in prog:parse (#6), line 7: raised here", "      text = 'y'"]
+    assert text.endswith("  not handled")
+
+
+def test_level_0_keeps_no_locals(tmp_path):
+    result, path = traced(tmp_path, FAILING, level=0)
+    assert rows(path, "SELECT COUNT(*) FROM frames WHERE locals IS NOT NULL") == [(0,)]
+    with Trace(path) as found:
+        assert "(no locals: recorded at level 0)" in trace.render_traceback(found.traceback())
+
+
+def test_locals_are_kept_for_a_limited_number_of_frames(tmp_path):
+    from luciole import tracer
+
+    result, path = traced(tmp_path, """
+        def many():
+            a, b, c, d, e = 1, 2, 3, 4, 5
+            raise ValueError("x")
+
+        def loop():
+            for _ in range(20_000):
+                try:
+                    many()
+                except ValueError:
+                    pass
+
+        loop()
+    """)
+    assert result.returncode == 0, result.stderr
+    kept = rows(path, "SELECT locals FROM frames WHERE locals IS NOT NULL")
+    assert len(kept) == tracer.MAX_FAILURE_FRAMES  # then no more
+    assert json.loads(kept[0][0]).keys() == {"a", "b", "c", "d", "e"}
+
+
 # Values
 
 

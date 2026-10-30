@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 
 from luciole import __version__, protocol
-from luciole.trace import Trace, TraceError, render_calls, render_exceptions, render_summary, render_tree
+from luciole.trace import Trace, TraceError, render_calls, render_exceptions, render_summary, render_traceback, render_tree
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first
 KEEP_RUNS = 50  # run folders kept per project; older ones are deleted
@@ -39,8 +39,9 @@ Luciole records Python programs so you can debug from what actually happened ins
 prints and re-running. Use `run` to execute a command (a script, `pytest -x tests/test_x.py`, a
 module) under the recorder: every call of project code is recorded with its arguments and return
 value, and every exception with where it was raised and handled. Then ask: `exceptions` for what
-went wrong, `calls` for every call of a function with its values, `call_tree` for who called
-what, `frame` for one call in detail. `find` and `neighbors` answer from the static graph: where a
+went wrong, `traceback` for the stack it went through with every frame's local variables at that
+moment (a post-mortem debugger's view, no re-run needed), `calls` for every call of a function
+with its values, `call_tree` for who called what, `frame` for one call in detail. `find` and `neighbors` answer from the static graph: where a
 function is, who calls it, what it calls, which variables it reads and writes, even for code that
 did not run. Runs are kept: `runs` lists them, and every query takes a run id (default: the last).
 """
@@ -78,6 +79,11 @@ TOOLS = [
         "name": "exceptions",
         "description": "Exceptions in a run, in the order they were raised: type, message, the function and line that raised it, what it was chained from, and where it was handled (or not).",
         "inputSchema": {"type": "object", "properties": {"run": RUN_ARG, "process": PROCESS_ARG, **PAGE_ARGS}},
+    },
+    {
+        "name": "traceback",
+        "description": "The frames an exception went through, innermost first: for each, the line it was at and its local variables at that moment, then where it was handled. Default: the last exception nothing handled.",
+        "inputSchema": {"type": "object", "properties": {"exception": {"type": "integer", "description": "An exception id (!N in other answers)."}, "run": RUN_ARG, "process": PROCESS_ARG}},
     },
     {
         "name": "calls",
@@ -192,6 +198,12 @@ class Server:
         with self.trace(args.get("run"), args.get("process")) as trace:
             if name == "summary":
                 return render_summary(trace.summary())
+            if name == "traceback":
+                exception = args.get("exception")
+                found = trace.traceback(int(exception) if exception is not None else None)
+                if found is None and exception is not None:
+                    raise ToolError(f"no exception !{exception} in this process")
+                return render_traceback(found)
             if name == "exceptions":
                 return render_exceptions(trace.exceptions(*page)).replace("(--limit, --offset)", "(limit, offset)")
             if name == "calls":
@@ -268,7 +280,7 @@ class Server:
         if not calls:
             lines.append(f"no project code ran (the project root is {self.root})")
         if uncaught:
-            lines += ["", "exceptions nothing in the project handled (see `exceptions`, `frame`):"]
+            lines += ["", "exceptions nothing in the project handled (`traceback` shows each frame's locals):"]
             for pid, e in uncaught[:10]:
                 where = f"{e['node']}:{e['line']} (#{e['frame']})"
                 lines.append(f"  pid {pid}: {e['type']}: {e['message']}  raised in {where}")

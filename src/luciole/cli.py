@@ -80,7 +80,9 @@ def main(argv: list[str] | None = None) -> int:
     exceptions_cmd = queries.add_parser("exceptions", help="exceptions: where raised, chained from, handled where")
     exceptions_cmd.add_argument("--limit", type=int, default=50)
     exceptions_cmd.add_argument("--offset", type=int, default=0)
-    for query in (summary_cmd, calls_cmd, tree_cmd, exceptions_cmd):  # also accepted after the query
+    traceback_cmd = queries.add_parser("traceback", help="the frames an exception left, with their locals then (level 1)")
+    traceback_cmd.add_argument("exception", type=int, nargs="?", help="exception id (default: the last one nothing handled)")
+    for query in (summary_cmd, calls_cmd, tree_cmd, exceptions_cmd, traceback_cmd):  # also accepted after the query
         query.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
     args = parser.parse_args(argv)
 
@@ -156,7 +158,7 @@ def auto_start_env(port: int | None, root: Path | None, off: bool, trace: Path |
 
 
 def trace_command(args) -> int:
-    from luciole.trace import Trace, TraceError, render_calls, render_exceptions, render_summary, render_tree
+    from luciole.trace import Trace, TraceError, render_calls, render_exceptions, render_summary, render_traceback, render_tree
 
     try:
         trace = Trace(args.file)
@@ -170,6 +172,8 @@ def trace_command(args) -> int:
             result, text = trace.calls(args.node, args.limit, args.offset), render_calls
         elif args.query == "tree":
             result, text = trace.tree(args.start, args.depth), render_tree
+        elif args.query == "traceback":
+            result, text = trace.traceback(args.exception), render_traceback
         else:
             result, text = trace.exceptions(args.limit, args.offset), render_exceptions
     print(json.dumps(result, indent=2, ensure_ascii=False) if args.json else text(result))

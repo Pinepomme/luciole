@@ -262,7 +262,7 @@ class Recorder:
         if node_id:
             self.leave(node_id)
             if self.tracer is not None:
-                self.tracer.unwound(code, exception)
+                self.tracer.unwound(code, sys._getframe(1), exception)
             if self.step is not None:
                 self.left(sys._getframe(1))
 
