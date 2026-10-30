@@ -567,7 +567,9 @@ function declutterLabels(): void {
       text.scale.set(tall * text.userData.aspect, tall, 1);
       const top = Math.max(
         parts.radius,
-        parts.mark?.visible ? parts.mark.position.y + parts.mark.scale.y / 2 : 0,
+        // Room for the breakpoint dot (markOf) whether or not there is one: the name does not jump
+        // when one is added, and stays clear of a close sphere, which looks bigger than its radius.
+        parts.radius * 0.9 + Math.max(2, parts.radius * 0.9) / 2,
         parts.ring?.visible ? parts.ring.scale.y / 2 : 0,
       );
       text.position.y = top + 3 * unit + tall / 2;
