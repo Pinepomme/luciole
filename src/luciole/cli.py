@@ -62,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
     tests_cmd.add_argument("file", type=Path, help="Python file")
     tests_cmd.add_argument("--root", type=Path, default=Path.cwd(), help="project directory to search (default: the current directory)")
     tests_cmd.add_argument("--json", action="store_true", help="print a JSON list of absolute paths")
+    mcp_cmd = commands.add_parser("mcp", help="an MCP server (stdio) for agents: run programs under the recorder and query the runs")
+    mcp_cmd.add_argument("--root", type=Path, default=Path.cwd(), help="project directory (default: the current directory)")
     trace_cmd = commands.add_parser("trace", help="read a trace written by luciole run --trace")
     trace_cmd.add_argument("file", type=Path, help="trace file (.sqlite)")
     trace_cmd.add_argument("--json", action="store_true", help="print JSON")
@@ -90,6 +92,10 @@ def main(argv: list[str] | None = None) -> int:
             print("luciole: no engine is running yet: programs light up once one runs (open the Luciole view in VS Code, or run `luciole engine`)", file=sys.stderr)
         print(env_commands(auto_start_env(args.port, args.root, args.off, args.trace, args.level), args.shell))
         return 0
+    if args.command == "mcp":
+        from luciole.mcp import serve
+
+        return serve(args.root)
     if args.command == "engine":
         from luciole.engine import serve
 

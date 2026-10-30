@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `luciole mcp`: an MCP server for agents (Claude Code, Cursor, any MCP client). `run` runs a
+  command as typed (a script, pytest, a module) with every Python process it starts recording a
+  trace at level 1, and answers with the exit status, the output and the exceptions nothing
+  handled; `exceptions`, `calls`, `call_tree`, `frame`, `summary` and `runs` query the runs, and
+  `find` and `neighbors` the static graph. See `docs/mcp.md`.
+
 ## 0.2.0
 
 - Right-click on a neuron adds or removes its breakpoint on big graphs too, where a neuron is a

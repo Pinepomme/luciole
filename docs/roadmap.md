@@ -178,7 +178,7 @@ on the suspect functions. Most bugs reproduce under a test, which makes that che
 | Step | What | Rough effort |
 |---|---|---|
 | 1 | Done: trace store, call tree, arguments/returns, exceptions (levels 0–1) | — |
-| 2 | `luciole mcp`: trace queries plus graph queries (neighbors, callers, slicing); its `run` records at level 1 by default | ~1 week |
+| 2 | Done: `luciole mcp` (docs/mcp.md), trace queries plus graph queries (find, neighbors); its `run` records at level 1 by default | — |
 | 3 | Failure snapshots: the locals of every frame on the stack at an uncaught exception or a failing test | a few days |
 | 4 | Scoped variable history (level 2), redaction, limits; coroutine suspend/resume, so time spent awaiting is not counted as busy | 1–2 weeks |
 | 5 | Origin queries: dynamic slicing over static edges and the trace | ~2 weeks |
