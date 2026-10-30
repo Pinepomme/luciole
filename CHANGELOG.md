@@ -5,6 +5,17 @@
 - Without the Python Debugger extension, Run Live still runs (in a terminal, lighting only), and
   the panel now says so, with a button that installs the debugger, until it is installed. This
   replaces a notification that showed once ever.
+- ⚡ Run Live on a file of a package that imports relatively (`from . import x`) runs it as a
+  module (`python -m pkg.mod`), the only way it can run; it stopped at its first relative import.
+- A Luciole sidebar in the activity bar, with three native views. **Actions**: Show Graph (file
+  or folder), Run Live, Run Live… and the auto-start switch with its state. **Running**: the
+  processes lit up now (Run Live, auto-started programs, tests, child processes) by command line,
+  pid and state, plus the last few that exited; Stop for programs outside VS Code's debug
+  sessions, a button to the Call Stack (where their sessions are) for the ones in them. **Map**:
+  an outline of the graph in the panel (packages, modules, classes, functions: the brain's own
+  regions), with counts and running functions marked; clicking an item flies the brain to it and
+  marks it, functions have Go to Source, and **Luciole: Find in Map** lists every function.
+
 - Each file's functions get a muted tint of their own (Apple's system hues, half-way to grey), so you see which module a function is in; activity stays in the accent.
 - A calmer, minimal look: neutral greys at rest and one accent color for activity, the theme's
   own (its link color), with red only for breakpoints and the debugger. Smaller matte neurons,
