@@ -82,7 +82,7 @@ export function fileRunKind(file: string, source: string): "test" | "script" | "
  * imported from. Undefined otherwise: the file runs as a script.
  */
 export function packageModule(file: string, source: string, isPackage: (dir: string) => boolean): { module: string; root: string } | undefined {
-  if (!/^\s*from\s+\.+\s*\w*\s+import\b/m.test(source)) {
+  if (!/^\s*from\s+\.+\s*[\w.]*\s+import\b/m.test(source)) {
     return undefined;
   }
   const parts = [path.basename(file, ".py")];

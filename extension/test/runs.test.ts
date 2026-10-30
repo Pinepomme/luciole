@@ -98,6 +98,9 @@ test("a package's file that imports relatively runs as a module", () => {
   assert.deepEqual(packageModule("/work/rich/rich/progress.py", "from . import filesize, get_console\n", isPackage), { module: "rich.progress", root: "/work/rich" });
   assert.deepEqual(packageModule("/work/src/app/core/engine.py", "from ..store import load\n", isPackage), { module: "app.core.engine", root: "/work/src" });
   assert.deepEqual(packageModule("/work/rich/rich/__main__.py", "from .console import Console\n", isPackage), { module: "rich", root: "/work/rich" });
+  // Dotted relative imports.
+  assert.deepEqual(packageModule("/work/rich/rich/progress.py", "from .a.b import c\n", isPackage), { module: "rich.progress", root: "/work/rich" });
+  assert.deepEqual(packageModule("/work/src/app/core/engine.py", "from ..store.db import load\n", isPackage), { module: "app.core.engine", root: "/work/src" });
   // Absolute imports run fine as a script; a relative import outside a package fails either way.
   assert.equal(packageModule("/work/rich/rich/progress.py", "import rich\nfrom rich.console import Console\n", isPackage), undefined);
   assert.equal(packageModule("/work/tools/script.py", "from . import x\n", isPackage), undefined);
