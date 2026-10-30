@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `luciole run --trace` (and `luciole.start(trace=...)`, auto-start with `LUCIOLE_TRACE`) record at
+  level 1 by default, like Run Live and the MCP server: a trace without values says little about a
+  failure. `--level 0` keeps the cheaper call tree only.
 - The recorded history in VS Code. Every Run Live (under the debugger or in a terminal) also
   records a level 1 trace, in the run folders `luciole mcp` uses (`~/.luciole/runs`, the last 50
   per project; setting `luciole.recordHistory`, on by default). A new **Calls** view in the

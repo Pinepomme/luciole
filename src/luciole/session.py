@@ -261,11 +261,12 @@ def connect(port: int | str | None, quiet: bool) -> socket.socket | None:
 
 
 def trace_level(level: int | str | None) -> int:
-    """The trace level asked for (default: LUCIOLE_TRACE_LEVEL, else 0)."""
+    """The trace level asked for (default: LUCIOLE_TRACE_LEVEL, else 1: a trace without values says
+    little about a failure)."""
     try:
-        return int(level if level is not None else os.environ.get("LUCIOLE_TRACE_LEVEL") or 0)
+        return int(level if level is not None else os.environ.get("LUCIOLE_TRACE_LEVEL") or 1)
     except ValueError:
-        return 0
+        return 1
 
 
 def trace_scope(scope: str | list[str] | None) -> list[str]:

@@ -35,8 +35,8 @@ Environment: `LUCIOLE_TRACE` (file or directory; the default of `--trace`), `LUC
 
 | Level | Records |
 |---|---|
-| 0 (default) | the call tree of project code: one row per call, with its caller, call site, thread and times; exceptions |
-| 1 | level 0, plus each call's arguments and return value, as capped snapshots |
+| 0 | the call tree of project code: one row per call, with its caller, call site, thread and times; exceptions |
+| 1 (default) | level 0, plus each call's arguments and return value, as capped snapshots, and the locals of frames an exception leaves |
 | 2 | level 1, plus every assignment to the local variables of the functions in a scope (`writes`) |
 
 **Scope (level 2).** Recording every assignment everywhere would be far too slow, so level 2
