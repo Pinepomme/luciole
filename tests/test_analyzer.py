@@ -230,6 +230,13 @@ def test_cli_rejects_missing_path(tmp_path):
         main(["graph", str(tmp_path / "nope.py")])
 
 
+def test_cli_run_rejects_missing_script(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        main(["run", "--trace", str(tmp_path / "t.sqlite"), str(tmp_path / "nope.py")])
+    assert "no such file" in capsys.readouterr().err
+    assert not (tmp_path / "t.sqlite").exists()
+
+
 def test_body_line_is_where_each_call_starts(tmp_path):
     graph = analyze(tmp_path, {"app.py": '''
         def plain(x):
