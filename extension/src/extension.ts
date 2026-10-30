@@ -184,10 +184,13 @@ async function runFile(context: vscode.ExtensionContext, file: string | undefine
     if (tests.length) {
       return startRun(context, pytestRun(`tests for ${name}`, tests, folder));
     }
-    void vscode.window.showInformationMessage(`Luciole: no test file imports ${name}, so it runs as a script.`);
   }
   // A file of a package that imports relatively only runs as a module: `python -m pkg.mod`.
   const asModule = packageModule(file, source, (dir) => fs.existsSync(path.join(dir, "__init__.py")));
+  if (kind === "module") {
+    const how = asModule ? `as a module (-m ${asModule.module})` : "as a script";
+    void vscode.window.showInformationMessage(`Luciole: no test file imports ${name}, so it runs ${how}.`);
+  }
   if (asModule) {
     // Importable from the folder it runs in; else from its package's folder, put first on PYTHONPATH.
     const env = path.resolve(asModule.root) === path.resolve(folder) ? undefined : { PYTHONPATH: [asModule.root, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter) };
