@@ -617,15 +617,6 @@ export function labelAnchor(points: Vec3[], right: Vec3, up: Vec3, gap = 0): Vec
   };
 }
 
-/** Region ids from the root to `id`. */
-export function regionChain(layout: Layout, id: string): string[] {
-  const chain: string[] = [];
-  for (let region = layout.regions.get(id); region; region = region.parent !== undefined ? layout.regions.get(region.parent) : undefined) {
-    chain.unshift(region.id);
-  }
-  return chain;
-}
-
 // Vectors
 
 function origin(): Vec3 {

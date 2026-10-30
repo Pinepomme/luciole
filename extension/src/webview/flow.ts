@@ -2,7 +2,7 @@
  * How a synapse shows a call in live mode: the line traces itself from the caller to the callee
  * in the accent color, like a route drawing itself on a map, then eases back to grey. A busy line
  * stays drawn until its calls stop: calls never stack up or restart the sweep. Pure (no
- * three.js): main.ts draws the part of the line this says is drawn.
+ * three.js): objects.ts draws the part of the line this says is drawn.
  */
 
 /** A call traced along a synapse. Times in seconds. */
