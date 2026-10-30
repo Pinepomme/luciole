@@ -68,6 +68,17 @@ The graph format and the live events are documented in
 [docs/graph-format.md](docs/graph-format.md), traces in [docs/trace-format.md](docs/trace-format.md),
 and the plan in [docs/roadmap.md](docs/roadmap.md).
 
+## For agents
+
+`luciole mcp` is an MCP server: an agent such as Claude Code runs your program or tests under the
+recorder, then asks what happened (exceptions, every call of a function with its arguments and
+return values, the call tree) and what the code looks like around a function (callers, callees,
+where values come from). See [docs/mcp.md](docs/mcp.md).
+
+```sh
+claude mcp add luciole -- luciole mcp
+```
+
 ## Status
 
 Early: version 0.2. It works on real projects of tens of thousands of lines, but large graphs are
