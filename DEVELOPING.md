@@ -237,8 +237,12 @@ inside a VS Code window connected to WSL.
 
 ```
 src/luciole/
-  analyzer.py      static graph: functions, classes, variables, calls (ast)
-  recorder.py      live recording with sys.monitoring (3.12+); luciole.start()
+  analyzer.py      static graph: files, pass 1 (nodes, bindings, call resolution) and build_graph
+  flows.py         static graph, pass 2: edges (calls, reads, writes, value flow)
+  scopes.py        what both passes share: scopes, bindings, AST helpers
+  recorder.py      live recording with sys.monitoring (3.12+): callbacks, frames, pause/step
+  session.py       the recorder in an interpreter: engine connection, luciole.start()/stop(),
+                   SIGTERM and fork, `luciole run`
   engine.py        the local engine that recorders connect to and viewers subscribe to
   protocol.py      protocol version and engine discovery (~/.luciole/engine-v1.json)
   _autostart/      sitecustomize.py: starts the recorder in any Python process when enabled
