@@ -12,6 +12,7 @@
     luciole trace FILE children|frame N|frames|serve ...  what VS Code's history views ask (browse.py)
     luciole runs [--root DIR] [--json]            recorded runs of a project (MCP and Run Live), newest first
     luciole runs new --root DIR --command JSON [--cwd DIR] [--by vscode]   a new run folder; runs finish FOLDER
+    luciole trace FILE origin NODE VARIABLE [--frame N] [--depth D] [--json]   where a value came from
 """
 
 from __future__ import annotations
@@ -118,7 +119,14 @@ def main(argv: list[str] | None = None) -> int:
     frames_cmd.add_argument("--every", type=float, default=50, help="milliseconds of the run per frame")
     frames_cmd.add_argument("--limit", type=int, default=2000)
     queries.add_parser("serve", help="answer JSON queries, one per line on stdin (for VS Code)")
-    for query in (summary_cmd, calls_cmd, tree_cmd, exceptions_cmd, traceback_cmd, history_cmd, children_cmd, frame_cmd, frames_cmd):  # also accepted after the query
+    origin_cmd = queries.add_parser("origin", help="where a variable's value came from: the trace and the static graph, walked backwards")
+    origin_cmd.add_argument("node", help="function's node id, or its end (- with --frame)")
+    origin_cmd.add_argument("variable", help="a local or parameter, return, self.attribute, a global, or a variable's node id")
+    origin_cmd.add_argument("--frame", type=int, help="one call: its frame id (default: the function's last call)")
+    origin_cmd.add_argument("--at", dest="time_ns", type=int, help="the value at this moment, in ns since the run started (default: the call's end)")
+    origin_cmd.add_argument("--depth", type=int, default=8, help="steps followed back (default 8)")
+    origin_cmd.add_argument("--branches", type=int, default=4, help="sources followed per step (default 4)")
+    for query in (summary_cmd, calls_cmd, tree_cmd, exceptions_cmd, traceback_cmd, history_cmd, origin_cmd, children_cmd, frame_cmd, frames_cmd):  # also accepted after the query
         query.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
     args = parser.parse_args(argv)
 
@@ -255,6 +263,8 @@ def trace_command(args) -> int:
         print(f"luciole: {error}", file=sys.stderr)
         return 1
     with trace:
+        if args.query == "origin":
+            return origin_command(trace, args)
         if args.query == "summary":
             result, text = trace.summary(args.top), render_summary
         elif args.query == "calls":
@@ -277,6 +287,23 @@ def trace_command(args) -> int:
         else:
             result, text = trace.exceptions(args.limit, args.offset), render_exceptions
     print(json.dumps(result, indent=2, ensure_ascii=False) if args.json else text(result))
+    return 0
+
+
+def origin_command(trace, args) -> int:
+    """`luciole trace FILE origin`: the static graph comes from the trace's own root."""
+    from luciole.origins import OriginError, origin, render_origin
+
+    root = Path(trace.run()["root"])
+    if not root.is_dir():
+        print(f"luciole: the recorded project root {root} is gone: origin needs its source", file=sys.stderr)
+        return 1
+    try:
+        found = origin(trace, build_graph(root), None if args.node == "-" else args.node, args.variable, args.frame, args.time_ns, args.depth, args.branches)
+    except OriginError as error:
+        print(f"luciole: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(found, indent=2, ensure_ascii=False) if args.json else render_origin(found))
     return 0
 
 

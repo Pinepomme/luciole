@@ -323,6 +323,7 @@ luciole trace run.sqlite tree [--from FRAME] [--depth 4]         # call tree, re
 luciole trace run.sqlite exceptions [--limit 50]                 # where raised, chained from, handled where
 luciole trace run.sqlite traceback [EXCEPTION]                   # the frames it left, with their locals then
 luciole trace run.sqlite history NODE [--var NAME] [--frame N] [--limit 50]   # level 2: assignments, line by line
+luciole trace run.sqlite origin NODE VARIABLE [--frame N] [--at NS] [--depth 8]  # where a value came from
 ```
 
 For tools that browse a trace (VS Code's Calls view and replay, [`src/luciole/browse.py`](../src/luciole/browse.py)):
@@ -352,6 +353,9 @@ luciole trace run.sqlite serve                                    # JSON queries
   `frame`, `exceptions`, `traceback`, `history` and `frames` with the arguments above (`from`,
   `to`, `every` in nanoseconds). The trace is opened again for each request, so a run still
   recording is read as it is now.
+`origin` walks a value back through the assignments, arguments, return values, globals and
+attributes that made it, across functions, with the static graph: see [origins.md](origins.md),
+which also says what each level lets it answer, and its limits.
 
 `NODE` is a node id, or its end (`Cart.add` for `shop:Cart.add`). `--json` prints the same
 results as JSON. In Python:
