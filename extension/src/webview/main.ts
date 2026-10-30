@@ -12,7 +12,7 @@ import type { Graph } from "../graph";
 import type { FromWebview, LiveFrame, SourceLine, ThreadStack, ToWebview } from "../messages";
 import { Brain, breakpointAction, breakpointHint, buildBrain, Neuron, neuronAt, Synapse, SynapseKind, synapseId } from "./brain";
 import { addCall, alongPolyline, partOf, Trace, traceAt } from "./flow";
-import { HIDDEN, HIDDEN_LINE, LineBatch, SphereBatch, UNIT_SPHERE } from "./batches";
+import { HIDDEN, HIDDEN_LINE, LineBatch, PICK_SPHERE, SphereBatch } from "./batches";
 import { bundle, labelAnchor, Layout, layoutBrain, NEURON_GAP, neuronRadius, Region, regionMembers, route, Vec3 } from "./layout";
 
 declare function acquireVsCodeApi(): { postMessage(message: FromWebview): void };
@@ -340,7 +340,7 @@ function neuronObject(node: NeuronNode): THREE.Object3D {
   // they are resized (animate, declutterLabels).
   const group = new THREE.Group();
   group.matrixAutoUpdate = false;
-  const hit = new THREE.Mesh(UNIT_SPHERE, HIDDEN); // for hover and clicks; the sphere batch draws it
+  const hit = new THREE.Mesh(PICK_SPHERE, HIDDEN); // for hover and clicks; the sphere batch draws it
   hit.scale.setScalar(radius);
   hit.updateMatrix();
   hit.matrixAutoUpdate = false;
@@ -1124,6 +1124,16 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
 });
 
 // Hook for the browser harness in dev/ and for poking around from the webview devtools.
-Object.assign(window, { luciole: { graph, live: onLive, isLive: () => live, paused: () => paused } });
+Object.assign(window, {
+  luciole: {
+    graph,
+    live: (frame: LiveFrame) => {
+      wake(); // as a message would: a still brain is not drawn
+      onLive(frame);
+    },
+    isLive: () => live,
+    paused: () => paused,
+  },
+});
 
 vscode.postMessage({ type: "ready" });

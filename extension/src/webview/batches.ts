@@ -11,11 +11,17 @@
 import * as THREE from "three";
 import type { Vec3 } from "./layout";
 
-/** For the objects 3d-force-graph keeps per neuron and synapse: raycast, never drawn. */
+/**
+ * For the objects 3d-force-graph keeps per neuron and synapse: raycast, never drawn. Shared by
+ * all of them, and 3d-force-graph disposes them with each object it removes: harmless, as they
+ * never reach the GPU. Nothing drawn uses them (the sphere batch has its own UNIT_SPHERE).
+ */
 export const HIDDEN = new THREE.MeshBasicMaterial({ visible: false });
 export const HIDDEN_LINE = new THREE.LineBasicMaterial({ visible: false });
-/** One unit sphere, scaled to each neuron. */
-export const UNIT_SPHERE = new THREE.SphereGeometry(1, 16, 12);
+/** A neuron's sphere for hover and clicks, scaled to it. */
+export const PICK_SPHERE = new THREE.SphereGeometry(1, 16, 12);
+/** One unit sphere, scaled to each neuron, drawn by the sphere batch. */
+const UNIT_SPHERE = new THREE.SphereGeometry(1, 16, 12);
 
 export interface Sphere {
   x?: number;
