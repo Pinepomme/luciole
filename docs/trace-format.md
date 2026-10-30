@@ -390,8 +390,11 @@ of `frames` is a call (like an item of `calls()`) with its `writes`, `{"line", "
 when the run's scope did not cover the function (no level 2, or another scope): run it again
 with `--scope`. In `summary`, a function's `total_ns` leaves out calls made while another call of
 it runs (recursion); `active_ns` is the same without the time its generators and coroutines spent
-suspended; `self_ns` is its active time minus its callees' active time (but not the threads and
-tasks it runs concurrently), so a coroutine awaiting `asyncio.sleep` is not busy meanwhile.
+suspended; `self_ns` is its active time minus its callees' active time, so a coroutine awaiting
+`asyncio.sleep` is not busy meanwhile. The frame running an event loop (`asyncio.run(main())` in
+a module) is the caller of the tasks it runs, on its thread: the union of their spans, suspended
+time included, is subtracted from its self time too, as it was only running them or waiting for
+one to be ready. Threads run concurrently with the frame that started them: not subtracted.
 
 ## Worked example
 

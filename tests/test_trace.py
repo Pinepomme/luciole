@@ -851,6 +851,8 @@ def test_time_suspended_is_not_busy(tmp_path):
     assert parse["total_ns"] >= 0.6e9 and parse["self_ns"] < 0.05e9
     assert 0.09e9 < numbers["self_ns"] < 0.2e9  # its own sleep only
     assert summary["prog:main"]["self_ns"] >= 0.19e9  # the sleeps in its loop
+    # The module only waited in asyncio.run, while main and the gathered tasks ran or slept.
+    assert summary["prog"]["total_ns"] >= 0.5e9 and summary["prog"]["self_ns"] < summary["prog"]["total_ns"] - summary["prog:main"]["total_ns"] + 0.05e9
 
 
 def test_readers_take_traces_without_the_newer_tables_and_columns(tmp_path):
@@ -1049,7 +1051,7 @@ def test_cli_output(tmp_path):
     assert json.loads(cli(path, "summary", "--json"))["by_calls"][0]["node"] == "prog:fib"
 
     calls = cli(path, "calls", "fails")
-    assert calls.startswith("1 calls of prog:fails\n")
+    assert calls.startswith("1 call of prog:fails\n")
     assert "fails(x=1) !! ValueError: bad 1" in calls and "from prog:wraps:7" in calls
     assert "middle !! RuntimeError: wrapped (from #" in cli(path, "calls", "middle").replace("middle()", "middle")
     limited = cli(path, "calls", "prog:fib", "--limit", "2")
@@ -1087,6 +1089,13 @@ def test_luciole_run_says_when_the_trace_cannot_be_written(tmp_path):
     result = subprocess.run([sys.executable, "-m", "luciole", "run", "--trace", "taken/run.sqlite", "prog.py"], cwd=tmp_path, env=clean_env(), capture_output=True, text=True, timeout=60)
     assert result.returncode == 1 and "could not write the trace" in result.stderr
     assert "Traceback" not in result.stderr and "ran" not in result.stdout
+
+
+def test_counts_are_singular_for_one():
+    assert [trace.plural(n, word) for n, word in ((1, "call"), (2, "call"), (0, "exception"), (1, "process"), (3, "process"))] == [
+        "1 call", "2 calls", "0 exceptions", "1 process", "3 processes"]
+    one = {"total": 1, "exceptions": [{"id": 1, "type": "ValueError", "message": "x", "node": "prog:f", "line": 2, "frame": 2, "time_ns": 5, "cause": None, "chain": None, "handled_in": None, "handled_node": None}]}
+    assert trace.render_exceptions(one).startswith("1 exception\n")
 
 
 def test_cli_rejects_what_is_not_a_trace(tmp_path):

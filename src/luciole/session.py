@@ -49,6 +49,36 @@ def hide_recorder_frames(error: BaseException) -> None:
         previous, tb = tb, tb.tb_next
 
 
+def program_traceback(tb):
+    """The traceback from the program's first frame on, as `python prog.py` shows it: without
+    Luciole's own frames (the command line, run()) and runpy's above the program's <module>."""
+    start = tb
+    while start is not None and start.tb_frame.f_code is not run.__code__:
+        start = start.tb_next
+    if start is None:
+        return tb
+    start = start.tb_next
+    while start is not None and start.tb_frame.f_code.co_filename in (runpy.__file__, "<frozen runpy>"):
+        start = start.tb_next
+    return start or tb
+
+
+def show_from_program(error: BaseException) -> None:
+    """Have Python's report of an uncaught exception (sys.excepthook, the program's own if it set
+    one) start the traceback of `error` at the program's first frame. The frames above are added
+    while the exception unwinds out of run(), so they can only be cut when it is printed."""
+    previous = sys.excepthook
+
+    def excepthook(kind, value, tb):
+        sys.excepthook = previous
+        if value is error and tb is not None:
+            tb = program_traceback(tb)
+            value = value.with_traceback(tb)
+        previous(kind, value, tb)
+
+    sys.excepthook = excepthook
+
+
 class Session:
     """The recorder installed in this interpreter: its monitoring callbacks, the pump thread that
     sends a frame every FRAME seconds, and the control thread that reads the view's commands."""
@@ -499,9 +529,11 @@ def run(target: list[str], as_module: bool, root: Path, port: int | None, events
             status = 1
     except KeyboardInterrupt as interrupt:
         hide_recorder_frames(interrupt)
+        show_from_program(interrupt)
         raise
-    except BaseException:
+    except BaseException as error:
         status = 1  # the traceback is printed by Python, as without Luciole
+        show_from_program(error)
         raise
     finally:
         if session.recorder.tracer is not None:

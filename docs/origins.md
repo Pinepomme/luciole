@@ -12,7 +12,7 @@ holds every path a value could take: `flows_to` from the variables an assignment
 value to where the result lands, `writes` from the code that sets a global or an attribute. The
 trace ([trace-format.md](trace-format.md)) says which of those happened, in which call, when, and
 with which values. Walking both backwards is a dynamic backward slice. The code is in
-[`src/luciole/origins.py`](../src/luciole/origins.py).
+[`src/luciole/origins.py`](../src/luciole/origins.py), its text in [`origin_text.py`](../src/luciole/origin_text.py).
 
 ## Asking
 
@@ -57,30 +57,67 @@ with Trace("run.sqlite") as trace:
 ## Reading the answer
 
 A real answer, on a small program recorded at level 1 (`luciole run --trace run.sqlite --level 1
-bank.py`): an account, two deposits that each pay a fee, a global rate changed between them, and a
-second account whose deposit comes last:
+bank.py`): three deposits, the second of an amount that `parse` should have refused, and a check
+that fails at the end.
+
+```python
+def parse(text):
+    value = 0
+    if text.strip().lstrip("-").isdigit():
+        value = int(text)
+    return value
+
+def deposit(balance, amount):
+    fee = 1 if amount < 10 else 0
+    return balance + amount - fee
+
+def main():
+    balance = 0
+    for raw in ["5", "-3", "20"]:
+        balance = deposit(balance, parse(raw))
+    if balance != 24:
+        raise ValueError(f"balance is {balance}")
+```
 
 ```
-$ luciole trace run.sqlite origin main final
-where final in bank:main #3 came from (level 1 trace):
+$ luciole trace run.sqlite origin main balance
+where balance in bank:main #2 came from (level 1 trace):
 
-final = 30.0   main #3, line 48: final = account.report()   (its only assignment)
-  <- returned by Account.report #16: 30.0   line 26: return shown
-    <- shown = 30.0   Account.report #16, line 25: shown = self.balance   (its only assignment)
-      <- Account.balance set by Account.deposit #10, line 22: self.balance += amount - fee   (on the same object)
-        <- amount = 0   argument of Account.deposit #10, passed by main #3, line 45: account.deposit(parse("-3"))
-          <- returned by parse #9: 0   line 8: return value
-            <- value = 0   parse #9: assigned on lines 5, 7   (assigned on several lines: which one made this value is in its variable history (level 2))
-                 line 5: value = int(text)
-                 line 7: value = 0
-                 to know which: run again with --scope bank:parse, then ask again
-        <- fee = 0.0   Account.deposit #10, line 21: fee = fee_for(amount)   (its only assignment)
-          <- returned by fee_for #11: 0.0   line 12: return amount * RATE
+values on the way:
+  main.balance: 4, 0, 20
+  deposit.return: 4, 0, 20
+  deposit.amount: 5, -3, 20
+  deposit.balance: 0, 4, 0
+  parse.return: -3, 20
+  parse.value: -3, 20
+  parse.text: '-3', '20'
+
+balance = 20   main #2, line 14: balance = deposit(balance, parse(raw))   (assigned on lines 12, 14; inferred: balance was 20 as the exception left #2; line 12 assigns 0; deposit #8, the last call on line 14, returned 20)
+  <- returned by deposit #8: 20   line 9: return balance + amount - fee
+    <- balance = 0   argument of deposit #8, passed by main #2, line 14: balance = deposit(balance, parse(raw))
+      <- balance = 0   main #2, line 14: balance = deposit(balance, parse(raw))   (assigned on lines 12, 14; inferred: balance was 0 when it was passed on; deposit #6, the last call on line 14, returned 0)
+        <- returned by deposit #6: 0   line 9: return balance + amount - fee
+          <- balance = 4   argument of deposit #6, passed by main #2, line 14: balance = deposit(balance, parse(raw))
             ...
-            <- RATE set by setup #8, line 31: RATE = 0.5
-        <- before that: Account.balance set by Account.deposit #6, line 22: self.balance += amount - fee   (on the same object)
-          ...
+                <- balance = 0   argument of deposit #4, passed by main #2, line 14: balance = deposit(balance, parse(raw))
+                     (followed above, with the same value, in #8)
+            ...
+          <- amount = -3   argument of deposit #6, passed by main #2, line 14: balance = deposit(balance, parse(raw))
+            <- returned by parse #5: -3   line 5: return value
+              <- value = -3   parse #5, line 4: value = int(text)   (assigned on lines 2, 4; inferred: #5 returned it: -3; line 2 assigns 0)
+                <- text = '-3'   argument of parse #5, passed by main #2, line 14: balance = deposit(balance, parse(raw))
+                     ... not followed further (depth limit); to go on: origin - text --frame 5
+          <- fee   deposit #6, line 8: fee = 1 if amount < 10 else 0   (its only assignment; its value is not recorded, as level 1 records locals only as an exception left them, or not at all)
+               to record its value: run again with --scope bank:deposit, then ask again
+            <- no variable   (no tracked variable: a literal, an imported name, or library calls)
+    <- amount = 20   argument of deposit #8, passed by main #2, line 14: balance = deposit(balance, parse(raw))
+      ...
 ```
+
+`values on the way` comes first: each variable the walk met, with the values it took in time order
+(a repeat in a row shown once), the ones that took several different values first, 12 at most
+(`values` in JSON: `name`, `node`, `variable`, `values`). The odd value is often the culprit, here
+the `-3` that `parse` let through; the tree below says where each value came from.
 
 Each line is a step, its sources indented below it after `<-`; `#N` are frame ids, as in the other
 `luciole trace` answers. The kinds of steps (`kind` in JSON):
@@ -92,12 +129,16 @@ Each line is a step, its sources indented below it after `<-`; `#N` are frame id
 | `returned_by` | what a call returned, at its return statement | what that return statement read |
 | `global_written_by`, `attribute_written_by` | the last call that set it before then (for `self.x`, on the same object); then any later call that changed it in place (`x.append(...)`) | what the assignment read |
 | `literal` | nothing tracked fed it: a literal, an imported name, library calls | |
-| `needs_level_2` | a local assigned on several lines: the candidates, and the function to put in a scope | |
+| `needs_level_2` | a local assigned on several lines, and nothing in the trace tells which made the value: the candidates left, and the scope to run again with | |
 | `unknown` | why it cannot go further | |
 
 `before that:` marks the value an augmented assignment (`x += y`) started from. `(followed
 above)` marks a step whose sources are already shown elsewhere in the tree: one event is followed
-once, which also keeps recursion from looping.
+once, which also keeps recursion from looping, and so is one variable of one function with one
+value (`(followed above, with the same value, in #8)`), so the branches go to new values first.
+When a value is not recorded (a local at level 1, or in a function outside a level 2 run's
+scope), the note says why, and the answer says once which scope to run again with
+(`to record its value: run again with --scope ...`).
 
 The walk stops after `--depth` steps (8 by default), follows `--branches` sources per step (4),
 and makes 200 steps at most; where it stops, the answer says so, with the question to ask next
@@ -109,8 +150,8 @@ and makes 200 steps at most; where it stops, the answer says so, with the questi
 |---|---|---|---|
 | a parameter: its caller and call line | yes | with its value | with its value, and any reassignment |
 | a value returned by a call | which return statement, when it can be told | with its value | with its value |
-| a local assigned on one line | its line | its line; its value when the line is `x = f(...)`, or `return x` ends the call | its line and value at that moment |
-| a local assigned on several lines | the candidates | the candidates | the line that ran, and the value |
+| a local assigned on one line | its line | its line; its value when the line is `x = f(...)`, `return x` ends the call, or an exception left it | its line and value at that moment |
+| a local assigned on several lines | the candidates | the line, when the values the trace has tell it (below); else the candidates | the line that ran, and the value |
 | a global, an attribute | the last call that set it (on any object) | the same, on the same object for `self.x` | the same (only locals have a history); a module's own assignments are exact when the module is in the scope |
 
 So a run at level 1, the MCP server's default, already follows values across calls; when an
@@ -123,6 +164,14 @@ that calls project code did not run if no such call was made from it; one above 
 call or write, outside a loop around both, did not run; one returning a literal, or a parameter
 never reassigned, did not if that value differs from the result). When several remain, they are
 listed, with the frame's last writes at level 2.
+
+The line among several that assigned a local is inferred the same way, from its value when the
+trace has it: the locals an exception left the frame with (at its end), the call's result when it
+ended with `return x`, or the argument it was passed as is (`f(x)`, at that call). A line
+assigning a literal (or a parameter never reassigned) of another value did not make it; of the
+lines left, the one whose call, the last made on it before then, returned exactly that value did.
+When one line remains, the answer follows it, with a note starting `inferred:` that says how;
+values are compared as their recorded `repr`.
 
 ## Limits
 

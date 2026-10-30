@@ -8,7 +8,7 @@ values. origin() walks both backwards from one variable of one call, a dynamic b
 
     with Trace("run.sqlite") as trace:
         found = origin(trace, build_graph(root), "checkout", "due")
-        print(render_origin(found))
+        print(render_origin(found))  # origin_text.py
 
     due = 12.0   checkout #4, line 34: due = cart.total()
       <- returned by Cart.total #9: 12.0   line 21: return with_tax(base)
@@ -20,7 +20,8 @@ what fed that line. How exact it is depends on the trace's level:
 - level 2 (functions in the run's scope): each write of a local, with its line and value, so the
   line that made a value is known;
 - level 1: arguments and return values, so values that crossed calls are known, and a local
-  assigned on one line only is too; a local assigned on several lines gives the candidates
+  assigned on one line only is too; a local assigned on several lines is placed from its value
+  when the trace has it (an exception's locals, `return x`, `f(x)`), else gives the candidates
   (`needs_level_2`), with what to run to know;
 - level 0: the same paths, without values.
 Globals and attributes are not recorded at all (only locals are): their origin is the last call
@@ -42,13 +43,13 @@ import json
 import re
 import sqlite3
 
+from luciole.origin_text import VALUES, clip, render_origin, short  # render_origin: part of this module's API
 from luciole.slicing import Graph
 from luciole.trace import Trace, in_scope
 
 DEPTH = 8  # steps from the variable asked about
 BRANCHES = 4  # sources followed per step; the others are counted
 MAX_STEPS = 200  # steps in one answer, whatever the depth
-VALUE_WIDTH = 80  # characters of a value shown in text
 SCAN = 2000  # frames read, newest first, looking for a write on one object
 AUGMENTED = r"\s*(\*\*|//|>>|<<|[-+*/%&|^@])="
 # Methods that change a list, dict, set or bytearray in place.
@@ -69,22 +70,27 @@ def origin(trace: Trace, graph: dict | Graph, node: str | None, variable: str, f
     value is the one it had at `time_ns` (nanoseconds since the run started; default: the
     call's end).
 
-    Returns `{"frame", "node", "variable", "var", "time_ns", "level", "scope", "steps"}`, where
+    Returns `{"frame", "node", "variable", "var", "time_ns", "level", "scope", "values", "steps"}`:
+    `values` are the values each variable met took (see Walker.values_on_the_way), and
     `steps` is the tree: each step has `kind`, `variable` (as written in the code), `var` (its
     node id), `frame` and `node` (the call it is about), `line` and `code` (the line that made
     the value), `value` (a snapshot's repr, or None when not recorded), `note`, `children` (what
     fed it), and when the walk stopped there, `cut` ("depth", "steps"), `seen` (followed
-    elsewhere in the tree) or `more` and `not_followed` (sources past the branch limit). Kinds:
-    - `write`: an assignment in the frame (`time_ns` when level 2 saw it); `previous` marks the
-      value an augmented assignment (`x += y`) started from;
+    elsewhere in the tree; `seen_value`, the frame where the same variable with the same value
+    was) or `more` and `not_followed` (sources past the branch limit). A local whose value is not
+    recorded has `rerun` and `rerun_scope`: the scope that would record it. Kinds:
+    - `write`: an assignment in the frame (`time_ns` when level 2 saw it, else `at_ns`, the moment
+      its value is about); `previous` marks the value an augmented assignment (`x += y`) started
+      from;
     - `argument`: a parameter, with `caller` (`frame`, `node`, `line`, `code` of the call);
     - `returned_by`: what a call returned, at its return statement (`candidates` when several
       may have, with `locals`, its last writes, at level 2);
     - `attribute_written_by`, `global_written_by`: the last call that set it before then, and
       `changed_in_place` when a later call changed it in place (`x.append(...)`);
     - `literal`: nothing tracked fed the line;
-    - `needs_level_2`: assigned on several lines (`candidates`): which one made the value is in
-      the variable history of the function `rerun` names;
+    - `needs_level_2`: assigned on several lines (`candidates`, those the trace does not rule
+      out): which one made the value is in the variable history of the function `rerun` names
+      (`rerun_scope`: the scope to run again with);
     - `unknown`, with why in `note`."""
     graph = graph if isinstance(graph, Graph) else Graph(graph)
     if frame is not None:
@@ -115,6 +121,7 @@ def origin(trace: Trace, graph: dict | Graph, node: str | None, variable: str, f
         "time_ns": moment,
         "level": run["level"],
         "scope": run["scope"],
+        "values": walker.values_on_the_way(steps),
         "steps": steps,
     }
 
@@ -142,6 +149,7 @@ class Walker:
         self.run = trace.run()
         self.has_writes = bool(self.run["scope"]) and trace._has_table("writes")
         self.seen: set = set()
+        self.followed: dict[tuple, int] = {}  # (node, var, kind, line, value) followed: in which frame
         self.steps = 0
         self._frames: dict[int, sqlite3.Row] = {}
 
@@ -209,6 +217,12 @@ class Walker:
         if key is not None and key in self.seen:
             step["seen"] = True  # its sources are shown where it was first followed
             return step
+        same = (step["node"], step["var"], step["kind"], step["line"], step["value"]) if step["value"] is not None and step["var"] else None
+        if same in self.followed:
+            # The same variable of the same function with the same value, followed elsewhere (a
+            # recursion, a loop): the branches go to new information first.
+            step["seen"], step["seen_value"] = True, self.followed[same]
+            return step
         if depth >= self.depth:
             step["cut"] = "depth"
             return step
@@ -217,6 +231,8 @@ class Walker:
             return step
         if key is not None:
             self.seen.add(key)
+        if same is not None:
+            self.followed[same] = step["frame"]
         for source in sources[: self.branches]:
             step["children"].append(source())
         if len(sources) > self.branches:
@@ -224,9 +240,10 @@ class Walker:
             step["not_followed"] = [getattr(source, "label", None) or "?" for source in sources[self.branches :]]
         return step
 
-    def explain(self, frame_id: int, var: str, moment: int, depth: int, expected: str | None = None) -> dict:
+    def explain(self, frame_id: int, var: str, moment: int, depth: int, expected: str | None = None, passed: str | None = None) -> dict:
         """The value of `var` as frame `frame_id` saw it at `moment`; `expected` is that value
-        when known from elsewhere (an argument it was passed as)."""
+        when known from elsewhere (an argument it fed), `passed` when it is exactly that (an
+        argument it was passed as, as is: `f(x)`)."""
         row = self.frame(frame_id)
         role = self.graph.role(var)
         owner = self.graph.owner(var)
@@ -238,9 +255,12 @@ class Walker:
             step = self.step("unknown", var, row)
             step["note"] = f"a variable of {owner} (an enclosing function, or code the analysis could not place): not followed"
             return step
-        return self.local(row, var, moment, depth, role == "param", expected)
+        step = self.local(row, var, moment, depth, role == "param", expected, passed)
+        if step["kind"] in ("write", "needs_level_2") and step.get("time_ns") is None:
+            step["at_ns"] = moment  # the moment its value is about (level 2 has the write's own)
+        return step
 
-    def local(self, row: sqlite3.Row, var: str, moment: int, depth: int, param: bool, expected: str | None = None) -> dict:
+    def local(self, row: sqlite3.Row, var: str, moment: int, depth: int, param: bool, expected: str | None = None, passed: str | None = None) -> dict:
         name = var.rpartition("#")[2]
         node = row["node"]
         if self.recorded(node):
@@ -261,13 +281,16 @@ class Walker:
         if param and not lines:
             return self.argument(row, var, depth)
         if len(lines) == 1 and not param:
+            value = value if value is not None else self.value_at_end(row, name, moment)
             step = self.step("write", var, row, lines[0], value)
             sources = self.fed(row, var, lines[0], moment, depth, previous=None, value=value)
-            self.follow(step, depth, ("site", row["id"], var, lines[0]), sources)
+            self.follow(step, depth, ("site", row["id"], var, lines[0], value), sources)
             returned = [child for child in step["children"] if child["kind"] == "returned_by"]
             if value is None and len(returned) == 1 and returned[0]["value"] is not None and self.graph.call_assignment(node, lines[0], name):
                 step["value"] = returned[0]["value"]  # `x = f(...)`: what f returned
-            step["note"] = "its only assignment" + ("" if step["value"] is not None else f"; its value is not recorded at level {self.run['level']}")
+            step["note"] = "its only assignment"
+            if step["value"] is None:
+                self.unrecorded(step, node)
             return step
         if not lines:
             step = self.step("unknown", var, row, value=value)
@@ -279,14 +302,124 @@ class Walker:
                 step = self.argument(row, var, depth)
                 note(step, f"still the value it was passed, though it may be reassigned on line {', '.join(map(str, lines))}")
                 return step
-        step = self.step("needs_level_2", var, row, value=value, rerun=node)
-        ran = {line for line in lines if self.calls_at(row["id"], self.graph.span(node, line), moment)}
-        step["candidates"] = [{"line": line, "code": self.graph.code(node, line), "ran": line in ran} for line in lines]
+        known = f"{name} was {clip(value, 30)} as the exception left #{row['id']}" if value is not None else None
+        if value is None and not param:
+            value = self.value_at_end(row, name, moment)
+            known = f"#{row['id']} returned it: {clip(value, 30)}" if value is not None else None
+        if value is None and passed is not None and not param:
+            value, known = passed, f"{name} was {clip(passed, 30)} when it was passed on"
+        left, reasons = list(lines), []
+        if value is not None and not param:
+            line, left, reasons = self.pick_line(row, var, lines, value, moment)
+            if line is not None:
+                step = self.step("write", var, row, line, value)
+                sources = self.fed(row, var, line, moment, depth, previous=None, value=value)
+                self.follow(step, depth, ("site", row["id"], var, line, value), sources)
+                step["note"] = f"assigned on lines {', '.join(map(str, lines))}; inferred: " + "; ".join([known, *reasons])
+                return step
+        step = self.step("needs_level_2", var, row, value=value, rerun=node, rerun_scope=self.rerun_scope(node))
+        ran = {line for line in left if self.calls_at(row["id"], self.graph.span(node, line), moment)}
+        step["candidates"] = [{"line": line, "code": self.graph.code(node, line), "ran": line in ran} for line in left]
+        history = "in its variable history (level 2)" if self.run["level"] < 2 else f"in its variable history, but {short(node)} is not in this run's scope"
         if not param:
-            step["note"] = "assigned on several lines: which one made this value is in its variable history (level 2)"
+            step["note"] = f"assigned on several lines: which one made this value is {history}" + "".join(f"; {reason}" for reason in reasons)
             return step
-        step["note"] = "reassigned in the function, or still its argument: which, is in its variable history (level 2)"
+        step["note"] = f"reassigned in the function, or still its argument: which, is {history}"
         return self.follow(step, depth, None, [labeled("its argument", lambda: self.argument(row, var, depth + 1))])
+
+    def values_on_the_way(self, top: dict) -> list[dict]:
+        """The values each variable met in the walk took, in time order (repeats in a row merged),
+        the variables that took several different values first: the culprit is often the odd
+        value among them. `[{"name", "node", "variable", "values"}]`, at most VALUES of them."""
+        found: dict[str, dict] = {}
+        pending = [top]
+        while pending:
+            step = pending.pop(0)
+            pending[:0] = step["children"]
+            if step["value"] is None or not step["variable"] or step["frame"] is None:
+                continue
+            row = self.frame(step["frame"])
+            when = step.get("time_ns", step.get("at_ns"))
+            if when is None:
+                when = row["start_ns"] if step["kind"] == "argument" else self.end_of(row)
+            shared = self.graph.role(step["var"]) in ("global", "instance_attr", "class_attr") if step["var"] else False
+            name = step["variable"] if shared else f"{short(step['node'])}.{step['variable']}"
+            entry = found.setdefault(name, {"name": name, "node": None if shared else step["node"], "variable": step["variable"], "events": set()})
+            entry["events"].add((when, step["frame"], step["value"]))
+        entries = []
+        for order, entry in enumerate(found.values()):
+            values: list[str] = []
+            for _, _, value in sorted(entry.pop("events")):
+                if not values or values[-1] != value:
+                    values.append(value)
+            entries.append((-len(set(values)), order, {**entry, "values": values}))
+        return [entry for *_, entry in sorted(entries, key=lambda item: item[:2])[:VALUES]]
+
+    def rerun_scope(self, node: str) -> list[str]:
+        """The scope to run again with, to record `node`'s locals: this run's, and `node`."""
+        scope = list(self.run["scope"] or []) if self.run["level"] >= 2 else []
+        return scope + [node] if node not in scope else scope
+
+    def unrecorded(self, step: dict, node: str) -> None:
+        """Say why a local's value is unknown, and how to record it."""
+        level = self.run["level"]
+        if level == 0:
+            why = "level 0 records no values"
+        elif level >= 2:
+            why = f"{short(node)} is not in this run's scope: its locals are recorded only as an exception left them, or not at all"
+        else:
+            why = "level 1 records locals only as an exception left them, or not at all"
+        note(step, f"its value is not recorded, as {why}")
+        step["rerun"], step["rerun_scope"] = node, self.rerun_scope(node)
+
+    def value_at_end(self, row: sqlite3.Row, name: str, moment: int) -> str | None:
+        """A local's value at the end of frame `row`, when the call returned it (`return name`).
+        The end's moment less 1 counts: the return statement's sources are asked for just before."""
+        if moment < self.end_of(row) - 1 or row["end_kind"] != "return" or row["args"] is None:
+            return None
+        node = row["node"]
+        lines = self.graph.sites("writes", node, f"{node}#return")
+        if not lines:
+            return None
+        result = self.value(row["result"])
+        line, candidates = self.return_line(row, lines, result)
+        for candidate in [line] if line is not None else [found["line"] for found in candidates]:
+            statement = self.graph.statement(node, candidate)
+            if not (isinstance(statement, ast.Return) and isinstance(statement.value, ast.Name) and statement.value.id == name):
+                return None
+        return result
+
+    def pick_line(self, row: sqlite3.Row, var: str, lines: list[int], value: str, moment: int) -> tuple[int | None, list[int], list[str]]:
+        """Which of the lines assigning a local made `value` (its value at `moment`, known from
+        elsewhere), without line events: not one assigning a literal (or a parameter never
+        reassigned) of another value; among those left, the one whose call, the last made on it
+        before then, returned exactly `value`. Returns the line (or None), the lines left, and
+        the reasons."""
+        node, name = row["node"], var.rpartition("#")[2]
+        args = self.args(row)
+        left, matched, reasons = [], [], []
+        for line in lines:
+            statement = self.graph.statement(node, line)
+            assigned = None
+            if isinstance(statement, ast.Assign) and len(statement.targets) == 1 and isinstance(statement.targets[0], ast.Name) and statement.targets[0].id == name:
+                assigned = self.expression_value(node, statement.value, args)
+            elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name) and statement.target.id == name and statement.value is not None:
+                assigned = self.expression_value(node, statement.value, args)
+            if assigned is not None and assigned != value:
+                reasons.append(f"line {line} assigns {clip(assigned, 30)}")
+                continue
+            left.append(line)
+            if self.graph.call_assignment(node, line, name):
+                span = self.graph.span(node, line)
+                callees = {edge["source"].rpartition("#")[0] for edge in self.graph.edges_at("returns", var, span)}
+                last = next((call for call in self.calls_at(row["id"], span, moment) if call["node"] in callees), None)
+                if last is not None and last["end_kind"] == "return" and last["args"] is not None and self.value(last["result"]) == value:
+                    matched.append((line, f"{short(last['node'])} #{last['id']}, the last call on line {line}, returned {clip(value, 30)}"))
+        if len(left) == 1:
+            return left[0], left, reasons + [reason for line, reason in matched if line == left[0]]
+        if len(matched) == 1:
+            return matched[0][0], left, reasons + [matched[0][1]]
+        return None, left, reasons
 
     def argument(self, row: sqlite3.Row, var: str, depth: int) -> dict:
         name = var.rpartition("#")[2]
@@ -309,7 +442,7 @@ class Walker:
                 if call is not None:
                     passed.append(labeled(f"what {short(call['node'])} returned", lambda call=call: self.returned(call, depth + 1)))
             elif self.graph.role(source) in ("global", "instance_attr", "class_attr") or self.graph.owner(source) == caller["node"]:
-                passed.append(labeled(self.graph.label(source), lambda source=source: self.explain(caller["id"], source, row["start_ns"], depth + 1, expected=value)))
+                passed.append(labeled(self.graph.label(source), lambda source=source: self.explain(caller["id"], source, row["start_ns"], depth + 1, expected=value, passed=value if self._passed_as_is(caller["node"], row, source) else None)))
         if caller["node"] == row["node"] and self._read_at(var, row["node"], span):
             # A recursive call, `f(n - 1)`: the graph has no self-loops, so no `passes_arg` from
             # n to itself; n is read on this line, so it likely fed the argument.
@@ -383,6 +516,7 @@ class Walker:
                     child["value"] = value
                     if child["note"] and child["note"].startswith("its only assignment;"):
                         child["note"] = "its only assignment"
+                        child.pop("rerun", None), child.pop("rerun_scope", None)
         return step
 
     def return_line(self, row: sqlite3.Row, lines: list[int], value: str | None) -> tuple[int | None, list[dict]]:
@@ -432,17 +566,21 @@ class Walker:
         statement = self.graph.statement(node, line)
         if not isinstance(statement, ast.Return) or statement.value is None:
             return None
-        expression = statement.value
+        known = self.expression_value(node, statement.value, args)
+        return None if known is None else known == value
+
+    def expression_value(self, node: str, expression: ast.expr, args: dict) -> str | None:
+        """The value of an expression in a call of `node` with `args`, as a snapshot's repr, when
+        the trace tells it without line events: a literal, or a parameter never reassigned."""
         if isinstance(expression, ast.Name):
             var = f"{node}#{expression.id}"
             if self.graph.role(var) != "param" or self.graph.sites("writes", node, var) or not isinstance(args.get(expression.id), int):
                 return None
-            return self.value(args[expression.id]) == value
+            return self.value(args[expression.id])
         try:
-            literal = ast.literal_eval(expression)
+            return repr(ast.literal_eval(expression))
         except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
             return None
-        return repr(literal) == value
 
     def fed(self, row: sqlite3.Row, var: str, line: int, moment: int, depth: int, previous: int | None, value: str | None = None) -> list:
         """What fed `var` at `line` of frame `row`: steps to make, as callables. `previous`, for
@@ -620,6 +758,23 @@ class Walker:
         snapshot = self.args(row).get("self")
         return self.value(snapshot) if isinstance(snapshot, int) else None
 
+    def _passed_as_is(self, node: str, callee: sqlite3.Row, source: str) -> bool:
+        """Whether `source`, a variable of `node`, is read once on the line that called frame
+        `callee`, as an argument of a call of that function's name (`deposit(balance, ...)`): the
+        argument's value is then the variable's."""
+        name, function = source.rpartition("#")[2], callee["node"].rpartition(":")[2].rpartition(".")[2]
+        statement = self.graph.statement(node, callee["line"]) if callee["line"] else None
+        if statement is None:
+            return False
+        reads = [found for found in ast.walk(statement) if isinstance(found, ast.Name) and found.id == name and isinstance(found.ctx, ast.Load)]
+        if len(reads) != 1:
+            return False
+        for call in ast.walk(statement):
+            if isinstance(call, ast.Call) and (getattr(call.func, "id", None) or getattr(call.func, "attr", None)) == function:
+                if any(argument is reads[0] for argument in [*call.args, *(keyword.value for keyword in call.keywords)]):
+                    return True
+        return False
+
     def _read_at(self, var: str, node: str, span: tuple[int, int]) -> bool:
         return any(edge["target"] == node and any(span[0] <= site["line"] <= span[1] for site in edge.get("sites", [])) for edge in self.graph.out.get(("reads", var), []))
 
@@ -632,88 +787,3 @@ class Walker:
         code = self.graph.code(node, line) or ""
         name = re.escape(var.rpartition("#")[2])
         return re.search(rf"\b{name}\s*(\.|\[)", code) is not None
-
-
-# Text
-
-
-def render_origin(found: dict, rerun: str = "cli") -> str:
-    """The answer as a chain to follow: one line per step, its sources indented below it with
-    `<-`. `rerun` says how to ask for level 2 in hints: "cli" (`luciole run --scope`) or "mcp"
-    (the `run` tool's `scope`)."""
-    head = f"where {found['variable']} in {found['node']} #{found['frame']} came from"
-    lines = [head + f" (level {found['level']} trace{'' if found['level'] < 2 else ', scope ' + ', '.join(found['scope'] or [])}):", ""]
-    _render(found["steps"], 0, lines, rerun)
-    return "\n".join(lines)
-
-
-def short(node: str | None) -> str:
-    return node.rsplit(":", 1)[-1] if node else "?"
-
-
-def clip(text: str | None, width: int = VALUE_WIDTH) -> str:
-    if text is None:
-        return "?"
-    return text if len(text) <= width else text[: width - 1] + "…"
-
-
-def _render(step: dict, level: int, lines: list[str], rerun: str) -> None:
-    pad = "  " * level + ("<- " if level else "")
-    kind, var = step["kind"], step["variable"]
-    where = f"{short(step['node'])} #{step['frame']}"
-    at = f", line {step['line']}: {step['code']}" if step["line"] and step["code"] else f", line {step['line']}" if step["line"] else ""
-    value = f" = {clip(step['value'])}" if step["value"] is not None else ""
-    if kind == "write":
-        text = f"{var}{value}   {where}{at}"
-    elif kind == "argument":
-        caller = step.get("caller")
-        text = f"{var}{value}   argument of {where}"
-        if caller:
-            text += f", passed by {short(caller['node'])} #{caller['frame']}, line {caller['line']}" + (f": {caller['code']}" if caller["code"] else "")
-    elif kind == "returned_by":
-        text = f"returned by {where}{': ' + clip(step['value']) if step['value'] is not None else ''}   {at[2:] if at else ''}".rstrip()
-    elif kind in ("attribute_written_by", "global_written_by"):
-        text = f"{var}{value} set by {where}{at}"
-    elif kind == "needs_level_2":
-        candidates = [str(candidate["line"]) for candidate in step["candidates"]]
-        text = f"{var}{value}   {where}: assigned on line{'s' if len(candidates) > 1 else ''} {', '.join(candidates)}"
-    elif kind == "literal":
-        text = "no variable"
-    else:
-        text = f"?{' ' + var if var else ''}   {where}{at}"
-    if step.get("previous"):
-        text = "before that: " + text
-    if step.get("note"):
-        text += f"   ({step['note']})"
-    lines.append(pad + text)
-    inner = "  " * (level + 1) + "   "
-    if step.get("candidates"):
-        for candidate in step["candidates"]:
-            ran = "  (a call on it ran)" if candidate.get("ran") else "  (returns exactly this value)" if candidate.get("same_value") else ""
-            lines.append(f"{inner}line {candidate['line']}: {candidate['code'] or ''}{ran}")
-    changed = step.get("changed_in_place")
-    if changed:
-        where = f", line {changed['line']}: {changed['code']}" if changed["line"] else f", lines {', '.join(map(str, changed['lines']))}"
-        more = f"; {changed['calls']} such calls since it was set" if changed["calls"] > 1 else ""
-        lines.append(f"{inner}then changed in place by {short(changed['node'])} #{changed['frame']}{where}   (its contents are not recorded{more})")
-    if step.get("locals"):
-        lines.append(f"{inner}its last writes: " + ", ".join(f"{found['name']} = {clip(found['value'], 60)} (line {found['line']})" for found in step["locals"]))
-    if kind == "needs_level_2" and step.get("rerun"):
-        how = f'`run` the same command again with scope: ["{step["rerun"]}"]' if rerun == "mcp" else f"run again with --scope {step['rerun']}"
-        lines.append(f"{inner}to know which: {how}, then ask again")
-    if step.get("seen"):
-        lines.append(f"{inner}(followed above)")
-    if step.get("cut"):
-        why = "depth limit" if step["cut"] == "depth" else "step limit"
-        ask = "return" if kind == "returned_by" else step["var"] if kind.endswith("_written_by") else var
-        at = step.get("time_ns") if kind == "write" else None
-        if rerun == "mcp":
-            again = f'`origin` with variable: "{ask}", frame: {step["frame"]}' + (f", at: {at}" if at is not None else "")
-        else:
-            again = f"origin - {ask} --frame {step['frame']}" + (f" --at {at}" if at is not None else "")
-        lines.append(f"{inner}... not followed further ({why}); to go on: {again}")
-    for child in step["children"]:
-        _render(child, level + 1, lines, rerun)
-    if step.get("more"):
-        names = ", ".join(step.get("not_followed", [])[:12])
-        lines.append(f"{inner}... {step['more']} more sources not followed (branch limit){': ' + names if names else ''}")

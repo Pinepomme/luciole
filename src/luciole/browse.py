@@ -18,7 +18,7 @@ import json
 import sys
 from pathlib import Path
 
-from luciole.trace import Trace, TraceError
+from luciole.trace import Trace, TraceError, plural
 
 MAX_FRAMES = 2_000  # frames per request
 MAX_DEPTH = 200  # frames walked up a stack
@@ -213,7 +213,7 @@ def render_children(page: dict) -> str:
     lines = []
     for call in page["calls"]:
         count = f" ×{call['count']}" if call["count"] > 1 else ""
-        below = f"  ({call['calls']} calls below)" if call["calls"] else ""
+        below = f"  ({plural(call['calls'], 'call')} below)" if call["calls"] else ""
         lines.append(f"#{call['frame']} {call['node']}{count}  [{call['end']}]{below}")
     if page["next"] is not None:
         lines.append(f"... more: --after {page['next']}")

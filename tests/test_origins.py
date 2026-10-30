@@ -2,6 +2,7 @@
 graph walked backwards."""
 
 import json
+import re
 import subprocess
 import sys
 import textwrap
@@ -208,7 +209,8 @@ def test_without_level_2_it_lists_the_candidates_and_how_to_know(recorded):
     shown = next(step for step in steps(top) if step["variable"] == "shown")
     assert (shown["value"], shown["note"]) == ("30.0", "its only assignment")  # return shown: what report() returned
     label = ask(path, root, "main", "label")["steps"]
-    assert (label["kind"], label["value"], label["note"]) == ("write", None, "its only assignment; its value is not recorded at level 1")
+    assert (label["kind"], label["value"], label["note"]) == ("write", None, "its only assignment; its value is not recorded, as level 1 records locals only as an exception left them, or not at all")
+    assert label["rerun_scope"] == ["prog:main"] and "to record its value: run again with --scope prog:main, then ask again" in render_origin(ask(path, root, "main", "label"))
     assert label["children"][0]["variable"] == "final" and label["children"][0]["value"] == "30.0"
 
 
@@ -281,14 +283,91 @@ def test_the_mcp_tool(tmp_path):
         client.ok("run", command=f"{PYTHON} prog.py")
         text = client.ok("origin", function="main", variable="final")
         assert text.startswith("where final in prog:main #") and "Account.balance set by Account.deposit #" in text
-        text = client.ok("origin", function="parse", variable="value")
+        negative = re.search(r"#(\d+) parse\(text='-3'\)", client.ok("calls", function="parse")).group(1)
+        text = client.ok("origin", variable="value", frame=int(negative))
         assert 'to know which: `run` the same command again with scope: ["prog:parse"]' in text
         client.ok("run", command=f"{PYTHON} prog.py", scope="parse")
         text = client.ok("origin", function="parse", variable="value")
-        assert text.splitlines()[2].startswith("value = 8   parse #")
+        assert text.split("\n\n")[2].startswith("value = 8   parse #")  # after the values on the way
         text, error = client.tool("origin", function="nope", variable="x")
         assert error and "no calls of nope" in text and "`find`" in text
         text, error = client.tool("origin", variable="x")
         assert error and "missing argument: function (or frame)" in text
     finally:
         client.close()
+
+
+# The user's case: a negative amount slips through parse, and the balance ends wrong.
+DEPOSITS = textwrap.dedent("""\
+    def parse(text):
+        value = 0
+        if text.strip().lstrip("-").isdigit():
+            value = int(text)
+        return value
+
+    def deposit(balance, amount):
+        fee = 1 if amount < 10 else 0
+        return balance + amount - fee
+
+    def main():
+        balance = 0
+        for raw in ["5", "-3", "20"]:
+            balance = deposit(balance, parse(raw))
+        if balance != 24:
+            raise ValueError(f"balance is {balance}")
+
+    main()
+""")
+
+
+@pytest.fixture(scope="module")
+def deposits_recorded(tmp_path_factory):
+    """DEPOSITS recorded at level 1, and at level 2 with parse and main in the scope."""
+    found = {}
+    for level, args in ((1, ["prog.py"]), (2, ["--scope", "parse,main", "prog.py"])):
+        root = tmp_path_factory.mktemp(f"deposits{level}")
+        (root / "prog.py").write_text(DEPOSITS)
+        result, path = traced(root, None, *args, level=level, env={"LUCIOLE_HOME": str(tmp_path_factory.mktemp("luciole-home"))})
+        assert "ValueError: balance is 20" in result.stderr
+        found[level] = (path, root)
+    return found
+
+
+def test_the_line_is_inferred_from_known_values_at_level_1(deposits_recorded):
+    path, root = deposits_recorded[1]
+    # main's failure locals have balance = 20; line 12 assigns 0, and deposit's last call on
+    # line 14 returned exactly 20.
+    found = ask(path, root, "main", "balance")
+    top = found["steps"]
+    assert (top["kind"], top["value"], top["line"]) == ("write", "20", 14)
+    assert top["note"].startswith("assigned on lines 12, 14; inferred: balance was 20 as the exception left #")
+    assert "line 12 assigns 0" in top["note"] and ", the last call on line 14, returned 20" in top["note"]
+    assert (top["children"][0]["kind"], top["children"][0]["value"]) == ("returned_by", "20")
+    # And on back through the loop, from the values passed to deposit: the -3 shows up.
+    assert any(step["kind"] == "argument" and step["variable"] == "amount" and step["value"] == "-3" for step in steps(top))
+    assert {"name": "deposit.amount", "node": "prog:deposit", "variable": "amount", "values": ["5", "-3", "20"]} in found["values"][:4]
+
+    # parse returned 20 with `return value`, its only return: line 2 assigns 0, so line 4 made it.
+    with Trace(path) as trace:
+        last = trace.calls("parse")["calls"][-1]["frame"]
+    top = ask(path, root, None, "value", frame=last)["steps"]
+    assert (top["kind"], top["value"], top["line"], top["code"]) == ("write", "20", 4, "value = int(text)")
+    assert "inferred: #" in top["note"] and "returned it: 20; line 2 assigns 0" in top["note"]
+
+
+def test_level_2_answers_say_what_is_out_of_the_scope(deposits_recorded):
+    path, root = deposits_recorded[2]
+    found = ask(path, root, "main", "balance")
+    top = found["steps"]
+    assert (top["kind"], top["value"], top["line"], top.get("note")) == ("write", "20", 14, None)  # recorded, not inferred
+    assert any(entry["values"] == ["5", "-3", "20"] for entry in found["values"][:4])
+    fee = next(step for step in steps(top) if step["variable"] == "fee")
+    assert "deposit is not in this run's scope: its locals are recorded only as an exception left them, or not at all" in fee["note"]
+    assert fee["rerun_scope"] == ["parse", "main", "prog:deposit"]
+    text = render_origin(found)
+    assert text.count("to record its value: run again with --scope parse,main,prog:deposit, then ask again") == 1
+    assert text.splitlines()[2] == "values on the way:" and "-3" in "\n".join(text.splitlines()[3:7])
+    # The same variable with the same value is not followed twice: the branches go to new values.
+    again = [step for step in steps(top) if step.get("seen_value")]
+    assert again and all(step["value"] == "0" and step["variable"] == "balance" for step in again)
+    assert "(followed above, with the same value, in #" in text

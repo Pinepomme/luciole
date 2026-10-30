@@ -47,6 +47,10 @@
   and given values by the trace. At level 1 values that crossed calls are known; a local
   assigned on several lines needs level 2 (the answer says which function to scope). Bounded in
   depth and branches, never loops. See `docs/origins.md`, including its limits.
+  Answers start with the values each variable took on the way (`deposit.amount: 5, -3, 20`);
+  at level 1, a local assigned on several lines is placed from the values the trace has (an
+  exception's locals, a `return x`, an argument passed as is) when they tell which line made it;
+  an unrecorded value says why, and which `--scope` would record it.
 - Variable history (trace level 2): `luciole run --trace FILE --scope cart:checkout,Cart.*`
   records every assignment to the local variables of the functions named (node ids or their
   ends, `*` as a wildcard): rebinding, and changes to lists, dicts, sets and bytearrays, each with
@@ -60,6 +64,10 @@
   busy: frames record it (`suspended_ns`), and `luciole trace FILE summary` shows each function's
   active time, its self time being its active time minus its callees'. In `examples/workers.py`,
   `download` (which awaits `asyncio.sleep`) went from 3.6 s of self time to under a millisecond.
+  The frame running an event loop (`asyncio.run(main())` in a module) no longer counts the time
+  its tasks ran or waited as its own: in that example, the module went from 1.2 s to ~20 ms.
+- `luciole run` prints a program's traceback as `python prog.py` would, starting at the
+  program's first frame (no Luciole or runpy frames above it); counts say `1 call`, not `1 calls`.
 
 - Failure snapshots: at level 1, a frame that an exception leaves keeps its local variables as
   they were then (secrets redacted, 50 per frame, 10,000 frames per run). `luciole trace FILE

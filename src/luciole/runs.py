@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 from luciole import protocol
-from luciole.trace import Trace, TraceError
+from luciole.trace import Trace, TraceError, plural
 
 KEEP_RUNS = 50  # run folders kept per project; older ones are deleted
 
@@ -143,5 +143,5 @@ def render_runs(listing: dict) -> str:
         outcome = {"running": "running", "empty": "nothing recorded"}.get(run["state"]) or ("finished" if status is None else f"exit status {status}")
         lines.append(f"{run['id']}  {' '.join(run['command'])}  ({outcome}, by {run['by']})")
         for process in run["processes"]:
-            lines.append(f"    pid {process['pid']}: {process['frames']} calls, {process['exceptions']} exceptions  {process['file']}")
+            lines.append(f"    pid {process['pid']}: {plural(process['frames'], 'call')}, {plural(process['exceptions'], 'exception')}  {process['file']}")
     return "\n".join(lines)
