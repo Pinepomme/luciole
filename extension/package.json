@@ -87,8 +87,8 @@
         "icon": "$(debug-stop)"
       },
       {
-        "command": "luciole.showDebugSession",
-        "title": "Show in Run and Debug",
+        "command": "luciole.showCallStack",
+        "title": "Show Call Stack",
         "category": "Luciole",
         "icon": "$(debug-alt)"
       },
@@ -251,7 +251,7 @@
           "when": "false"
         },
         {
-          "command": "luciole.showDebugSession",
+          "command": "luciole.showCallStack",
           "when": "false"
         },
         {
@@ -283,7 +283,7 @@
           "group": "inline"
         },
         {
-          "command": "luciole.showDebugSession",
+          "command": "luciole.showCallStack",
           "when": "view == luciole.running && viewItem == process.debug",
           "group": "inline"
         },

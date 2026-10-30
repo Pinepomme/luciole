@@ -71,7 +71,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("luciole.findInMap", () => findInMap()),
     vscode.commands.registerCommand("luciole.stopProcess", (process: ProcessItem) => live.stopProcess(process.id)),
-    vscode.commands.registerCommand("luciole.showDebugSession", () => vscode.commands.executeCommand("workbench.debug.action.focusCallStackView")),
+    vscode.commands.registerCommand("luciole.showCallStack", () => vscode.commands.executeCommand("workbench.debug.action.focusCallStackView")),
     vscode.commands.registerCommand("luciole.clearExited", () => live.clearExited()),
     output,
     live,

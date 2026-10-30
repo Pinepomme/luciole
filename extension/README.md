@@ -51,9 +51,9 @@ the functions light up as they run.
   and Run Live commands, and the auto-start switch with its state. **Running**: the programs lit
   up now (Run Live, programs started with auto-start on, tests, their child processes), with their
   command line, pid and state, and the last few that exited; a program in one of VS Code's debug
-  sessions is stopped from the debug toolbar, any other has a Stop button (press it again to kill
-  it). **Map**: an outline of the graph in the panel, packages → modules → classes →
-  functions, with how many functions each holds and which are running. Click an item and the
+  sessions has a button to the Call Stack and is stopped from the debug toolbar, any other has a
+  Stop button (press it again to kill it). **Map**: an outline of the graph in the panel,
+  packages → modules → classes → functions, with how many functions each holds and which are running. Click an item and the
   view flies to it in the brain; a function also has **Go to Source**. The search button
   (**Luciole: Find in Map**) lists every function to fly to; typing in the Map filters what is
   expanded.

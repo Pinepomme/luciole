@@ -6,10 +6,10 @@
   or folder), Run Live, Run Live… and the auto-start switch with its state. **Running**: the
   processes lit up now (Run Live, auto-started programs, tests, child processes) by command line,
   pid and state, plus the last few that exited; Stop for programs outside VS Code's debug
-  sessions, a link to Run and Debug for the ones in them. **Map**: an outline of the graph in the panel (packages, modules,
-  classes, functions: the brain's own regions), with counts and running functions marked;
-  clicking an item flies the brain to it and marks it, functions have Go to Source, and
-  **Luciole: Find in Map** lists every function.
+  sessions, a button to the Call Stack (where their sessions are) for the ones in them. **Map**:
+  an outline of the graph in the panel (packages, modules, classes, functions: the brain's own
+  regions), with counts and running functions marked; clicking an item flies the brain to it and
+  marks it, functions have Go to Source, and **Luciole: Find in Map** lists every function.
 
 - Each file's functions get a muted tint of their own (Apple's system hues, half-way to grey), so you see which module a function is in; activity stays in the accent.
 - A calmer, minimal look: neutral greys at rest and one accent color for activity, the theme's
