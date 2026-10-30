@@ -83,6 +83,19 @@ export class Processes<K> {
     if (!entry.active) {
       return undefined;
     }
+    return { ...frame, ...this.picture() };
+  }
+
+  /**
+   * The stacks and waiting coroutines of the active processes, with no new calls: what the brain
+   * shows once a process is done or gone while others still run (those may send nothing for a
+   * while). Undefined when no process is active.
+   */
+  snapshot(): LiveFrame | undefined {
+    return this.active.length ? this.picture() : undefined;
+  }
+
+  private picture(): { stacks: ThreadStack[]; waiting: Record<string, number> } {
     const active = [...this.entries.values()].filter((e) => e.active);
     const stacks = active.flatMap((e) =>
       active.length > 1 ? e.stacks.map(({ thread, stack }) => ({ thread: `${processLabel(e.info)} · ${thread}`, stack })) : e.stacks,
@@ -93,7 +106,7 @@ export class Processes<K> {
         waiting[id] = (waiting[id] ?? 0) + count;
       }
     }
-    return { ...frame, stacks, waiting };
+    return { stacks, waiting };
   }
 }
 
