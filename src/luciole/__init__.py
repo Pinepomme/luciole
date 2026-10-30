@@ -27,13 +27,13 @@ def start(
     Returns False, and records nothing, when nothing would see the events: no view listens on
     `port` and there is neither an `events` file nor a `trace`, or Python is older than 3.12.
     """
-    from luciole import recorder
+    from luciole import session
 
-    return recorder.start(root, port, events, trace=trace, level=level)
+    return session.start(root, port, events, trace=trace, level=level)
 
 
 def stop() -> None:
     """Stop recording this process (the view shows the run as finished)."""
-    recorder = sys.modules.get("luciole.recorder")
-    if recorder is not None:
-        recorder.stop()
+    session = sys.modules.get("luciole.session")
+    if session is not None:
+        session.stop()

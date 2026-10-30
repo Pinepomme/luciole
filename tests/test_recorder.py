@@ -267,7 +267,7 @@ def test_ctrl_c_stops_the_program_and_its_traceback_ends_in_project_code(tmp_pat
     traceback = stderr.strip().splitlines()
     assert traceback[-1] == "KeyboardInterrupt"
     assert "busy.py" in [line for line in traceback if line.lstrip().startswith("File ")][-1]
-    assert "recorder.py" not in stderr.split("busy.py", 1)[1]
+    assert "recorder.py" not in stderr.split("busy.py", 1)[1] and "session.py" not in stderr.split("busy.py", 1)[1]
     assert json.loads(events.read_text().splitlines()[-1]) == {"done": True}
 
 
@@ -296,7 +296,7 @@ def test_the_hello_comes_before_the_first_frame(tmp_path):
     # sends frames, must not run before it is written.
     (tmp_path / "prog.py").write_text(textwrap.dedent("""
         import socket, threading
-        from luciole import protocol, recorder
+        from luciole import protocol, recorder, session
 
         pumped = threading.Event()
 
@@ -310,14 +310,14 @@ def test_the_hello_comes_before_the_first_frame(tmp_path):
             pumped.wait(0.5)  # a pump started before the hello sends its frame first
             return hello(*args, **kwargs)
 
-        recorder.Session.pump = pump
+        session.Session.pump = pump
         protocol.hello = slow_hello
         server = socket.create_server(("127.0.0.1", 0))
         connection = socket.create_connection(server.getsockname())
         engine, _ = server.accept()
         engine.sendall(b'{"welcome": {"protocol": %d}}\\n' % protocol.PROTOCOL)  # start() waits for it
-        recorder.start(root=".", connection=connection)
-        recorder.stop()
+        session.start(root=".", connection=connection)
+        session.stop()
         print(engine.makefile().readline())
     """))
     env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
@@ -335,14 +335,14 @@ def test_a_process_ending_at_once_still_delivers_its_calls(tmp_path):
     # so only start() can read the welcome.
     (tmp_path / "prog.py").write_text(textwrap.dedent("""
         import os, signal, sys, time
-        from luciole import recorder
+        from luciole import session
 
-        recorder.Session.control = lambda self: None
+        session.Session.control = lambda self: None
 
         def work():
             pass
 
-        recorder.start(root=".", port=int(sys.argv[1]))
+        session.start(root=".", port=int(sys.argv[1]))
         time.sleep(0.2)  # the welcome has arrived
         work()
         os.kill(os.getpid(), signal.SIGTERM)  # as a pool terminates its workers
@@ -380,13 +380,13 @@ def test_an_engine_slow_to_answer_does_not_hold_the_program(tmp_path):
     # at most, and the control thread still reads the answer when it comes.
     (tmp_path / "prog.py").write_text(textwrap.dedent("""
         import sys, time
-        from luciole import recorder
+        from luciole import session
 
         def work():
             pass
 
         began = time.monotonic()
-        recorder.start(root=".", port=int(sys.argv[1]))
+        session.start(root=".", port=int(sys.argv[1]))
         print(time.monotonic() - began)
         work()
         time.sleep(1.5)  # the late welcome arrives
