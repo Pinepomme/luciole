@@ -75,6 +75,32 @@ export function fileRunKind(file: string, source: string): "test" | "script" | "
   return /^if\s+__name__\s*==\s*(['"])__main__\1\s*:/m.test(source) ? "script" : "module";
 }
 
+/**
+ * The module to run a file as, `python -m pkg.mod`, when it can only run that way: it imports
+ * relatively (`from . import x`), which fails in a file run as a script, and its folder is a
+ * package (`isPackage`: the folder has an `__init__.py`). `root` is the folder the package is
+ * imported from. Undefined otherwise: the file runs as a script.
+ */
+export function packageModule(file: string, source: string, isPackage: (dir: string) => boolean): { module: string; root: string } | undefined {
+  if (!/^\s*from\s+\.+\s*[\w.]*\s+import\b/m.test(source)) {
+    return undefined;
+  }
+  const parts = [path.basename(file, ".py")];
+  let dir = path.dirname(file);
+  while (isPackage(dir) && path.dirname(dir) !== dir) {
+    parts.unshift(path.basename(dir));
+    dir = path.dirname(dir);
+  }
+  if (parts.length === 1) {
+    return undefined; // not in a package: the relative import fails however it runs
+  }
+  if (parts[parts.length - 1] === "__main__") {
+    parts.pop(); // python -m pkg runs pkg/__main__.py
+  }
+  // pkg/__init__.py stays `pkg.__init__`: `python -m pkg` would run pkg/__main__.py instead.
+  return { module: parts.join("."), root: dir };
+}
+
 /** pytest on `tests` (absolute paths), run from `folder` with the paths relative to it. */
 export function pytestRun(name: string, tests: string[], folder: string): RunConfiguration {
   return { name, module: "pytest", args: tests.map((test) => path.relative(folder, test) || test), folder };

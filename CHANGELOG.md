@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- ⚡ Run Live on a file of a package that imports relatively (`from . import x`) runs it as a
+  module (`python -m pkg.mod`), the only way it can run; it stopped at its first relative import.
 - A Luciole sidebar in the activity bar, with three native views. **Actions**: Show Graph (file
   or folder), Run Live, Run Live… and the auto-start switch with its state. **Running**: the
   processes lit up now (Run Live, auto-started programs, tests, child processes) by command line,
