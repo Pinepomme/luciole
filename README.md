@@ -70,7 +70,7 @@ and the plan in [docs/roadmap.md](docs/roadmap.md).
 
 ## Status
 
-Early: version 0.1. It works on real projects of tens of thousands of lines, but large graphs are
+Early: version 0.2. It works on real projects of tens of thousands of lines, but large graphs are
 still dense, and calls through objects whose type the analyzer can't infer show up only at runtime.
 
 ## License

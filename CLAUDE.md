@@ -96,8 +96,8 @@ Direction: Luciole becomes a **debugger on steroids**: tracing functions, going 
 
 1. **Wrap up phase 2** (its map features are done or dropped, see `docs/roadmap.md`):
    - Merged into `dev`: Run Live under VS Code's debugger (#9), the region map (#10), the minimal look (#11), the sidebar (#13), render speed (#22), the call-order layout (#23), the trace store (#19), Run Live without the Python Debugger (#21), package runs (#24), and the fixes #20, #25 (SIGTERM: `end()` sets `ending` before clearing `active`; on macOS `Session.start` reads the engine's welcome itself), #26 (right-click picks where the button went down, nearest function within 8 px), #27. All checked hands-on by the user (2026-10-30).
-   - **Cleanup PR** (see Code health): split `main.ts` (~1,280 lines), `analyzer.py` (~1,090), `recorder.py` (~940); dead code from the removed pause/step UI; docs that drifted.
-   - **Release v0.2** from `dev`.
+   - Cleanup PR merged (#29): `analyzer.py` → `analyzer.py`/`flows.py`/`scopes.py`, `recorder.py` → `recorder.py`/`session.py`, `main.ts` → `main.ts`/`theme.ts`/`objects.ts`/`labels.ts`/`text.ts`; no file past 800 lines.
+   - **Release v0.2.0** (2026-10-30): versions and `CHANGELOG.md` set on `dev`, then `dev` → `main`, tag `v0.2.0`.
    - Dropped: semantic zoom, brightness by importance. Deferred: a DAP proxy for several clients on one live session (agents debug from recordings). Focus and filters move to phase 3, step 6.
    - Small leftovers, fixed when hit: `luciole tests` ignores `sys.path` changes made in `conftest.py`; graphs of 60 functions or fewer show no module names; a label appearing under a still pointer is hoverable only once the mouse moves; one segfault (-11) in `tests/test_autostart.py::test_child_processes_inherit_it` on macOS CI (2026-10-29, not reproduced since); `OVSX_PAT` not set; Node 18 → 20+ for `vsce`.
 2. **Phase 3: history and agents, one track** (detail and efforts in `docs/roadmap.md`): goal, go to the origin of anything (value, call, object, exception), for the user in the view and for Claude through MCP. The static graph has every possible data path; the recorder captures which happened and with which values. Agents debug from a recording, not by stepping: everything they run is recorded at level 1 from the first run, and a failure keeps the locals of every frame on the stack; re-running with level 2 on suspect functions is the exception. Steps: (1) done: trace store; (2) `luciole mcp` over the trace and the graph, `run` at level 1 by default; (3) failure snapshots; (4) scoped variable history (level 2: `sys.monitoring` per-function events), redaction and limits, coroutine suspend/resume (today a coroutine's self time includes its awaits); (5) origin queries (dynamic backward slicing over static edges + trace); (6) VS Code: the call tree in the sidebar, timeline scrubbing, variables over time per function, origin paths on the brain, focus and filters; later, stepping backwards and instruction-level provenance. Then the Claude Code plugin and a planted-bug benchmark.
@@ -126,4 +126,4 @@ Luciole's distinguishing features: variable-level flow plus runtime lighting on 
 
 ## Where to start
 
-Follow "Next steps, in order" above: the cleanup PR, release v0.2, then phase 3 starting with `luciole mcp`.
+Follow "Next steps, in order" above: phase 3, starting with `luciole mcp`.

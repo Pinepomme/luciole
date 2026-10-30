@@ -231,8 +231,7 @@ The codebase must stay easy to change as it grows. Standing rules:
   configurations, tree data, queries) lives in modules with no `vscode` or `three` import, with
   unit tests. `main.ts` and `extension.ts` only wire things up.
 - **Size limits as a signal.** A file past ~800 lines, or a function past ~80, is split at the next
-  feature that touches it, as its own commit. Today: `main.ts` (~1,280 lines), `analyzer.py`
-  (~1,090) and `recorder.py` (~940) are over.
+  feature that touches it, as its own commit.
 - **A cleanup PR after each feature cluster**: dead code, duplicated helpers, names that no longer
   fit, docs that drifted. Reviewed like a feature.
 - **Every PR reviewed** (code review pass plus the hands-on checklist) before it merges.
