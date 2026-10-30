@@ -134,18 +134,26 @@ export interface ProcessItem {
   exited: boolean;
 }
 
-/** The view's items; `debugged` tells processes under VS Code's debugger. */
-export function processItems(list: RunningProcess[], debugged: (process: RunningProcess) => boolean): ProcessItem[] {
+/**
+ * The view's items; `debugged` tells processes under VS Code's debugger, `stopping` the ones sent
+ * a Stop already (the next one kills them).
+ */
+export function processItems(
+  list: RunningProcess[],
+  debugged: (process: RunningProcess) => boolean,
+  stopping: (process: RunningProcess) => boolean = () => false,
+): ProcessItem[] {
   return list.map((process) => {
     const { info, exited } = process;
     const label = commandLine(info.argv);
     const underDebugger = !exited && debugged(process);
-    const state = exited ? "exited" : underDebugger ? "debugging" : "running";
+    const isStopping = !exited && !underDebugger && stopping(process);
+    const state = exited ? "exited" : underDebugger ? "debugging" : isStopping ? "stopping" : "running";
     return {
       id: process.id,
       label,
       description: `pid ${info.pid} · ${state}`,
-      tooltip: `${info.argv.join(" ")}\npid ${info.pid}, ${state}`,
+      tooltip: `${info.argv.join(" ")}\npid ${info.pid}, ${state}${isStopping ? " (Stop again to kill it)" : ""}`,
       action: exited ? "none" : underDebugger ? "debug" : "stop",
       exited,
     };

@@ -55,7 +55,11 @@ export class RunningView implements vscode.TreeDataProvider<ProcessItem>, vscode
   }
 
   getChildren(): ProcessItem[] {
-    return processItems(this.live.running.list, (process) => this.live.isDebugged(process));
+    return processItems(
+      this.live.running.list,
+      (process) => this.live.isDebugged(process),
+      (process) => this.live.isStopping(process),
+    );
   }
 
   getTreeItem(process: ProcessItem): vscode.TreeItem {

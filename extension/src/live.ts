@@ -260,9 +260,15 @@ export class LiveSession implements vscode.Disposable {
       return;
     }
     const signal = this.interrupted.has(id) ? "SIGKILL" : "SIGINT";
-    if (this.signal(pid, signal)) {
+    if (this.signal(pid, signal) && !this.interrupted.has(id)) {
       this.interrupted.add(id);
+      this.changed.fire(); // it reads "stopping" now
     }
+  }
+
+  /** True when `process` was sent SIGINT from the Running view and has not exited yet. */
+  isStopping(process: RunningProcess): boolean {
+    return this.interrupted.has(process.id);
   }
 
   clearExited(): void {

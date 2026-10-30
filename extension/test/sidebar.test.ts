@@ -121,6 +121,10 @@ test("the Running view: lit-up processes first, then the last ones that exited",
     ],
   );
   assert.equal(processItems(list.list, (process) => process.id === 3)[1].action, "debug");
+  // Stopped once: it says so, and keeps its Stop (the next one kills it).
+  const stopping = processItems(list.list, () => false, (process) => process.id === 2)[0];
+  assert.deepEqual([stopping.description, stopping.action], ["pid 102 · stopping", "stop"]);
+  assert.match(stopping.tooltip, /Stop again to kill it/);
   assert.ok(list.clearExited());
   assert.deepEqual(list.list.map((p) => p.id), [2, 3]);
   assert.ok(list.exitAll());
