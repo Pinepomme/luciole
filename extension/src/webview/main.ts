@@ -696,7 +696,10 @@ function animate(now: number): void {
     const isFocused = node.id === focused;
     // A cold neuron whose look depends on nothing that changed is left as it is: most of them.
     const look = (isStopped ? 1 : 0) | (isWaiting ? 2 : 0) | (node === hovered ? 4 : 0) | (hasBreakpoint ? 8 : 0) | (showAll ? 16 : 0) | (isFocused ? 32 : 0);
-    if (node.heat === 0 && node.look === look && !parts.ring?.visible) {
+    // A steady ring (waiting on an await, or the Map's) is only scaled again when the camera moved:
+    // else a coroutine waiting for minutes, or a function left focused, would keep the brain drawing.
+    const steadyRing = (isWaiting || isFocused) && !cameraWasMoving;
+    if (node.heat === 0 && node.look === look && (!parts.ring?.visible || steadyRing)) {
       continue;
     }
     node.look = look;
