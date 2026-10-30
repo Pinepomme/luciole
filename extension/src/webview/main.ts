@@ -13,7 +13,7 @@ import type { FromWebview, LiveFrame, SourceLine, ThreadStack, ToWebview } from 
 import { Brain, breakpointAction, breakpointHint, buildBrain, Neuron, neuronAt, Synapse, SynapseKind, synapseId } from "./brain";
 import { addCall, alongPolyline, partOf, Trace, traceAt } from "./flow";
 import { HIDDEN, HIDDEN_LINE, LineBatch, PICK_SPHERE, SphereBatch } from "./batches";
-import { bundle, labelAnchor, Layout, layoutBrain, NEURON_GAP, neuronRadius, Region, regionMembers, route, Vec3 } from "./layout";
+import { bundle, labelAnchor, Layout, layoutBrain, layoutByCalls, NEURON_GAP, neuronRadius, Region, regionMembers, route, Vec3 } from "./layout";
 
 declare function acquireVsCodeApi(): { postMessage(message: FromWebview): void };
 
@@ -448,7 +448,7 @@ function makeRegionLabels(): void {
   }
   regionLabels.clear();
   const members = layout ? regionMembers(layout) : new Map<string, string[]>();
-  for (const region of layout?.regions.values() ?? []) {
+  for (const region of layout?.byCalls ? [] : (layout?.regions.values() ?? [])) {
     // A region holding the whole brain (a single file) needs no name: it is the brain.
     const whole = region.size === layout!.regions.get("")!.size;
     if (region.kind === "root" || whole || (region.kind === "class" && region.size < 3)) {
@@ -896,7 +896,9 @@ function load(graphData: Graph, newTarget: string): void {
   brain = buildBrain(graphData);
   // Small brains show every name: room for them.
   const gap = brain.neurons.length <= ALWAYS_LABEL ? 28 : NEURON_GAP;
-  layout = layoutBrain(brain, new Map(graphData.nodes.map((node) => [node.id, node])), gap);
+  const graphNodes = new Map(graphData.nodes.map((node) => [node.id, node]));
+  // Small brains read best as rows by call order; a map of regions helps only with many.
+  layout = brain.neurons.length <= ALWAYS_LABEL ? layoutByCalls(brain, graphNodes, gap) : layoutBrain(brain, graphNodes, gap);
   makeRegionLabels();
   const previous = new Map(nodes.map((n) => [n.id, n]));
   nodes = brain.neurons.map((neuron) => {
