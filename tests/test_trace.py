@@ -842,7 +842,8 @@ def test_time_suspended_is_not_busy(tmp_path):
     assert rows(path, "SELECT suspended_ns FROM frames WHERE node = 'prog:main'")[0][0] >= 0.29e9
     assert rows(path, "SELECT COUNT(*) FROM frames WHERE suspended_ns IS NOT NULL AND node NOT IN ('prog:download', 'prog:parse', 'prog:main', 'prog:numbers')") == [(0,)]
     [(numbers_wall, numbers_suspended)] = rows(path, "SELECT end_ns - start_ns, suspended_ns FROM frames WHERE node = 'prog:numbers'")
-    assert numbers_wall >= 0.3e9 and 0.19e9 <= numbers_suspended < 0.3e9
+    assert numbers_wall >= 0.3e9 and numbers_suspended >= 0.19e9
+    assert numbers_wall - numbers_suspended >= 0.09e9  # its own sleep is active, whatever the machine's speed
     with Trace(path) as found:
         summary = {f["node"]: f for f in found.summary()["by_calls"]}
     download, parse, numbers = summary["prog:download"], summary["prog:parse"], summary["prog:numbers"]
