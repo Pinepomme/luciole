@@ -18,6 +18,8 @@ import { RunConfiguration, debugConfiguration, fileRunKind, packageModule, pytes
 import { ActionsView, MapView, RunningView } from "./sidebar";
 import { NO_FILTERS } from "./webview/filters";
 import { BrainFilters } from "./focus";
+import type { OriginPath } from "./origin";
+import { OriginView } from "./originview";
 
 let panel: GraphPanel | undefined;
 let output: vscode.OutputChannel;
@@ -27,6 +29,7 @@ let map: MapView;
 let actions: ActionsView;
 let calls: CallsView;
 let filters: BrainFilters;
+let origins: OriginView;
 
 /** The last run started, to run it again from the panel. */
 const LAST_RUN = "luciole.lastRun";
@@ -85,12 +88,27 @@ export function activate(context: vscode.ExtensionContext): void {
         panel?.replay(file, label, start, end);
       },
       locate: (node) => map.locate(node),
+      whereFrom: (target) => void origins.ask(target),
       log: (line) => output.appendLine(line),
     },
     workspacePython,
     () => analyzerDir(context),
   );
   calls.view = vscode.window.createTreeView("luciole.calls", { treeDataProvider: calls, showCollapseAll: true });
+  origins = new OriginView({
+    traces: calls.traces,
+    runs: () => calls.runs,
+    light: (root, path) => {
+      // The graph shown has the path's functions, else the run's whole folder.
+      if (path && (!panel || (!panel.showsFolder && !path.nodes.every((node) => map.locate(node))))) {
+        showGraph(context, root, false);
+      }
+      panel?.origin(path);
+    },
+    pulse: (node) => panel?.post({ type: "originPulse", node }),
+    rerun: (config, scope) => startRun(context, config, scope),
+    log: (line) => output.appendLine(line),
+  });
   context.subscriptions.push(
     actions,
     running,
@@ -105,6 +123,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("luciole.loadMore", (item: HistoryItem) => calls.loadMore(item)),
     vscode.commands.registerCommand("luciole.showValues", (item: HistoryItem) => calls.showValues(item)),
     vscode.commands.registerCommand("luciole.replay", (item?: HistoryItem) => calls.replay(item)),
+    origins,
+    ...origins.commands(),
     vscode.commands.registerCommand("luciole.focusAround", (target?: MapEntry | HistoryItem) => filters.focusAround(target)),
     vscode.commands.registerCommand("luciole.filters", () => filters.pick()),
     vscode.commands.registerCommand("luciole.clearFilters", () => filters.set(NO_FILTERS)),
@@ -386,8 +406,9 @@ async function pickRun(context: vscode.ExtensionContext): Promise<void> {
 /**
  * Show the brain the run will light up, then start the run under VS Code's Python debugger with
  * the recorder (auto-start), or, without the Python debugger, under `luciole run` in a terminal.
+ * `scope`: the functions whose variables it records line by line (level 2).
  */
-async function startRun(context: vscode.ExtensionContext, config: RunConfiguration): Promise<void> {
+async function startRun(context: vscode.ExtensionContext, config: RunConfiguration, scope?: string): Promise<void> {
   const dir = analyzerDir(context);
   if (!dir) {
     void vscode.window.showErrorMessage("Luciole: the analyzer is missing from the extension.");
@@ -412,7 +433,7 @@ async function startRun(context: vscode.ExtensionContext, config: RunConfigurati
     return;
   }
   // Recorded at level 1 into a run folder (as agents' runs are): the Calls view lists it.
-  const recording = await calls.record(folder, resolved);
+  const recording = await calls.record(folder, resolved, scope);
   const run = recording ? { ...resolved, env: { ...resolved.env, ...recording.env } } : resolved;
   await Promise.all(
     vscode.workspace.textDocuments.filter((d) => d.isDirty && d.languageId === "python" && d.uri.scheme === "file").map((d) => d.save()),
@@ -546,6 +567,16 @@ class GraphPanel {
     this.postWhenLoaded({ type: "focus", node });
   }
 
+  /** Light an origin path on the brain once its graph is shown, or clear it. */
+  origin(path: OriginPath | undefined): void {
+    if (path) {
+      this.panel.reveal(undefined, true);
+      this.postWhenLoaded({ type: "origin", path });
+    } else {
+      this.post({ type: "originClear" });
+    }
+  }
+
   /** Replay the process traced in `file` on the brain, from `start` to `end` (ns). */
   replay(file: string, label: string, start: number, end: number): void {
     this.replayFile = file;
@@ -577,7 +608,6 @@ class GraphPanel {
     return !this.target.endsWith(".py");
   }
 
-  /** True when this panel shows a folder graph that includes `file`. */
   /** `file` relative to the graph's root, as the graph writes it; undefined outside it. */
   private relative(file: string): string | undefined {
     const relative = this.root ? path.relative(this.root, file) : "..";
@@ -655,6 +685,8 @@ class GraphPanel {
       this.replayFile = undefined;
     } else if (message.type === "clearFilters") {
       filters.set(NO_FILTERS);
+    } else if (message.type === "originCleared") {
+      origins.clear(true);
     }
   }
 
@@ -679,6 +711,9 @@ class GraphPanel {
         this.postBreakpoints();
         if (filters.active) {
           this.post({ type: "filters", filters: filters.current });
+        }
+        if (origins.path) {
+          this.post({ type: "origin", path: origins.path }); // the brain is new: light the path again
         }
         this.loaded = true;
         this.pending.splice(0).forEach((pending) => this.post(pending));

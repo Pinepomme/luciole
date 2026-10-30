@@ -17,6 +17,21 @@
   short ones.
 - **Focus Around** dims every function more than N calls away from one (setting
   `luciole.focusDepth`), and **Filters…** hides tests and private helpers; neither adds draw calls.
+- "Where did this value come from?" in VS Code: **Luciole: Where Did This Value Come From?** in
+  the editor's context menu (the name under the cursor, in the newest recorded call of the
+  function around it, or a call picked), **where from?** on every value of **Show Values**, and
+  **Where From?** on calls and values in the Calls view. The new **Origin** view shows the
+  answer as a tree of steps (value, function and call, line and code, notes); clicking a step
+  opens its line and pulses its function. The brain lights the path: its functions stand out,
+  the others are dimmed, the value's moves between functions trace their lines in the accent, and
+  the camera frames it; one line object, so one draw call. A local assigned on several lines
+  offers to run the same command again with that function recorded line by line (level 2). A
+  live run or a replay starting clears the path. Focus and origin dimming is much stronger, in
+  dark and light themes.
+- `luciole trace FILE serve` answers `origin` (with each step's file and the text answer; the
+  static graph is built once per project root), `function_at` (the function at a line of a file)
+  and `last_calls` (a function's calls, newest first); `luciole runs new` takes `--level` and
+  `--scope`.
 - `luciole runs [--root DIR] [--json]` lists a project's recorded runs (`new` and `finish` make
   and end one); `luciole trace FILE children|frame|frames|serve` answer what the views ask: a
   call's children a page at a time, one call, live frames that replay the run, and a query server

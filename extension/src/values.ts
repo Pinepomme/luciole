@@ -43,11 +43,16 @@ export interface ValuesPage {
   problem?: string;
   /** `luciole run --scope …` for this function, to say how to record its variables. */
   scopeHint: string;
+  /** Each value gets a "where from?" link (the Origin view answers). */
+  askOrigin?: boolean;
 }
 
 /** The body of the page (inside the document `valuesHtml` makes). */
-export function valuesBody({ call, history, problem, scopeHint }: ValuesPage): string {
+export function valuesBody({ call, history, problem, scopeHint, askOrigin }: ValuesPage): string {
   const parts: string[] = [];
+  // "where from?" asks about `name` as it was at `at` (ns since the run started; default: the call's end).
+  const from = (name: string, at?: number) =>
+    askOrigin ? ` <a href="#" class="origin" data-origin="${escapeHtml(name)}"${at !== undefined ? ` data-at="${at}"` : ""} title="Where did this value come from?">where from?</a>` : "";
   const name = shortNode(call.node);
   const where = call.caller ? `called by <b>${escapeHtml(shortNode(call.caller.node ?? "?"))}</b> at <a href="#" data-caller="${call.caller.line}">line ${call.caller.line}</a>` : "a root of its thread";
   parts.push(`<h1>${escapeHtml(name)} <span class="dim">#${call.frame}</span></h1>`);
@@ -56,10 +61,10 @@ export function valuesBody({ call, history, problem, scopeHint }: ValuesPage): s
     parts.push(`<p>Recorded at level 0: no values. Run Live records at level 1 (setting <code>luciole.recordHistory</code>).</p>`);
   } else {
     const args = Object.entries(call.args);
-    parts.push(`<h2>Arguments</h2>`, args.length ? table(args.map(([n, v]) => [escapeHtml(n), value(v)])) : `<p class="dim">none</p>`);
+    parts.push(`<h2>Arguments</h2>`, args.length ? table(args.map(([n, v]) => [escapeHtml(n), value(v) + from(n, call.start_ns)])) : `<p class="dim">none</p>`);
   }
   if (call.end === "return" && call.result !== undefined) {
-    parts.push(`<h2>Returned</h2>`, `<p>${value(call.result)}</p>`);
+    parts.push(`<h2>Returned</h2>`, `<p>${value(call.result)}${from("return")}</p>`);
   } else if ((call.end === "raise" || call.end === "unwind") && call.exception) {
     const e = call.exception;
     const how = call.end === "raise" ? "Raised" : "An exception went through it";
@@ -68,7 +73,7 @@ export function valuesBody({ call, history, problem, scopeHint }: ValuesPage): s
     parts.push(`<h2>Ended</h2>`, `<p>${escapeHtml(call.end ?? "still running")}</p>`);
   }
   if (call.locals && Object.keys(call.locals).length) {
-    parts.push(`<h2>Local variables as the exception left them</h2>`, table(Object.entries(call.locals).map(([n, v]) => [escapeHtml(n), value(v)])));
+    parts.push(`<h2>Local variables as the exception left them</h2>`, table(Object.entries(call.locals).map(([n, v]) => [escapeHtml(n), value(v) + from(n)])));
   }
   parts.push(`<h2>Variables over time</h2>`);
   if (problem) {
@@ -84,7 +89,7 @@ export function valuesBody({ call, history, problem, scopeHint }: ValuesPage): s
     } else {
       const start = call.start_ns;
       const rows = writes.map(
-        (w) => `<tr><td>${line(w.line)}</td><th>${escapeHtml(w.name)}</th><td>${value(w.value)}</td><td class="dim">+${durationText(w.time_ns - start)}</td></tr>`,
+        (w) => `<tr><td>${line(w.line)}</td><th>${escapeHtml(w.name)}</th><td>${value(w.value)}${from(w.name, w.time_ns)}</td><td class="dim">+${durationText(w.time_ns - start)}</td></tr>`,
       );
       parts.push(`<table class="history">${rows.join("")}</table>`);
       if (history.total > writes.length) {
@@ -115,6 +120,7 @@ export function valuesHtml(body: string, nonce: string, cspSource: string): stri
     .error { color: var(--vscode-errorForeground); }
     a { color: var(--vscode-textLink-foreground); text-decoration: none; }
     a:hover { text-decoration: underline; }
+    a.origin { margin-left: 8px; font-size: 0.9em; opacity: 0.8; }
   </style>
 </head>
 <body>
@@ -125,7 +131,11 @@ ${body}
     const link = event.target.closest("a");
     if (link) {
       event.preventDefault();
-      vscode.postMessage(link.dataset.caller ? { type: "openCaller", line: Number(link.dataset.caller) } : { type: "open", line: Number(link.dataset.line) });
+      if (link.dataset.origin) {
+        vscode.postMessage({ type: "origin", name: link.dataset.origin, at: link.dataset.at ? Number(link.dataset.at) : undefined });
+      } else {
+        vscode.postMessage(link.dataset.caller ? { type: "openCaller", line: Number(link.dataset.caller) } : { type: "open", line: Number(link.dataset.line) });
+      }
     }
   });
 </script>

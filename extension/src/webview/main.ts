@@ -8,15 +8,17 @@
 import ForceGraph3D from "3d-force-graph";
 import * as THREE from "three";
 import type { Graph } from "../graph";
+import type { OriginPath } from "../origin";
 import type { FromWebview, LiveFrame, SourceLine, ThreadStack, ToWebview } from "../messages";
 import { Brain, breakpointAction, buildBrain, neuronAt, Synapse, SynapseKind, synapseId } from "./brain";
-import { Filters, filtersText, NO_FILTERS, Shade, shades } from "./filters";
+import { Filters, filtersText, NO_FILTERS, originShades, Shade, shades } from "./filters";
 import { addCall, alongPolyline, traceAt } from "./flow";
 import { LineBatch, SphereBatch } from "./batches";
 import { fitCamera, flyToNode } from "./camera";
 import { declutterLabels, label, makeRegionLabels, regionLabels } from "./labels";
-import { bundle, Layout, layoutBrain, layoutByCalls, NEURON_GAP, regionMembers } from "./layout";
-import { baseOpacity, disposeStroke, drawStroke, markOf, NeuronNode, neuronObject, neuronUnder, raysChanged, ringOf, SynapseLink, synapseObject, worldPerPixel } from "./objects";
+import { bundle, homeForce, Layout, layoutBrain, layoutByCalls, NEURON_GAP, regionMembers, Vec3 } from "./layout";
+import { baseOpacity, disposeStroke, drawStroke, markOf, NeuronNode, neuronObject, onRightClick, raysChanged, ringOf, SynapseLink, synapseObject, worldPerPixel } from "./objects";
+import { OriginLight, routeBetween } from "./originlight";
 import { ReplayBar } from "./replay";
 import { neuronTooltip, pathText, synapseTooltip } from "./text";
 import { ACCENT, background, FOCUS, LINE, PRIMARY, RED, SECONDARY } from "./theme";
@@ -32,9 +34,9 @@ const FADE = 0.35;
 /** The ring around a lit function: its width, as a multiple of its sphere's radius, and never narrower on screen than RING_MIN_PX. */
 const RING_SCALE = 2.6;
 const RING_MIN_PX = 12;
-/** Filtered-out neurons fade this far into the background (dimmed: outside the focus; hidden: tests, helpers), their lines to this share of their opacity. */
-const SHADE_FADE = { dim: 0.8, hidden: 0.93 };
-const SHADE_LINES = { dim: 0.2, hidden: 0.03 };
+/** Filtered-out neurons fade this far into the background (dimmed: outside the focus or an origin path; hidden: tests, helpers), their lines to this share of their opacity. */
+const SHADE_FADE = { dim: 0.95, hidden: 0.975 };
+const SHADE_LINES = { dim: 0.06, hidden: 0.02 };
 const BACKGROUND = new THREE.Color(background);
 
 const vscode = acquireVsCodeApi();
@@ -127,7 +129,7 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
   .cooldownTicks(120)
   .d3Force("charge", null)
   .d3Force("center", null)
-  .d3Force("home", homeForce())
+  .d3Force("home", homeForce((count) => (away = count)))
   .onEngineTick(() => {
     spheresMoved = true;
     if (away === 0) {
@@ -158,6 +160,8 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
 graph.scene().add(regionLabels, flows);
 const sphereBatch = new SphereBatch(graph.scene());
 const lineBatch = new LineBatch(graph.scene());
+/** "Where did this value come from?": its path lit on the brain (originlight.ts). */
+const origin = new OriginLight(graph.scene());
 // Soft, even light from above and to the left: matte spheres, gently shaded.
 const sun = new THREE.DirectionalLight(0xffffff, 0.4 * Math.PI);
 sun.position.set(-0.5, 1, 0.8);
@@ -176,36 +180,6 @@ function startEngine(): void {
   graph.cooldownTime(ENGINE_TIME);
 }
 
-/** Pulls each neuron to its place on the map. They start there: this undoes drags and glides refreshes. */
-function homeForce() {
-  let pulled: NeuronNode[] = [];
-  const force = (alpha: number) => {
-    const k = 0.3 * Math.max(alpha, 0.05);
-    away = 0;
-    for (const node of pulled) {
-      const n = node as NeuronNode & { vx: number; vy: number; vz: number };
-      const [dx, dy, dz] = [node.home.x - node.x!, node.home.y - node.y!, node.home.z - node.z!];
-      if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) < 0.05 && Math.abs(n.vx) + Math.abs(n.vy) + Math.abs(n.vz) < 0.05) {
-        // Home: exactly, and still. Pulled closer forever, every neuron would move a little each
-        // tick, and every line would be placed again.
-        node.x = node.home.x;
-        node.y = node.home.y;
-        node.z = node.home.z;
-        n.vx = n.vy = n.vz = 0;
-        continue;
-      }
-      away++;
-      n.vx += dx * k;
-      n.vy += dy * k;
-      n.vz += dz * k;
-    }
-  };
-  force.initialize = (nodes: object[]) => {
-    pulled = nodes as NeuronNode[];
-  };
-  return force;
-}
-
 let fitted = false;
 graph.onEngineStop(() => {
   if (!fitted) {
@@ -218,7 +192,7 @@ graph.onEngineStop(() => {
 /** Which label stays when two overlap on screen: the hovered one, the Map's, where the debugger stopped, what runs. */
 function labelPriority(node: NeuronNode): number {
   const rank =
-    node === hovered ? 6 : node.id === focused ? 5 : node.id === stoppedIn ? 4 : onStack.has(node.id) ? 3 : node.heat > 0.15 || waiting.has(node.id) ? 2 : breakpointNodes.has(node.id) ? 1 : 0;
+    node === hovered ? 6 : node.id === focused ? 5 : node.id === stoppedIn ? 4 : onStack.has(node.id) || origin.members.has(node.id) ? 3 : node.heat > 0.15 || waiting.has(node.id) ? 2 : breakpointNodes.has(node.id) ? 1 : 0;
   return rank * 1000 + node.parts!.radius; // then bigger (more connected) neurons first
 }
 
@@ -263,11 +237,12 @@ function animate(now: number): void {
     // Waiting on an await: a ring and no fill, unless the function is also running or just ran.
     const isWaiting = waiting.has(node.id) && node.heat < 0.5 && !isStopped;
     const hasBreakpoint = breakpointNodes.has(node.id);
-    // What the Map points at gets a ring in the text color, while nothing lights it up.
-    const isFocused = node.id === focused;
+    // What the Map points at (or where an origin was asked) gets a ring in the text color, while nothing lights it up.
+    const isFocused = node.id === focused || node.id === origin.start;
+    const onPath = origin.members.has(node.id);
     const shade = shaded.get(node.id);
     // A cold neuron whose look depends on nothing that changed is left as it is: most of them.
-    const look = (isStopped ? 1 : 0) | (isWaiting ? 2 : 0) | (node === hovered ? 4 : 0) | (hasBreakpoint ? 8 : 0) | (showAll ? 16 : 0) | (isFocused ? 32 : 0) | (shade === "dim" ? 64 : shade ? 128 : 0);
+    const look = (isStopped ? 1 : 0) | (isWaiting ? 2 : 0) | (node === hovered ? 4 : 0) | (hasBreakpoint ? 8 : 0) | (showAll ? 16 : 0) | (isFocused ? 32 : 0) | (shade === "dim" ? 64 : shade ? 128 : 0) | (onPath ? 256 : 0);
     // A steady ring (waiting on an await, or the Map's) is only scaled again when the camera moved:
     // else a coroutine waiting for minutes, or a function left focused, would keep the brain drawing.
     const steadyRing = (isWaiting || isFocused) && !cameraWasMoving;
@@ -304,13 +279,13 @@ function animate(now: number): void {
         ring.updateMatrix();
       }
     }
-    const wantsLabel = (showAll && !shade) || node.heat > 0.15 || isWaiting || isFocused || node === hovered || hasBreakpoint;
+    const wantsLabel = (showAll && !shade) || node.heat > 0.15 || isWaiting || isFocused || onPath || node === hovered || hasBreakpoint;
     if (wantsLabel || parts.label) {
       const text = label(node);
       text.userData.wanted = wantsLabel; // declutterLabels starts from it: a cold neuron's is not set again
       text.visible = wantsLabel;
-      // What runs, waits, stopped or is pointed at is named in the text color, the rest in grey.
-      const color = node.heat > 0.15 || isWaiting || isStopped || isFocused || node === hovered ? PRIMARY : SECONDARY;
+      // What runs, waits, stopped, is pointed at or on an origin path is named in the text color, the rest in grey.
+      const color = node.heat > 0.15 || isWaiting || isStopped || isFocused || onPath || node === hovered ? PRIMARY : SECONDARY;
       if (wantsLabel && text.color !== color) {
         text.color = color;
       }
@@ -366,9 +341,18 @@ function animate(now: number): void {
   sphereBatch.update(nodes, spheresMoved, recolored);
   lineBatch.update(links);
   flow(now / 1000);
+  if (origin.path && spheresMoved) {
+    origin.place(originRoute); // a neuron moved: the path's lines follow
+  }
+  const tracing = origin.draw(now / 1000, (id) => {
+    const node = nodeById.get(id);
+    if (node) {
+      node.heat = 1; // a pulse: it fades as a call's light does
+    }
+  });
   // Nothing moves, fades or flows: stop drawing frames (no GPU or CPU spent on a still brain)
   // until input, a message or a change wakes it.
-  const busy = now < awakeUntil || cameraMoved || spheresMoved || recolored || warm > 0 || warmLinks.size > 0 || flowing.size > 0;
+  const busy = now < awakeUntil || cameraMoved || spheresMoved || recolored || warm > 0 || warmLinks.size > 0 || flowing.size > 0 || tracing;
   spheresMoved = false;
   stillFrames = busy ? 0 : stillFrames + 1;
   if (busy && paused) {
@@ -414,39 +398,15 @@ for (const type of ["pointerdown", "pointermove", "pointerup", "wheel", "keydown
   );
 }
 
-/**
- * Right-click adds or removes a neuron's breakpoints. Handled here, not by 3d-force-graph's
- * onNodeRightClick: that acts on the last hover, which on a big brain can be a slow frame behind
- * the pointer, and drops the click if the mouse moved a single pixel with the button down.
- */
-let rightDown: { x: number; y: number } | undefined;
-const brainElement = document.getElementById("brain")!;
-brainElement.addEventListener("contextmenu", (event) => event.preventDefault());
-brainElement.addEventListener(
-  "pointerdown",
-  (event) => {
-    rightDown = event.button === 2 ? { x: event.clientX, y: event.clientY } : undefined;
-  },
-  { capture: true }, // before the camera controls see it
-);
-brainElement.addEventListener(
-  "pointerup",
-  (event) => {
-    const from = rightDown;
-    rightDown = undefined;
-    if (event.button !== 2 || !from || Math.hypot(event.clientX - from.x, event.clientY - from.y) > 6) {
-      return; // not a right-click, or a pan
-    }
-    const node = neuronUnder(graph, from.x, from.y); // where it was pressed: zoomed out, a neuron is a few pixels wide
-    const action = node && breakpointAction(brain?.neurons ?? [], node.neuron, breakpoints);
-    if (action && "add" in action) {
-      vscode.postMessage({ type: "addBreakpoint", file: node.neuron.node.file, line: action.add });
-    } else if (action) {
-      vscode.postMessage({ type: "removeBreakpoints", file: node.neuron.node.file, lines: action.remove });
-    }
-  },
-  { capture: true },
-);
+/** Right-click adds or removes a neuron's breakpoints. */
+onRightClick(document.getElementById("brain")!, graph, (node) => {
+  const action = breakpointAction(brain?.neurons ?? [], node.neuron, breakpoints);
+  if (action && "add" in action) {
+    vscode.postMessage({ type: "addBreakpoint", file: node.neuron.node.file, line: action.add });
+  } else if (action) {
+    vscode.postMessage({ type: "removeBreakpoints", file: node.neuron.node.file, lines: action.remove });
+  }
+});
 
 /** Draws each traced call: the accent stroke over its line, from the caller to where the sweep is. */
 function flow(seconds: number): void {
@@ -500,7 +460,7 @@ function load(graphData: Graph, newTarget: string): void {
     }
   }
   pathway = new Set();
-  shaded = shades(brain, filters);
+  shaded = shading();
   if (!sameTarget) {
     fitted = false;
     focused = undefined;
@@ -648,12 +608,12 @@ const replay = new ReplayBar({
 /** New focus or filters: neurons and lines are recolored (the look of each shaded one changed), no object added. */
 function applyFilters(next: Filters): void {
   filters = next;
-  shaded = brain ? shades(brain, filters) : new Map();
+  shaded = shading();
   styledLinks = -1; // every line restyled with the next frame
   const text = filtersText(filters, (id) => nodeById.get(id)?.neuron.label);
   clearFiltersButton.hidden = !text;
   clearFiltersButton.title = text ? `Showing ${text}: click to show every function again` : "";
-  setStatus(text ? `${summary()} · ${text}` : summary());
+  setStatus([summary(), text, origin.path && `where ${origin.path.label} came from`].filter(Boolean).join(" · "));
   if (filters.around && nodeById.has(filters.around)) {
     // Ringed as the Map's choice is, and the functions around it framed.
     focused = filters.around;
@@ -662,6 +622,36 @@ function applyFilters(next: Filters): void {
     fit(800, nodes.filter((node) => !shaded.has(node.id)));
   }
   wake();
+}
+
+/** The neurons focus and filters shade; with an origin path shown, every one off the path too. */
+function shading(): Map<string, Shade> {
+  return !brain ? new Map() : origin.path ? originShades(brain, filters, origin.members) : shades(brain, filters);
+}
+
+/** An origin path: its functions stand out, the value's moves trace their lines, the camera frames it. */
+function showOrigin(path: OriginPath): void {
+  replay.stop(); // a run's replay and one value's path do not mix
+  origin.show(path, performance.now() / 1000);
+  origin.place(originRoute);
+  applyFilters(filters); // shades again, and says it in the status line
+  fit(800, path.nodes.flatMap((id) => nodeById.get(id) ?? []));
+}
+
+/** The path is gone: the Origin view cleared it, or a live run or a replay started (then `tell` the view). */
+function clearOrigin(tell: boolean): void {
+  if (origin.path) {
+    origin.clear();
+    applyFilters(filters);
+    if (tell) {
+      vscode.postMessage({ type: "originCleared" });
+    }
+  }
+}
+
+/** The line a value moved along from one function to another (originlight.ts). */
+function originRoute(from: string, to: string): Vec3[] | undefined {
+  return routeBetween(from, to, links, nodeById);
 }
 
 // UI
@@ -744,8 +734,12 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
     showMessage(message.message);
     setStatus("");
   } else if (message.type === "liveStarted") {
+    clearOrigin(true); // a run starting clears an origin path (as a replay does)
     setStatus(`starting ${message.script}…`);
   } else if (message.type === "live") {
+    if (!live) {
+      clearOrigin(true);
+    }
     replay.stop(); // a program runs now: show it, not the past
     onLive(message.frame);
   } else if (message.type === "breakpoints") {
@@ -760,6 +754,7 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
   } else if (message.type === "focusRegion") {
     focusRegion(message.region);
   } else if (message.type === "replayStart") {
+    clearOrigin(true);
     replay.start(message.label, message.start, message.end);
   } else if (message.type === "replayFrames") {
     replay.receive(message.seq, message.frames);
@@ -769,6 +764,12 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
     replay.stop();
   } else if (message.type === "filters") {
     applyFilters(message.filters);
+  } else if (message.type === "origin") {
+    showOrigin(message.path);
+  } else if (message.type === "originPulse") {
+    origin.pulseNode(message.node, performance.now() / 1000);
+  } else if (message.type === "originClear") {
+    clearOrigin(false);
   } else if (message.type === "liveState") {
     const { running, stopping } = message.state;
     stopButton.hidden = !running || message.state.debugged; // the debug toolbar stops a debugged run

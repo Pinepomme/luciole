@@ -53,9 +53,10 @@ export class Traces {
     return JSON.parse(await this.run(["runs", "--root", root, "--json"])) as RunListing;
   }
 
-  /** A new run folder for a Run Live of `command` in `cwd` (`luciole runs new`). */
-  async newRun(root: string, command: string[], cwd: string): Promise<string> {
-    const made = JSON.parse(await this.run(["runs", "new", "--root", root, "--cwd", cwd, "--by", "vscode", "--command", JSON.stringify(command), "--json"])) as { folder: string };
+  /** A new run folder for a Run Live of `command` in `cwd` (`luciole runs new`), at level 2 for `scope`. */
+  async newRun(root: string, command: string[], cwd: string, scope?: string): Promise<string> {
+    const level = scope ? ["--level", "2", "--scope", scope] : [];
+    const made = JSON.parse(await this.run(["runs", "new", "--root", root, "--cwd", cwd, "--by", "vscode", ...level, "--command", JSON.stringify(command), "--json"])) as { folder: string };
     return made.folder;
   }
 

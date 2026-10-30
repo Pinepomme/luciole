@@ -184,6 +184,38 @@ export function worldPerPixel(object: THREE.Object3D, camera: THREE.PerspectiveC
 
 const rightRay = new THREE.Raycaster();
 /**
+ * Right-clicks on a neuron of `element`, picked where the button went down. Not 3d-force-graph's
+ * onNodeRightClick: that acts on the last hover, which on a big brain can be a slow frame behind
+ * the pointer, and drops the click if the mouse moved a single pixel with the button down.
+ */
+export function onRightClick(element: HTMLElement, graph: ForceGraph3DInstance, clicked: (node: NeuronNode) => void): void {
+  let down: { x: number; y: number } | undefined;
+  element.addEventListener("contextmenu", (event) => event.preventDefault());
+  element.addEventListener(
+    "pointerdown",
+    (event) => {
+      down = event.button === 2 ? { x: event.clientX, y: event.clientY } : undefined;
+    },
+    { capture: true }, // before the camera controls see it
+  );
+  element.addEventListener(
+    "pointerup",
+    (event) => {
+      const from = down;
+      down = undefined;
+      if (event.button !== 2 || !from || Math.hypot(event.clientX - from.x, event.clientY - from.y) > 6) {
+        return; // not a right-click, or a pan
+      }
+      const node = neuronUnder(graph, from.x, from.y); // where it was pressed: zoomed out, a neuron is a few pixels wide
+      if (node) {
+        clicked(node);
+      }
+    },
+    { capture: true },
+  );
+}
+
+/**
  * The neuron drawn at a point of the window: its sphere, or its label or dot when shown; else the
  * nearest within a few pixels, as zoomed out on a big brain spheres are smaller than the pointer.
  */

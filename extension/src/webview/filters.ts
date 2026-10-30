@@ -71,6 +71,22 @@ export function shades(brain: Brain, filters: Filters): Map<string, Shade> {
   return result;
 }
 
+/**
+ * With an origin path shown (origin.ts), its functions stand out and every other one is dimmed,
+ * whatever the focus; what the filters hide stays hidden, unless the path goes through it.
+ */
+export function originShades(brain: Brain, filters: Filters, path: Set<string>): Map<string, Shade> {
+  const result = shades(brain, filters);
+  for (const neuron of brain.neurons) {
+    if (path.has(neuron.id)) {
+      result.delete(neuron.id);
+    } else if (!result.has(neuron.id)) {
+      result.set(neuron.id, "dim");
+    }
+  }
+  return result;
+}
+
 /** What the filters do, for the status line: `around Cart.add (1 call) · tests hidden`. */
 export function filtersText(filters: Filters, labelOf: (id: string) => string | undefined): string {
   const parts: string[] = [];
