@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import * as path from "node:path";
-import { debugConfiguration, fileRunKind, pytestRun, ResolvedRun, resolveRun, splitArgs } from "../src/runs";
+import { debugConfiguration, fileRunKind, packageModule, pytestRun, ResolvedRun, resolveRun, splitArgs } from "../src/runs";
 
 const folder = "/work/app";
 
@@ -89,4 +89,20 @@ test("a run's own PYTHONPATH comes after the auto-start folder", () => {
   const config = debugConfiguration(run, { autoStartDir, root: folder, pythonPath: "/ignored" });
   assert.equal(config.env.PYTHONPATH, [autoStartDir, "src"].join(path.delimiter));
   assert.deepEqual([config.name, config.module, config.args], ["Luciole: m", "app.main", ["-v"]]);
+});
+
+test("a package's file that imports relatively runs as a module", () => {
+  // /work/rich/rich is a package (it has an __init__.py), /work/rich is not.
+  const packages = new Set(["/work/rich/rich", "/work/src/app", "/work/src/app/core"]);
+  const isPackage = (dir: string) => packages.has(dir);
+  assert.deepEqual(packageModule("/work/rich/rich/progress.py", "from . import filesize, get_console\n", isPackage), { module: "rich.progress", root: "/work/rich" });
+  assert.deepEqual(packageModule("/work/src/app/core/engine.py", "from ..store import load\n", isPackage), { module: "app.core.engine", root: "/work/src" });
+  assert.deepEqual(packageModule("/work/rich/rich/__main__.py", "from .console import Console\n", isPackage), { module: "rich", root: "/work/rich" });
+  assert.deepEqual(packageModule("/work/rich/rich/__init__.py", "from .console import Console\n", isPackage), { module: "rich.__init__", root: "/work/rich" });
+  // Dotted relative imports.
+  assert.deepEqual(packageModule("/work/rich/rich/progress.py", "from .a.b import c\n", isPackage), { module: "rich.progress", root: "/work/rich" });
+  assert.deepEqual(packageModule("/work/src/app/core/engine.py", "from ..store.db import load\n", isPackage), { module: "app.core.engine", root: "/work/src" });
+  // Absolute imports run fine as a script; a relative import outside a package fails either way.
+  assert.equal(packageModule("/work/rich/rich/progress.py", "import rich\nfrom rich.console import Console\n", isPackage), undefined);
+  assert.equal(packageModule("/work/tools/script.py", "from . import x\n", isPackage), undefined);
 });
