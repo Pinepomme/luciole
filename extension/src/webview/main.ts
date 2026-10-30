@@ -12,7 +12,8 @@ import type { Graph } from "../graph";
 import type { FromWebview, LiveFrame, SourceLine, ThreadStack, ToWebview } from "../messages";
 import { Brain, breakpointAction, breakpointHint, buildBrain, Neuron, neuronAt, Synapse, SynapseKind, synapseId } from "./brain";
 import { addCall, alongPolyline, partOf, Trace, traceAt } from "./flow";
-import { bundle, labelAnchor, Layout, layoutBrain, NEURON_GAP, neuronRadius, Region, regionMembers, route, Vec3 } from "./layout";
+import { HIDDEN, HIDDEN_LINE, LineBatch, PICK_SPHERE, SphereBatch } from "./batches";
+import { bundle, labelAnchor, Layout, layoutBrain, layoutByCalls, NEURON_GAP, neuronRadius, Region, regionMembers, route, Vec3 } from "./layout";
 
 declare function acquireVsCodeApi(): { postMessage(message: FromWebview): void };
 
@@ -26,7 +27,10 @@ interface NeuronNode {
   home: Vec3;
   /** 1 when the function just ran or is running, fading to 0. */
   heat: number;
-  parts?: { material: THREE.MeshLambertMaterial; base: THREE.Color; ring: THREE.Sprite; mark: THREE.Sprite; label?: SpriteText; radius: number };
+  /** What its look last depended on (see animate): a settled neuron is skipped. */
+  look?: number;
+  /** Drawn by the sphere batch, in `color`. */
+  parts?: { group: THREE.Group; color: THREE.Color; base: THREE.Color; ring?: THREE.Sprite; mark?: THREE.Sprite; label?: SpriteText; radius: number };
 }
 
 interface SynapseLink {
@@ -37,7 +41,13 @@ interface SynapseLink {
   heat: number;
   /** Centres of the regions the line bends through (none inside a region: a straight line). */
   via: Vec3[];
+  /** Its own line, never drawn (hover raycasts it); the line batch draws it in `color`, at `opacity`. */
   line?: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
+  points?: number;
+  color?: THREE.Color;
+  opacity?: number;
+  /** Its ends as last placed: an unmoved line is not computed again. */
+  ends?: number[];
   /** Where the line runs, as last drawn: points, their positions along it (0 to 1), its length. */
   path?: { points: Vec3[]; along: number[]; length: number };
   /** The latest call traced along it (live mode), and the accent stroke drawn over it. */
@@ -45,6 +55,8 @@ interface SynapseLink {
   stroke?: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
 }
 
+/** Frames with nothing changing before the brain stops being drawn. */
+const STILL_FRAMES = 20;
 /** Labels are always shown below this many neurons; above, only on lit or hovered ones. */
 const ALWAYS_LABEL = 60;
 /** Seconds for a flash to fade to about a third. */
@@ -157,6 +169,8 @@ let waiting = new Set<string>();
 let pathway = new Set<SynapseLink>();
 /** Synapses with a call being traced on them. */
 const flowing = new Set<SynapseLink>();
+/** Synapses on the call path or fading from it: the only ones animate recolors. */
+const warmLinks = new Set<SynapseLink>();
 let live = false;
 /** VS Code's breakpoints, and the functions that hold one. */
 let breakpoints: SourceLine[] = [];
@@ -167,6 +181,8 @@ let stoppedIn: string | undefined;
 /** What the Map view points at: a neuron, or a region whose name is then shown. */
 let focused: string | undefined;
 let focusedRegion: string | undefined;
+/** The Map's focus changed: region names are placed again (the camera may not move). */
+let refocused = false;
 let callsThisSecond: { t: number; n: number }[] = [];
 
 const graph = new ForceGraph3D(document.getElementById("brain")!)
@@ -174,16 +190,39 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
   .showNavInfo(false)
   .nodeId("id")
   .nodeThreeObject((node: object) => neuronObject(node as NeuronNode))
+  .nodePositionUpdate((object, { x, y, z }) => {
+    // Matrices are updated by hand, when something moves (see neuronObject).
+    const placed = (object.userData.placed ??= [NaN, NaN, NaN]) as number[];
+    if (placed[0] !== x || placed[1] !== y || placed[2] !== z) {
+      placed[0] = x;
+      placed[1] = y;
+      placed[2] = z;
+      object.position.set(x, y, z);
+      object.updateMatrix();
+    }
+    return true;
+  })
   .nodeLabel((node: object) => neuronTooltip((node as NeuronNode).neuron))
   .linkThreeObject((link: object) => synapseObject(link as SynapseLink))
   .linkPositionUpdate((object, { start, end }, link) => {
     const synapseLink = link as SynapseLink;
+    const ends = (synapseLink.ends ??= [NaN, NaN, NaN, NaN, NaN, NaN]);
+    if (synapseLink.path && ends[0] === start.x && ends[1] === start.y && ends[2] === start.z && ends[3] === end.x && ends[4] === end.y && ends[5] === end.z) {
+      return true; // its ends did not move (a drag moves one neuron, not the brain)
+    }
+    ends[0] = start.x;
+    ends[1] = start.y;
+    ends[2] = start.z;
+    ends[3] = end.x;
+    ends[4] = end.y;
+    ends[5] = end.z;
     const points = bundle(start, synapseLink.via, end);
     const positions = (object as THREE.Line).geometry.getAttribute("position") as THREE.BufferAttribute;
     points.forEach((p, i) => positions.setXYZ(i, p.x, p.y, p.z));
     positions.needsUpdate = true;
     (object as THREE.Line).geometry.computeBoundingSphere();
     synapseLink.path = { points, ...alongPolyline(points) };
+    lineBatch.move(synapseLink);
     return true;
   })
   .linkLabel((link: object) => synapseTooltip((link as SynapseLink).synapse))
@@ -191,6 +230,14 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
   .d3Force("charge", null)
   .d3Force("center", null)
   .d3Force("home", homeForce())
+  .onEngineTick(() => {
+    spheresMoved = true;
+    if (away === 0) {
+      // Everything is home: stop now, not after a countdown during which 3d-force-graph would
+      // place every neuron and line again at each tick.
+      graph.cooldownTime(0);
+    }
+  })
   .onNodeHover((node: object | null) => {
     hovered = (node as NeuronNode | null) ?? undefined;
     document.body.style.cursor = node ? "pointer" : "";
@@ -201,11 +248,13 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
       focused = undefined;
     }
     focusedRegion = undefined;
+    refocused = true;
     reveal(node as NeuronNode);
   })
   .onBackgroundClick(() => {
     focused = undefined;
     focusedRegion = undefined;
+    refocused = true;
   })
   .onNodeRightClick((node: object) => {
     const { neuron } = node as NeuronNode;
@@ -218,23 +267,48 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
   });
 
 graph.scene().add(regionLabels, flows);
+const sphereBatch = new SphereBatch(graph.scene());
+const lineBatch = new LineBatch(graph.scene());
 // Soft, even light from above and to the left: matte spheres, gently shaded.
 const sun = new THREE.DirectionalLight(0xffffff, 0.4 * Math.PI);
 sun.position.set(-0.5, 1, 0.8);
 graph.lights([new THREE.AmbientLight(0xffffff, 0.65 * Math.PI), sun]);
-// The map places neurons: links keep their force only to join their ends to the nodes.
-(graph.d3Force("link") as unknown as { strength(k: number): void }).strength(0);
+// The map places neurons: links keep their force only to join their ends to the nodes (when it
+// starts), and do no work at each tick.
+(graph.d3Force("link") as unknown as { strength(k: number): { iterations(n: number): void } }).strength(0).iterations(0);
+
+/** Neurons away from their place at the last tick: none, and the layout engine can stop. */
+let away = 0;
+/** How long the layout engine may run once started, when something is away (3d-force-graph's default). */
+const ENGINE_TIME = 15000;
+
+/** Runs the layout engine again (a drag, a new graph): it stops once every neuron is home. */
+function startEngine(): void {
+  graph.cooldownTime(ENGINE_TIME);
+}
 
 /** Pulls each neuron to its place on the map. They start there: this undoes drags and glides refreshes. */
 function homeForce() {
   let pulled: NeuronNode[] = [];
   const force = (alpha: number) => {
     const k = 0.3 * Math.max(alpha, 0.05);
+    away = 0;
     for (const node of pulled) {
       const n = node as NeuronNode & { vx: number; vy: number; vz: number };
-      n.vx += (node.home.x - node.x!) * k;
-      n.vy += (node.home.y - node.y!) * k;
-      n.vz += (node.home.z - node.z!) * k;
+      const [dx, dy, dz] = [node.home.x - node.x!, node.home.y - node.y!, node.home.z - node.z!];
+      if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) < 0.05 && Math.abs(n.vx) + Math.abs(n.vy) + Math.abs(n.vz) < 0.05) {
+        // Home: exactly, and still. Pulled closer forever, every neuron would move a little each
+        // tick, and every line would be placed again.
+        node.x = node.home.x;
+        node.y = node.home.y;
+        node.z = node.home.z;
+        n.vx = n.vy = n.vz = 0;
+        continue;
+      }
+      away++;
+      n.vx += dx * k;
+      n.vy += dy * k;
+      n.vz += dz * k;
     }
   };
   force.initialize = (nodes: object[]) => {
@@ -254,35 +328,103 @@ graph.onEngineStop(() => {
 
 // Three.js objects
 
+/**
+ * Bumped when the pointer moves, the camera comes to rest or the graph's objects are made (a new
+ * graph, synapses found at runtime): what the pointer is over may have changed.
+ */
+let rayVersion = 0;
+
+/**
+ * Hover raycasts every object of the brain, several times a second even with the pointer still
+ * (say, while a dragged neuron slides back or the camera eases to a stop): a pass over the same
+ * objects answers as the last one did until the pointer moves or the camera comes to rest.
+ *
+ * The patch is global (DragControls and anything else raycasting share it) and keyed on
+ * `objects` and rayVersion only, not on the ray: anything that changes what a ray would hit
+ * without moving the pointer must bump rayVersion. Callers get the same Intersection objects.
+ */
+const intersectObjects = THREE.Raycaster.prototype.intersectObjects;
+let lastPass: { objects: unknown; version: number; hits: THREE.Intersection[] } | undefined;
+THREE.Raycaster.prototype.intersectObjects = function (this: THREE.Raycaster, objects, recursive, intersects = []) {
+  if (!lastPass || lastPass.objects !== objects || lastPass.version !== rayVersion) {
+    lastPass = { objects, version: rayVersion, hits: intersectObjects.call(this, objects, recursive, []) };
+  }
+  intersects.push(...(lastPass.hits as typeof intersects));
+  return intersects;
+} as typeof intersectObjects;
+
 function neuronObject(node: NeuronNode): THREE.Object3D {
+  rayVersion++; // made with a new graph, its old objects gone: a cached hover would name them
   const radius = neuronRadius(node.neuron.degree) * SPHERE_SCALE;
   const base = moduleTint(node.neuron.module);
-  const material = new THREE.MeshLambertMaterial({ color: base.clone() });
+  // three.js would compute every object's matrix at every frame (thousands of them, most still):
+  // a neuron's are updated by hand when it moves (nodePositionUpdate), its ring and label when
+  // they are resized (animate, declutterLabels).
   const group = new THREE.Group();
-  group.add(new THREE.Mesh(new THREE.SphereGeometry(radius, 24, 16), material));
-  // A thin ring around a function that runs (accent), waits on an await (accent, no fill) or
-  // where the debugger stopped (red). Sized each frame: never too small to see.
-  const ring = new THREE.Sprite(new THREE.SpriteMaterial({ map: ringTexture, color: ACCENT, transparent: true, opacity: 0, depthWrite: false }));
-  ring.scale.setScalar(radius * RING_SCALE);
-  group.add(ring);
-  // A red dot on functions that hold a breakpoint, as in the editor's gutter.
-  const mark = new THREE.Sprite(new THREE.SpriteMaterial({ map: dotTexture, color: RED, transparent: true, opacity: 0, depthWrite: false, depthTest: false }));
-  mark.scale.setScalar(Math.max(2, radius * 0.9));
-  mark.position.set(radius * 0.9, radius * 0.9, 0);
-  mark.renderOrder = 2; // over labels
-  group.add(mark);
-  node.parts = { material, base, ring, mark, radius };
+  group.matrixAutoUpdate = false;
+  const hit = new THREE.Mesh(PICK_SPHERE, HIDDEN); // for hover and clicks; the sphere batch draws it
+  hit.scale.setScalar(radius);
+  hit.updateMatrix();
+  hit.matrixAutoUpdate = false;
+  group.add(hit);
+  node.parts = { group, color: base.clone(), base, radius };
   return group;
 }
 
+/** Made the first time a neuron needs them (most never do): fewer objects for three.js to walk. */
+function sprite(parts: NonNullable<NeuronNode["parts"]>, material: THREE.SpriteMaterial): THREE.Sprite {
+  const sprite = new THREE.Sprite(material);
+  sprite.raycast = () => {}; // rings: hover is for the sphere (sprites cost a lot to raycast)
+  sprite.matrixAutoUpdate = false; // updated where it is resized
+  parts.group.add(sprite);
+  return sprite;
+}
+
+/**
+ * Hovered and clicked (as part of its neuron) while shown, never while hidden: the raycaster
+ * ignores `visible`, and most labels and dots are hidden.
+ */
+function pickableWhenShown(sprite: THREE.Sprite): void {
+  sprite.raycast = function (this: THREE.Sprite, raycaster, intersects) {
+    if (this.visible) {
+      THREE.Sprite.prototype.raycast.call(this, raycaster, intersects);
+    }
+  };
+}
+
+/**
+ * A thin ring around a function that runs (accent), waits on an await (accent, no fill) or
+ * where the debugger stopped (red). Sized each frame it shows: never too small to see.
+ */
+function ringOf(parts: NonNullable<NeuronNode["parts"]>): THREE.Sprite {
+  return (parts.ring ??= sprite(parts, new THREE.SpriteMaterial({ map: ringTexture, color: ACCENT, transparent: true, opacity: 0, depthWrite: false })));
+}
+
+/** A red dot on functions that hold a breakpoint, as in the editor's gutter. */
+function markOf(parts: NonNullable<NeuronNode["parts"]>): THREE.Sprite {
+  if (!parts.mark) {
+    const mark = sprite(parts, new THREE.SpriteMaterial({ map: dotTexture, color: RED, transparent: true, depthWrite: false, depthTest: false }));
+    mark.scale.setScalar(Math.max(2, parts.radius * 0.9));
+    mark.position.set(parts.radius * 0.9, parts.radius * 0.9, 0);
+    mark.renderOrder = 2; // over labels
+    mark.updateMatrix();
+    pickableWhenShown(mark); // right-click on the dot removes its breakpoints
+    parts.mark = mark;
+  }
+  return parts.mark;
+}
+
 function synapseObject(link: SynapseLink): THREE.Object3D {
+  rayVersion++; // see neuronObject
   const geometry = new THREE.BufferGeometry();
   link.via = layout ? route(layout, link.synapse.source, link.synapse.target) : [];
   const count = bundle({ x: 0, y: 0, z: 0 }, link.via, { x: 0, y: 0, z: 0 }).length;
   geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(count * 3), 3));
-  // Hairlines that don't hide one another: tracts read by how many lines run together.
-  const material = new THREE.LineBasicMaterial({ color: LINE.clone(), transparent: true, opacity: baseOpacity(link), depthWrite: false });
-  link.line = new THREE.Line(geometry, material);
+  link.points = count;
+  link.color = LINE.clone();
+  link.opacity = baseOpacity(link);
+  link.line = new THREE.Line(geometry, HIDDEN_LINE); // for hover; the line batch draws it
+  link.line.matrixAutoUpdate = false; // its points are where it is
   return link.line;
 }
 
@@ -306,7 +448,7 @@ function makeRegionLabels(): void {
   }
   regionLabels.clear();
   const members = layout ? regionMembers(layout) : new Map<string, string[]>();
-  for (const region of layout?.regions.values() ?? []) {
+  for (const region of layout?.byCalls ? [] : (layout?.regions.values() ?? [])) {
     // A region holding the whole brain (a single file) needs no name: it is the brain.
     const whole = region.size === layout!.regions.get("")!.size;
     if (region.kind === "root" || whole || (region.kind === "class" && region.size < 3)) {
@@ -366,7 +508,9 @@ function label(node: NeuronNode): SpriteText {
     text.material.depthWrite = false;
     text.renderOrder = 1;
     text.userData = { aspect: text.scale.x / text.scale.y };
-    parts.ring.parent!.add(text);
+    pickableWhenShown(text); // a click on a function's name opens it, as on its sphere
+    text.matrixAutoUpdate = false; // updated where it is placed (declutterLabels)
+    parts.group.add(text);
     parts.label = text;
   }
   return parts.label;
@@ -413,14 +557,25 @@ function declutterLabels(): void {
   const shown: { text: SpriteText; priority: number }[] = [];
   for (const node of nodes) {
     const parts = node.parts;
+    if (parts?.label) {
+      // Hidden last time for overlapping another: maybe not any more.
+      parts.label.visible = parts.label.userData.wanted === true;
+    }
     if (parts?.label?.visible) {
       // One height on screen, just above the sphere, its ring and its breakpoint dot.
       const text = parts.label;
       const unit = (Math.max(1, camera.position.distanceTo(center.set(node.x ?? 0, node.y ?? 0, node.z ?? 0))) * fovScale) / height;
       const tall = FUNCTION_LABEL_PX * unit;
       text.scale.set(tall * text.userData.aspect, tall, 1);
-      const top = Math.max(parts.radius, parts.mark.position.y + parts.mark.scale.y / 2, (parts.ring.material as THREE.SpriteMaterial).opacity > 0 ? parts.ring.scale.y / 2 : 0);
+      const top = Math.max(
+        parts.radius,
+        // Room for the breakpoint dot (markOf) whether or not there is one: the name does not jump
+        // when one is added, and stays clear of a close sphere, which looks bigger than its radius.
+        parts.radius * 0.9 + Math.max(2, parts.radius * 0.9) / 2,
+        parts.ring?.visible ? parts.ring.scale.y / 2 : 0,
+      );
       text.position.y = top + 3 * unit + tall / 2;
+      text.updateMatrix();
       shown.push({ text, priority: labelPriority(node) });
     }
   }
@@ -503,38 +658,84 @@ function synapseTooltip(synapse: Synapse): string {
 // Animation: heat fades, materials follow
 
 let last = performance.now();
+/** A neuron moved since the last frame (the layout engine ticked): spheres and labels follow. */
+let spheresMoved = true;
+/** The view was resized: labels keep one height on screen, so they are placed again. */
+let resized = false;
+/** Frames in a row where nothing changed; past STILL_FRAMES, the brain stops being drawn. */
+let stillFrames = 0;
+let paused = false;
+/** Keep drawing until then (a camera flight, input just now). */
+let awakeUntil = 0;
+const lastCamera = new THREE.Matrix4();
+let cameraWasMoving = false;
+let ancestorsStill = false;
+/** How many synapses the lines' opacity was set for. */
+let styledLinks = -1;
+
 function animate(now: number): void {
   const dt = Math.min((now - last) / 1000, 0.1);
   last = now;
+  if (paused) {
+    // Still: whatever changes it (input, a message, a resize) wakes it first.
+    requestAnimationFrame(animate);
+    return;
+  }
   const fade = Math.exp(-dt / FADE);
   const showAll = nodes.length <= ALWAYS_LABEL;
+  let recolored = false;
+  let relabeled = false;
+  let warm = 0;
   for (const node of nodes) {
     const isStopped = node.id === stoppedIn;
-    node.heat = onStack.has(node.id) || isStopped ? 1 : node.heat * fade;
+    node.heat = onStack.has(node.id) || isStopped ? 1 : node.heat * fade < 0.002 ? 0 : node.heat * fade;
     const parts = node.parts;
     if (!parts) {
       continue;
     }
-    (parts.mark.material as THREE.SpriteMaterial).opacity = breakpointNodes.has(node.id) ? 1 : 0;
     // Waiting on an await: a ring and no fill, unless the function is also running or just ran.
     const isWaiting = waiting.has(node.id) && node.heat < 0.5 && !isStopped;
-    const color = isStopped ? RED : ACCENT;
-    parts.material.color.copy(parts.base).lerp(color, node.heat);
-    const ring = parts.ring.material as THREE.SpriteMaterial;
-    ring.color.copy(color);
-    ring.opacity = isWaiting ? 1 : node.heat;
+    const hasBreakpoint = breakpointNodes.has(node.id);
     // What the Map points at gets a ring in the text color, while nothing lights it up.
     const isFocused = node.id === focused;
-    if (isFocused && ring.opacity < 0.5) {
-      ring.color.copy(FOCUS);
-      ring.opacity = 1;
+    // A cold neuron whose look depends on nothing that changed is left as it is: most of them.
+    const look = (isStopped ? 1 : 0) | (isWaiting ? 2 : 0) | (node === hovered ? 4 : 0) | (hasBreakpoint ? 8 : 0) | (showAll ? 16 : 0) | (isFocused ? 32 : 0);
+    // A steady ring (waiting on an await, or the Map's) is only scaled again when the camera moved:
+    // else a coroutine waiting for minutes, or a function left focused, would keep the brain drawing.
+    const steadyRing = (isWaiting || isFocused) && !cameraWasMoving;
+    if (node.heat === 0 && node.look === look && (!parts.ring?.visible || steadyRing)) {
+      continue;
     }
-    if (ring.opacity > 0) {
-      parts.ring.scale.setScalar(Math.max(parts.radius * RING_SCALE, RING_MIN_PX * worldPerPixel(parts.ring)));
+    node.look = look;
+    warm += node.heat > 0 ? 1 : 0;
+    recolored = true;
+    relabeled = true;
+    if (hasBreakpoint || parts.mark) {
+      markOf(parts).visible = hasBreakpoint; // a sprite drawn at opacity 0 still costs a draw call
     }
-    const wantsLabel = showAll || node.heat > 0.15 || isWaiting || isFocused || node === hovered || breakpointNodes.has(node.id);
+    const color = isStopped ? RED : ACCENT;
+    parts.color.copy(parts.base).lerp(color, node.heat);
+    let ringColor = color;
+    let ringOpacity = isWaiting ? 1 : node.heat;
+    if (isFocused && ringOpacity < 0.5) {
+      ringColor = FOCUS;
+      ringOpacity = 1;
+    }
+    if (ringOpacity > 0 || parts.ring) {
+      const ring = ringOf(parts);
+      const material = ring.material as THREE.SpriteMaterial;
+      material.color.copy(ringColor);
+      material.opacity = ringOpacity;
+      ring.visible = ringOpacity > 0;
+      if (ring.visible) {
+        ring.scale.setScalar(Math.max(parts.radius * RING_SCALE, RING_MIN_PX * worldPerPixel(ring)));
+        ring.updateMatrix();
+      }
+    }
+    const wantsLabel = showAll || node.heat > 0.15 || isWaiting || isFocused || node === hovered || hasBreakpoint;
     if (wantsLabel || parts.label) {
       const text = label(node);
+      text.userData.wanted = wantsLabel; // declutterLabels starts from it: a cold neuron's is not set again
       text.visible = wantsLabel;
       // What runs, waits, stopped or is pointed at is named in the text color, the rest in grey.
       const color = node.heat > 0.15 || isWaiting || isStopped || isFocused || node === hovered ? PRIMARY : SECONDARY;
@@ -543,17 +744,94 @@ function animate(now: number): void {
       }
     }
   }
-  declutterLabels();
-  for (const link of links) {
-    // The call path in the accent, like its functions; it eases back to grey once left.
-    link.heat = pathway.has(link) ? 1 : link.heat * fade;
-    if (link.line) {
-      link.line.material.color.copy(LINE).lerp(ACCENT, link.heat);
-      link.line.material.opacity = baseOpacity(link) + (1 - baseOpacity(link)) * link.heat;
+  if (!ancestorsStill) {
+    // The groups holding the neurons (3d-force-graph's, the scene) never move: an object that
+    // updates its matrix makes three.js recompute all the matrices under it, every frame.
+    const holder = nodes.find((node) => node.parts)?.parts!.group.parent;
+    for (let object = holder; object; object = object.parent) {
+      object.updateMatrix();
+      object.matrixAutoUpdate = false;
+      ancestorsStill = true;
     }
   }
+  const camera = graph.camera();
+  // The controls' damping eases the camera to a stop without ever quite stopping: moves too small
+  // to see don't count.
+  const cameraMoved = camera.matrixWorld.elements.some((v, i) => Math.abs(v - lastCamera.elements[i]) > 1e-4 * (1 + Math.abs(v)));
+  if (cameraMoved) {
+    lastCamera.copy(camera.matrixWorld);
+  } else if (cameraWasMoving) {
+    rayVersion++; // the camera came to rest: what is under the pointer now (not during the turn)
+  }
+  cameraWasMoving = cameraMoved;
+  // Placing labels compares them on screen: only when the camera, the view, a neuron, a label or the Map's focus changed.
+  if (cameraMoved || spheresMoved || relabeled || resized || refocused) {
+    resized = false;
+    refocused = false;
+    declutterLabels();
+  }
+  if (links.length !== styledLinks) {
+    // Lines fade as there are more of them (baseOpacity): restyle them all when synapses are added.
+    styledLinks = links.length;
+    for (const link of links) {
+      link.opacity = link.color ? baseOpacity(link) + (1 - baseOpacity(link)) * link.heat : link.opacity;
+    }
+    lineBatch.rewriteAll();
+  }
+  for (const link of warmLinks) {
+    // The call path in the accent, like its functions; it eases back to grey once left.
+    const onPath = pathway.has(link);
+    link.heat = onPath ? 1 : link.heat * fade < 0.002 ? 0 : link.heat * fade;
+    if (link.color) {
+      link.color.copy(LINE).lerp(ACCENT, link.heat);
+      link.opacity = baseOpacity(link) + (1 - baseOpacity(link)) * link.heat;
+      lineBatch.recolor(link);
+    }
+    if (!onPath && link.heat === 0) {
+      warmLinks.delete(link);
+    }
+  }
+  sphereBatch.update(nodes, spheresMoved, recolored);
+  lineBatch.update(links);
   flow(now / 1000);
+  // Nothing moves, fades or flows: stop drawing frames (no GPU or CPU spent on a still brain)
+  // until input, a message or a change wakes it.
+  const busy = now < awakeUntil || cameraMoved || spheresMoved || recolored || warm > 0 || warmLinks.size > 0 || flowing.size > 0;
+  spheresMoved = false;
+  stillFrames = busy ? 0 : stillFrames + 1;
+  if (busy && paused) {
+    paused = false;
+    graph.resumeAnimation();
+  } else if (!busy && !paused && stillFrames > STILL_FRAMES) {
+    paused = true;
+    graph.pauseAnimation();
+  }
   requestAnimationFrame(animate);
+}
+
+/** Draws again for at least `ms` (input, a message, a camera flight). */
+function wake(ms = 500): void {
+  awakeUntil = Math.max(awakeUntil, performance.now() + ms);
+  stillFrames = 0;
+  if (paused) {
+    paused = false;
+    graph.resumeAnimation();
+  }
+}
+
+document.addEventListener("visibilitychange", () => wake()); // shown again: draw it again
+for (const type of ["pointerdown", "pointermove", "pointerup", "wheel", "keydown"]) {
+  document.getElementById("brain")!.addEventListener(
+    type,
+    (event) => {
+      rayVersion++;
+      if (event.type === "pointerdown") {
+        startEngine(); // before a drag starts it
+      }
+      wake();
+    },
+    { capture: true, passive: true },
+  );
 }
 
 const worldPoint = new THREE.Vector3();
@@ -618,7 +896,9 @@ function load(graphData: Graph, newTarget: string): void {
   brain = buildBrain(graphData);
   // Small brains show every name: room for them.
   const gap = brain.neurons.length <= ALWAYS_LABEL ? 28 : NEURON_GAP;
-  layout = layoutBrain(brain, new Map(graphData.nodes.map((node) => [node.id, node])), gap);
+  const graphNodes = new Map(graphData.nodes.map((node) => [node.id, node]));
+  // Small brains read best as rows by call order; a map of regions helps only with many.
+  layout = brain.neurons.length <= ALWAYS_LABEL ? layoutByCalls(brain, graphNodes, gap) : layoutBrain(brain, graphNodes, gap);
   makeRegionLabels();
   const previous = new Map(nodes.map((n) => [n.id, n]));
   nodes = brain.neurons.map((neuron) => {
@@ -631,6 +911,7 @@ function load(graphData: Graph, newTarget: string): void {
   nodes.forEach((n) => nodeById.set(n.id, n));
   flowing.forEach(disposeStroke);
   flowing.clear();
+  warmLinks.clear();
   links = brain.synapses.map((synapse) => ({ id: synapse.id, source: synapse.source, target: synapse.target, synapse, heat: 0, via: [] }));
   callLinks.clear();
   spawnLinks.clear();
@@ -647,12 +928,18 @@ function load(graphData: Graph, newTarget: string): void {
   }
   document.body.dataset.state = "busy";
   placeDebugMarks();
-  graph.graphData({ nodes, links });
+  setGraph();
   messageEl.hidden = nodes.length > 0;
   if (!nodes.length) {
     showMessage(`No Python functions found in ${graphData.root}.`);
   }
   setStatus(summary());
+}
+
+/** Hands nodes and links to 3d-force-graph, which places them (its layout engine) and makes their objects. */
+function setGraph(): void {
+  startEngine();
+  graph.graphData({ nodes, links }); // their objects are made a moment later (neuronObject, synapseObject)
 }
 
 function summary(): string {
@@ -710,6 +997,7 @@ function onLive(frame: LiveFrame): void {
       const link = callLinks.get(`${stack[i - 1]}>${stack[i]}`);
       if (link) {
         pathway.add(link);
+        warmLinks.add(link);
       }
     }
   }
@@ -747,7 +1035,7 @@ function onLive(frame: LiveFrame): void {
   use(frame.links, callLinks, "runtime");
   use(frame.spawns, spawnLinks, "spawn");
   if (added) {
-    graph.graphData({ nodes, links }); // their lines, and their traced calls, appear with the next frame
+    setGraph(); // their lines, and their traced calls, appear with the next frame
   }
   const now = performance.now();
   callsThisSecond = callsThisSecond.filter((c) => now - c.t < 1000);
@@ -790,6 +1078,7 @@ function focusNode(id: string): void {
   if (node) {
     focused = id;
     focusedRegion = undefined;
+    refocused = true;
     flyTo(node);
   }
 }
@@ -801,6 +1090,7 @@ function focusRegion(id: string): void {
   if (shown.length) {
     focused = undefined;
     focusedRegion = id;
+    refocused = true;
     fit(800, shown);
   }
 }
@@ -838,6 +1128,7 @@ function fit(duration: number, subset: NeuronNode[] = nodes): void {
   const halfHeight = Math.max((high[1] - low[1]) / 2, 20) * margin;
   const distance = Math.max(halfWidth / Math.tan(horizontal), halfHeight / Math.tan(vertical)) + (high[2] - low[2]) / 2;
   const position = center.clone().addScaledVector(forward, -distance);
+  wake(duration + 300);
   graph.cameraPosition({ x: position.x, y: position.y, z: position.z }, { x: center.x, y: center.y, z: center.z }, duration);
 }
 
@@ -845,6 +1136,7 @@ function flyTo(node: NeuronNode): void {
   const distance = 80;
   const length = Math.hypot(node.x ?? 0, node.y ?? 0, node.z ?? 0) || 1;
   const ratio = 1 + distance / length;
+  wake(1100);
   graph.cameraPosition(
     { x: (node.x ?? 0) * ratio, y: (node.y ?? 0) * ratio, z: (node.z ?? 0) * ratio },
     { x: node.x ?? 0, y: node.y ?? 0, z: node.z ?? 0 },
@@ -862,6 +1154,8 @@ function showMessage(text: string): void {
 }
 
 function resize(): void {
+  resized = true;
+  wake();
   const element = document.getElementById("brain")!;
   graph.width(element.clientWidth).height(element.clientHeight);
 }
@@ -875,6 +1169,7 @@ document.getElementById("fit")!.addEventListener("click", () => fit(600));
 
 window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
   const message = event.data;
+  wake();
   if (message.type === "loading") {
     setStatus(`Analyzing ${message.target}…`);
   } else if (message.type === "graph") {
@@ -908,6 +1203,16 @@ window.addEventListener("message", (event: MessageEvent<ToWebview>) => {
 });
 
 // Hook for the browser harness in dev/ and for poking around from the webview devtools.
-Object.assign(window, { luciole: { graph, live: onLive, isLive: () => live } });
+Object.assign(window, {
+  luciole: {
+    graph,
+    live: (frame: LiveFrame) => {
+      wake(); // as a message would: a still brain is not drawn
+      onLive(frame);
+    },
+    isLive: () => live,
+    paused: () => paused,
+  },
+});
 
 vscode.postMessage({ type: "ready" });

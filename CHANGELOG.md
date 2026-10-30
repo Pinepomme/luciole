@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Graphs of 60 functions or fewer (whatever the number of files) are laid out in rows by call
+  order: what nothing calls on top, each function above the ones it calls, so a file reads like
+  an outline; there are no region names. Lines between functions of one row arc above it, lines
+  that skip rows bow to the side only to go around a function in their way. Graphs of more than
+  60 functions keep the map of regions.
+- Big graphs turn smoothly, on modest machines too: all spheres are drawn in one batch and all
+  lines in another (on `rich`, 38 draw calls per frame instead of 6,101), each frame only redoes
+  what changed, and a dragged neuron no longer makes the whole brain recompute while it slides
+  back. A still brain is not drawn at all (no GPU or CPU spent) until input, a run or a change
+  wakes it. Looks the same.
 - Without the Python Debugger extension, Run Live still runs (in a terminal, lighting only), and
   the panel now says so, with a button that installs the debugger, until it is installed. This
   replaces a notification that showed once ever.
