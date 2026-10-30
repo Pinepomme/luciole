@@ -193,7 +193,14 @@ const graph = new ForceGraph3D(document.getElementById("brain")!)
     hovered = (node as NeuronNode | null) ?? undefined;
     document.body.style.cursor = node ? "pointer" : "";
   })
-  .onNodeClick((node: object) => reveal(node as NeuronNode))
+  .onNodeClick((node: object) => {
+    // Clicking another neuron moves on from what the Map pointed at.
+    if ((node as NeuronNode).id !== focused) {
+      focused = undefined;
+    }
+    focusedRegion = undefined;
+    reveal(node as NeuronNode);
+  })
   .onBackgroundClick(() => {
     focused = undefined;
     focusedRegion = undefined;
