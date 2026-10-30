@@ -50,6 +50,7 @@ import logging
 import os
 import queue
 import runpy
+import select
 import signal
 import socket
 import sys
@@ -67,6 +68,11 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 FRAME = 0.05  # seconds between two frames
+# Seconds to wait for the engine's answer to the hello, before the program goes on. The engine
+# answers within a millisecond or so, and a loaded CI machine within tens of them; a port that
+# something else now holds (an engine killed without removing its file) may never answer, and
+# every process started with auto-start on would wait this long.
+ANSWER_TIMEOUT = 0.5
 OWN_PACKAGE = Path(__file__).resolve().parent
 ASYNC_FLAGS = inspect.CO_COROUTINE | inspect.CO_ITERABLE_COROUTINE | inspect.CO_ASYNC_GENERATOR
 CALLER_SEARCH = 40  # frames to look through first for the nearest project caller (asyncio adds ~10)
@@ -530,6 +536,7 @@ class Session:
         self.tool: int | None = None
         self.thread_start = threading.Thread.start
         self.origin_depth = 0
+        self.answer = ""  # the engine's answer to the hello, for the control thread
 
     def write(self, frame: dict, targets: list) -> None:
         line = json.dumps(frame, separators=(",", ":")) + "\n"
@@ -557,6 +564,8 @@ class Session:
             # with a hello.
             hello = protocol.hello("recorder", pid=os.getpid(), argv=sys.orig_argv, root=str(recorder.root))
             self.write(hello, self.view_sinks)
+            self.lines = self.connection.makefile(encoding="utf-8")
+            self.answer = self.read_answer()
         events = monitoring.events
         callbacks = {
             events.PY_START: recorder.on_start,
@@ -646,10 +655,25 @@ class Session:
         while not self.stopping.wait(FRAME):
             self.recorder.flush()
 
+    def read_answer(self) -> str:
+        """The engine's welcome (or refusal), read now: a process that ended before its control
+        thread read it would close a socket holding unread data, which resets the connection,
+        and the engine would lose the calls not read yet (all of them, for a short process).
+
+        Waits ANSWER_TIMEOUT at most, with select() rather than a socket timeout: a read that
+        times out leaves the socket's file unreadable for good. With no answer in time, the
+        program goes on and the control thread reads the answer, and any commands, later; only
+        a process ending before then can still lose its calls that way."""
+        try:
+            ready, _, _ = select.select([self.connection], [], [], ANSWER_TIMEOUT)
+            return self.lines.readline() if ready else ""  # the engine sends whole lines at once
+        except (OSError, ValueError):
+            return ""
+
     def control(self) -> None:
         """Commands from the view, one JSON object per line."""
         try:
-            for line in self.connection.makefile(encoding="utf-8"):
+            for line in itertools.chain([self.answer] if self.answer else [], self.lines):
                 try:
                     message = json.loads(line)
                     if "refused" in message:  # an engine of another protocol: record for nobody

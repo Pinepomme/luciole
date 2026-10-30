@@ -4,8 +4,10 @@
  *
  *   node out/dev/screenshot.js [path] [--events FILE [--frames N] [--every MS] [--zoom F]]
  *                              [--breakpoint FILE:LINE] [--stopped FILE:LINE] [--out dir] [--fps]
- *                              [--theme light]
+ *                              [--theme light] [--focus ID] [--without-debugger]
  *
+ * --focus shows what a click in the Map view does: the camera flies to the neuron ID
+ * (`shop:Cart.add`) or the region ID (`mod:shop`, `cls:shop:Cart`, `pkg:src/app`).
  * --theme light uses VS Code's Light Modern colors instead of Dark Modern.
  * --fps also prints how many frames per second the overview draws (and, with --frames, the replay).
  *
@@ -15,6 +17,7 @@
  * how the light moves. --zoom F brings the camera F times closer for these shots.
  * --breakpoint and --stopped (FILE relative to the graph's
  * root) show a breakpoint and the debugger stopped there, as VS Code would send them.
+ * --without-debugger shows a Run Live running in a terminal, the Python debugger not installed.
  *
  * Needs a Chromium: set CHROME_PATH, or have one in the Playwright cache (~/.cache/ms-playwright).
  */
@@ -220,6 +223,20 @@ async function main(): Promise<void> {
     await page.evaluate((at) => window.postMessage({ type: "debugStopped", at }, "*"), stopped);
     await page.waitForTimeout(1200); // the camera flies to the stop
     await shot("3-debugger");
+  }
+
+  // The Map view: fly to a neuron, or to a region (an id starting with pkg:, mod: or cls:).
+  const focus = option("--focus");
+  if (focus) {
+    const message = /^(pkg|mod|cls):/.test(focus) ? { type: "focusRegion", region: focus } : { type: "focus", node: focus };
+    await page.evaluate((message) => window.postMessage(message, "*"), message);
+    await page.waitForTimeout(1200); // the camera flies there
+    await shot("4-focus");
+  }
+
+  if (process.argv.includes("--without-debugger")) {
+    await page.evaluate(() => window.postMessage({ type: "debuggerNotice", show: true }, "*"));
+    await shot("5-without-debugger");
   }
 
   const status = await page.textContent("#status");

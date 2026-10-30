@@ -47,6 +47,16 @@ the functions light up as they run.
   **Luciole: Show Graph (Whole Folder)**.
 - Drag to rotate, scroll to zoom. Hover a neuron or a line to see what it is. Click a neuron to
   jump to its code.
+- **The Luciole sidebar** (its icon in the activity bar) has three views. **Actions**: the graph
+  and Run Live commands, and the auto-start switch with its state. **Running**: the programs lit
+  up now (Run Live, programs started with auto-start on, tests, their child processes), with their
+  command line, pid and state, and the last few that exited; a program in one of VS Code's debug
+  sessions has a button to the Call Stack and is stopped from the debug toolbar, any other has a
+  Stop button (press it again to kill it). **Map**: an outline of the graph in the panel,
+  packages → modules → classes → functions, with how many functions each holds and which are running. Click an item and the
+  view flies to it in the brain; a function also has **Go to Source**. The search button
+  (**Luciole: Find in Map**) lists every function to fly to; typing in the Map filters what is
+  expanded.
 
 The graph refreshes when you save a Python file.
 
@@ -71,5 +81,6 @@ last run. Run configurations go in `settings.json`:
 Python 3.10 or newer for the graph, 3.12 or newer for live mode. Luciole uses the workspace's
 `.venv` if there is one, then `python3` (Run Live: the interpreter chosen in the Python
 extension). Set `luciole.pythonPath` to choose another interpreter. For Run Live under the
-debugger, the Python Debugger extension (`ms-python.debugpy`). Nothing needs installing in your
-project.
+debugger, the Python Debugger extension (`ms-python.debugpy`); without it, Run Live runs in a
+terminal (the brain lights up, no breakpoints or stepping) and the panel offers to install it.
+Nothing needs installing in your project.

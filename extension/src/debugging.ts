@@ -23,6 +23,8 @@ export interface DebugHooks {
   stopped(file: string, line: number): void;
   /** The debugger went on, or the session ended. */
   continued(): void;
+  /** The session runs the process `pid` (the debug adapter's "process" event). */
+  process(session: vscode.DebugSession, pid: number): void;
   /** A line for the Luciole output, to tell why the brain did or did not follow the debugger. */
   log(line: string): void;
 }
@@ -36,6 +38,16 @@ export function pythonDebugSession(): vscode.DebugSession | undefined {
 /** True when the Python debugger (the ms-python.debugpy extension) is installed, for Run Live. */
 export function hasPythonDebugger(): boolean {
   return vscode.extensions.getExtension("ms-python.debugpy") !== undefined;
+}
+
+/** Installs the Python debugger from the Marketplace, for the next Run Live. */
+export async function installPythonDebugger(): Promise<void> {
+  try {
+    await vscode.commands.executeCommand("workbench.extensions.installExtension", "ms-python.debugpy");
+    void vscode.window.showInformationMessage("Luciole: the Python Debugger is installed. The next Run Live runs under it, with breakpoints and stepping.");
+  } catch (error) {
+    void vscode.window.showErrorMessage(`Luciole: could not install the Python Debugger: ${error instanceof Error ? error.message : error}`);
+  }
 }
 
 export function registerDebugging(hooks: DebugHooks): vscode.Disposable[] {
@@ -55,11 +67,13 @@ export function registerDebugging(hooks: DebugHooks): vscode.Disposable[] {
     createDebugAdapterTracker(session) {
       hooks.log(`debugger: following session "${session.name}" (${session.type})`);
       return {
-        onDidSendMessage(message: { type?: string; event?: string; body?: { threadId?: number } }) {
+        onDidSendMessage(message: { type?: string; event?: string; body?: { threadId?: number; systemProcessId?: number } }) {
           if (message.type !== "event") {
             return;
           }
-          if (message.event === "stopped") {
+          if (message.event === "process" && message.body?.systemProcessId !== undefined) {
+            hooks.process(session, message.body.systemProcessId);
+          } else if (message.event === "stopped") {
             void reportStop(session, message.body?.threadId, hooks);
           } else if (message.event === "continued" || message.event === "terminated") {
             hooks.continued();
