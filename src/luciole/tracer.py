@@ -104,6 +104,7 @@ class Tracer:
         self.threads: dict[int, ThreadTrace] = {}  # thread ident -> its trace
         self.all_threads: list[ThreadTrace] = []  # for the writer
         self.suspended: dict[int, list] = {}  # id(Python frame) -> entry, for generators and coroutines
+        self.suspended_fids: dict[str, dict[int, None]] = {}  # node -> ids of its frames in `suspended`, oldest first
         self.arg_names: dict[object, tuple] = {}  # code -> ((name, secret), ...)
         self.exit_status: int | None = None
         self.writer = Writer(self, root)
@@ -151,7 +152,10 @@ class Tracer:
         if task_origin:  # the creator, running or suspended (a coroutine gathering tasks)
             origin = next((entry[FID] for entry in reversed(stack) if entry[NODE] == task_origin), None)
             if origin is None:
-                origin = max((entry[FID] for entry in list(self.suspended.values()) if entry[NODE] == task_origin), default=None)
+                try:
+                    origin = next(reversed(self.suspended_fids.get(task_origin, ())), None)
+                except RuntimeError:  # changed by another thread meanwhile
+                    pass
         elif caller is None and state.origin:  # the thread's first frame: who started the thread
             origin, state.origin = state.origin, None
         args = self.arguments(code, frame) if self.level else None
@@ -164,12 +168,14 @@ class Tracer:
             dead = suspended.get(id(frame))
             if dead is None and len(suspended) >= MAX_SUSPENDED:
                 try:  # another thread may remove that one meanwhile: never raise into the program
-                    dead = suspended.pop(next(iter(suspended)), None)
+                    dead = suspended.get(next(iter(suspended)))
                 except (RuntimeError, StopIteration):
                     pass
             if dead is not None:
+                self.unsuspend(dead)
                 self.abandoned(dead)
             suspended[id(frame)] = entry
+            self.suspended_fids.setdefault(node_id, {})[fid] = None
         if fid <= self.max_frames:
             state.buffer.append(entry)
 
@@ -202,7 +208,7 @@ class Tracer:
             self.lose(state, index + 1)
         entry = stack.pop()
         if code.co_flags & GENERATORS:
-            self.suspended.pop(entry[PYFRAME], None)
+            self.unsuspend(entry)
         entry[END_NS] = time.perf_counter_ns() - self.started
         entry[EXCEPTION] = exception
         if self.level and kind == "return":
@@ -269,6 +275,15 @@ class Tracer:
         state = self.threads.get(threading.get_ident())
         return state.stack[-1][FID] if state and state.stack else None
 
+    def unsuspend(self, entry: list) -> None:
+        """`entry` will not resume: forget it in `suspended` (unless another frame took its key)."""
+        key = entry[PYFRAME]
+        if self.suspended.get(key) is entry:
+            self.suspended.pop(key, None)
+        fids = self.suspended_fids.get(entry[NODE])
+        if fids:
+            fids.pop(entry[FID], None)
+
     @staticmethod
     def abandoned(entry: list) -> None:
         """A generator or coroutine that will not resume: it ends as "suspended", where it last
@@ -280,7 +295,7 @@ class Tracer:
         """Frames above `index` left without an event (none was seen): end them as "lost"."""
         now = self.now()
         for entry in state.stack[index:]:
-            self.suspended.pop(entry[PYFRAME], None)
+            self.unsuspend(entry)
             entry[END_NS] = now
             entry[KIND] = "lost"
         del state.stack[index:]
