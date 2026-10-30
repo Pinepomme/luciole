@@ -159,8 +159,13 @@ class Tracer:
         stack.append(entry)
         if code.co_flags & GENERATORS:
             suspended = self.suspended
-            if len(suspended) >= MAX_SUSPENDED:  # abandoned generators end without an event
-                del suspended[next(iter(suspended))]
+            # A generator abandoned at a yield outside any `try` is closed without an event: its
+            # entry stays here until its frame's address is reused (by this frame), or evicted.
+            dead = suspended.get(id(frame))
+            if dead is None and len(suspended) >= MAX_SUSPENDED:
+                dead = suspended.pop(next(iter(suspended)))
+            if dead is not None:
+                self.abandoned(dead)
             suspended[id(frame)] = entry
         if fid <= self.max_frames:
             state.buffer.append(entry)
@@ -260,6 +265,13 @@ class Tracer:
         """This thread's innermost recorded frame (for threads it starts)."""
         state = self.threads.get(threading.get_ident())
         return state.stack[-1][FID] if state and state.stack else None
+
+    @staticmethod
+    def abandoned(entry: list) -> None:
+        """A generator or coroutine that will not resume: it ends as "suspended", where it last
+        stopped, so the writer stops waiting for its end."""
+        if entry[KIND] is None and entry[END_NS] is not None:
+            entry[KIND] = "suspended"
 
     def lose(self, state: ThreadTrace, index: int) -> None:
         """Frames above `index` left without an event (none was seen): end them as "lost"."""

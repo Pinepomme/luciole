@@ -195,6 +195,30 @@ def test_a_resumed_generator_or_coroutine_is_one_frame(tmp_path):
         assert found.frame(step)["result"]["repr"] == "5"
 
 
+def test_abandoned_generators_do_not_pile_up(tmp_path):
+    result, path = traced(tmp_path, """
+        import time
+        from luciole import recorder
+
+        def items():
+            yield 1
+            yield 2
+
+        def main():
+            writer = recorder.active.recorder.tracer.writer
+            for _ in range(3):
+                for _ in range(2000):
+                    next(items())  # abandoned at a yield outside any try: closed without an event
+                time.sleep(0.5)  # the writer runs meanwhile
+            print("open", len(writer.open))
+
+        main()
+    """, level=0)
+    assert result.returncode == 0, result.stderr
+    assert int(result.stdout.split()[-1]) < 10
+    assert rows(path, "SELECT end_kind, COUNT(*) FROM frames WHERE node = 'prog:items' GROUP BY end_kind") == [("suspended", 6000)]
+
+
 def test_threads_have_their_own_roots_and_callers(tmp_path):
     result, path = traced(tmp_path, """
         import threading
