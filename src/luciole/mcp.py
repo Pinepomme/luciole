@@ -78,7 +78,7 @@ NO_RUN_TEXT = {
     "A run id from `run` or `runs`": "A run id from `runs`",
     "when it was not, says so: then `run` the command again with `scope: [\"<function>\"]`.": "when it was not, says so, and what to record again.",
     "the answer says so, and how to re-run.": "the answer says so, and what to record again.",
-    "(`pytest --luciole`, or pytest with --luciole under `run`)": "(`pytest --luciole`)",
+    "(`pytest --luciole`, or pytest under `run`)": "(`pytest --luciole`)",
 }
 
 FRAME_ARG = {"type": "integer", "description": "A frame id (#N in other answers)."}
@@ -195,7 +195,7 @@ TOOLS = [
     },
     {
         "name": "tests",
-        "description": "The tests of a recorded test run (`pytest --luciole`, or pytest with --luciole under `run`), failed ones first: outcome, where it failed (setup, call or teardown), the message, and for each its frame (#N), the exception it ended with (!N) and its process (pid), to pass to `traceback`, `frame` and `origin`.",
+        "description": "The tests of a recorded test run (`pytest --luciole`, or pytest under `run`), failed ones first: outcome, where it failed (setup, call or teardown), the message, and for each its frame (#N), the exception it ended with (!N) and its process (pid), to pass to `traceback`, `frame` and `origin`.",
         "inputSchema": {"type": "object", "properties": {"run": RUN_ARG, "failed": {"type": "boolean", "description": "Failed and errored tests only."}, **PAGE_ARGS}},
     },
     {
@@ -356,6 +356,9 @@ class Server:
         except OSError as error:
             raise ToolError(f"could not make a run folder: {error}") from None
         env = dict(os.environ)
+        # pytest records each test's outcome in the trace auto-start writes (the plugin, when
+        # luciole is installed where pytest runs; inert for anything else).
+        env["LUCIOLE_PYTEST"] = "1"
         for key, value in auto_start_env(None, self.root, False, folder, level, scope).items():
             if value is None:
                 env.pop(key, None)  # no port: the recorders find the engine's, if VS Code runs one

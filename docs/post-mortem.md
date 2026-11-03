@@ -52,7 +52,9 @@ What is recorded:
   function's frame, and the attempt when a flaky test is run again (pytest-rerunfailures).
 - With a recorder already running in pytest's process, the plugin adds the outcomes to its trace
   and changes nothing else: `luciole run --trace FILE -m pytest --luciole`, or auto-start with
-  `LUCIOLE_TRACE` set (the MCP server's `run` of `pytest --luciole`, VS Code's Run Live). A
+  `LUCIOLE_TRACE` set (VS Code's Run Live of `pytest --luciole`). The MCP server's `run` sets
+  `LUCIOLE_PYTEST=1`, so a pytest run started by an agent records its outcomes in the run folder
+  the server made, without `--luciole`. A
   recorder that only lights up the view (VS Code's switch, without a trace) is replaced by one that
   also records, and still lights it up.
 - On Python older than 3.12, the session header says so and nothing is recorded.

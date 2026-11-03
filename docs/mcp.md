@@ -63,8 +63,8 @@ work with any Python 3.10+.
      per caller, unless something raised under them. `focus: "Cart.price"` keeps only the paths from the top to that function's
      calls (`*` as a wildcard), the other calls counted, not shown;
    - `frame N`: one call in detail, and the calls it made;
-   - `tests`: for a test run recorded with `pytest --luciole` (or pytest with `--luciole` under
-     `run`), each test's outcome, failed ones first, with where it failed (setup, call,
+   - `tests`: for a test run recorded with `pytest --luciole`, or any pytest run under `run`
+     (it sets `LUCIOLE_PYTEST=1`, which turns the plugin on), each test's outcome, failed ones first, with where it failed (setup, call,
      teardown), the message, its frame (`#N`), the exception it ended with (`!N`) and its process,
      to pass to `traceback`, `frame` and `origin`;
    - `summary`: duration, exit status, top functions by calls and by time (self time leaves out

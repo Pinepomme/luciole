@@ -13,7 +13,8 @@ with its function's frame. At the end, a run where every test passed is deleted,
 
 Under `luciole run --trace`, or with auto-start writing traces (LUCIOLE_TRACE), a recorder already
 runs: its trace gets the outcomes, and nothing else changes (a pytest-xdist worker is such a
-process). A live-only recorder (the VS Code switch, no trace) is replaced by one that also traces.
+process). The MCP server's `run` sets LUCIOLE_PYTEST=1, so pytest runs an agent starts record
+their outcomes that way, in the run folder the server made. A live-only recorder (the VS Code switch, no trace) is replaced by one that also traces.
 
 pytest is imported here only: pytest loads this module, and the rest of luciole never does.
 """
@@ -87,6 +88,11 @@ class Recording:
             return
         if self.worker:
             return  # the controller's environment turned auto-start on here: it did not start
+        if running is None and os.environ.get("LUCIOLE_TRACE"):
+            # Auto-start was to record this process (the MCP server's `run`, Run Live) and did not
+            # start: a run folder is already made for it, never make a second one.
+            self.header = "luciole: auto-start did not record this process (LUCIOLE_TRACE is set): no test outcomes recorded"
+            return
         self.own(sessions, running)
 
     def own(self, sessions, running) -> None:
