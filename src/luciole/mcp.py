@@ -25,8 +25,8 @@ from pathlib import Path
 
 from luciole import __version__
 from luciole.runs import finish_run, new_run, processes_of, runs_folder
-from luciole.trace import Trace
-from luciole.trace_text import plural, render_calls, render_exceptions, render_history, render_summary, render_traceback, render_tree
+from luciole.trace import Trace, fold_small
+from luciole.trace_text import cut_short, plural, render_calls, render_exceptions, render_focus, render_history, render_summary, render_traceback, render_tree
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first
 OUTPUT_HEAD = 20  # lines of a program's output shown from its start...
@@ -92,20 +92,37 @@ TOOLS = [
     },
     {
         "name": "traceback",
-        "description": "The frames an exception went through, innermost first: for each, the line it was at and its local variables at that moment, then where it was handled. Default: the last exception nothing handled.",
+        "description": "The frames an exception went through, innermost first: for each, the line it was at and its local variables at that moment, then where it was handled. Default: the original error behind the last exception nothing handled (the first of its chain of `raise ... from` and exceptions raised while handling another), with the chain listed one line each.",
         "inputSchema": {"type": "object", "properties": {"exception": {"type": "integer", "description": "An exception id (!N in other answers)."}, "run": RUN_ARG, "process": PROCESS_ARG}},
     },
     {
         "name": "calls",
-        "description": "Every call of a function in a run, in order: its arguments, return value or exception, duration and caller. `function` is a node id (`pkg.mod:Class.method`) or its end (`Class.method`, `method`).",
-        "inputSchema": {"type": "object", "properties": {"function": {"type": "string"}, "run": RUN_ARG, "process": PROCESS_ARG, **PAGE_ARGS}, "required": ["function"]},
+        "description": "The calls of a function in a run, grouped by call site (who called it, from which line, how many times): each call's return value or exception first, then its arguments. Arguments with the same value in every call shown are said once, values are cut short (`frame` shows one call's in full), and consecutive calls that read the same are one line. `function` is a node id (`pkg.mod:Class.method`) or its end (`Class.method`, `method`).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "function": {"type": "string"},
+                "caller": {"type": "string", "description": "Only the calls made by this function (a node id or its end)."},
+                "detail": {"type": "boolean", "description": "One line per call with every value as recorded (default false)."},
+                "run": RUN_ARG,
+                "process": PROCESS_ARG,
+                **PAGE_ARGS,
+            },
+            "required": ["function"],
+        },
     },
     {
         "name": "call_tree",
-        "description": "The call tree of a run (or below one frame), repeated calls collapsed into `×N`.",
+        "description": "The call tree of a run (or below one frame), repeated calls collapsed into `×N`, calls that took under 1% of the time folded into one line per caller (unless something raised under them). With `focus`, only the paths from the top to the calls of the matching functions, the other calls counted, not shown.",
         "inputSchema": {
             "type": "object",
-            "properties": {"frame": FRAME_ARG, "depth": {"type": "integer", "description": "Levels shown (default 4)."}, "run": RUN_ARG, "process": PROCESS_ARG},
+            "properties": {
+                "frame": FRAME_ARG,
+                "focus": {"type": "string", "description": "A function name or node id (`checkout`, `Cart.add`), `*` as a wildcard (`Cart.*`): show only the paths that lead to its calls."},
+                "depth": {"type": "integer", "description": "Levels shown (default 4); with `focus`, levels shown below each matching call (default 1)."},
+                "run": RUN_ARG,
+                "process": PROCESS_ARG,
+            },
         },
     },
     {
@@ -115,7 +132,7 @@ TOOLS = [
     },
     {
         "name": "variable_history",
-        "description": "Every assignment to a function's local variables during a run, call by call and line by line, with the value assigned (rebinding, and changes to lists, dicts and sets): how a value was built. Needs a run made with `scope` covering the function (level 2); when it was not, says so: then `run` the command again with `scope: [\"<function>\"]`.",
+        "description": "Every assignment to a function's local variables during a run, call by call and line by line, with the value assigned (rebinding, and changes to lists, dicts and sets), each call ending with what it returned or raised, at which line: how a value was built. A variable assigned once per call to the same value in every call is said once. Needs a run made with `scope` covering the function (level 2); when it was not, says so: then `run` the command again with `scope: [\"<function>\"]`.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -244,20 +261,20 @@ class Server:
                 return render_summary(trace.summary())
             if name == "traceback":
                 exception = args.get("exception")
-                found = trace.traceback(int(exception) if exception is not None else None)
+                found = trace.traceback(int(exception) if exception is not None else None, original=True)
                 if found is None and exception is not None:
                     raise ToolError(f"no exception !{exception} in this process")
-                return render_traceback(found)
+                text = render_traceback(found)
+                if found and found["frames"]:
+                    frame = found["frames"][0]
+                    text += f"\nnext: `calls` function={frame['node']} shows who called it with which values; `origin` frame={frame['frame']} variable=NAME, where a wrong value came from"
+                return text
             if name == "exceptions":
                 return render_exceptions(trace.exceptions(*page)).replace("(--limit, --offset)", "(limit, offset)")
             if name == "calls":
-                found = trace.calls(required(args, "function"), *page)
-                if not found["nodes"]:
-                    raise ToolError(f"no calls of {args['function']} in this run: it did not run, or the name is wrong (`find` looks it up)")
-                return render_calls(found).replace("(--limit, --offset)", "(limit, offset)")
+                return self.calls(trace, args, page)
             if name == "call_tree":
-                entries = trace.tree(args.get("frame"), int(args.get("depth") or 4))
-                return render_tree(entries) or "no calls recorded"
+                return self.call_tree(trace, args)
             if name == "frame":
                 return self.frame(trace, int(required(args, "frame")))
             if name == "variable_history":
@@ -363,11 +380,41 @@ class Server:
             lines.append(f"{path.parent.name}  {shlex.join(meta['command'])}  ({outcome}, {plural(len(processes), 'process')} recorded)")
         return "\n".join(lines)
 
+    def calls(self, trace: Trace, args: dict, page: tuple[int, int]) -> str:
+        caller = args.get("caller") or None
+        found = trace.calls(required(args, "function"), *page, caller=caller)
+        if not found["nodes"]:
+            raise ToolError(f"no calls of {args['function']} in this run: it did not run, or the name is wrong (`find` looks it up)")
+        if caller and not found["total"]:
+            sites = ", ".join(f"{site['node'] or 'a root'}:{site['line']} ×{site['count']}" for site in found["callers"][:10])
+            raise ToolError(f"no calls of {', '.join(found['nodes'])} from {caller}; it was called from {sites}")
+        text = render_calls(found, detail=bool(args.get("detail"))).replace("(--limit, --offset)", "(limit, offset)")
+        if not args.get("detail") and cut_short(found["calls"]):
+            text += f"\nvalues cut short: `frame` with frame={found['calls'][0]['frame']} (or another #N) shows a call's in full"
+        return text
+
+    def call_tree(self, trace: Trace, args: dict) -> str:
+        start, depth = args.get("frame"), args.get("depth")
+        start = int(start) if start is not None else None
+        if args.get("focus"):
+            found = trace.focus(args["focus"], start, int(depth) if depth is not None else 1)
+            if not found["nodes"]:
+                raise ToolError(f"no calls of {args['focus']} in this run: it did not run, or the name is wrong (`find` looks it up)")
+            return render_focus(found)
+        entries = trace.tree(start, int(depth) if depth is not None else 4)
+        if not entries:
+            return "no calls recorded" if start is None else f"no frame #{start} in this process"
+        folded = fold_small(entries)
+        text = render_tree(folded)
+        if "small call" in text or "calls below)" in text:
+            text += "\nnext: `call_tree` with focus=FUNCTION keeps only the paths to its calls; frame=#N opens one call"
+        return text
+
     def frame(self, trace: Trace, frame_id: int) -> str:
         frame = trace.frame(frame_id)
         if frame is None:
             raise ToolError(f"no frame #{frame_id} in this process")
-        text = render_calls({"nodes": [frame["node"]], "total": 1, "calls": [frame]}).split("\n", 1)[1].strip()
+        text = render_calls({"nodes": [frame["node"]], "total": 1, "calls": [frame]}, detail=True).split("\n", 1)[1].strip()
         entries = trace.tree(frame_id, depth=1)
         children = entries[0]["children"] if entries else []
         if children:

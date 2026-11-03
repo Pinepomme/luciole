@@ -55,8 +55,9 @@ COMPARED = frozenset({list, dict, set, bytearray})  # mutable containers whose c
 # the frame starts, then END_NS, EXCEPTION, RESULT and LOCALS when it ends, and KIND last.
 # SUSPENDED adds up the nanoseconds a generator or coroutine spent suspended (None for other
 # code); HISTORY, for a frame of scoped code at level 2, is [its previous line, {name: (value,
-# contents() of a list, dict, set or bytearray, else None)}] as that line started, None once it ends.
-FID, CODE, PYFRAME, NODE, CALLER, ORIGIN, THREAD, LINE, START_NS, ARGS, END_NS, KIND, EXCEPTION, RESULT, LOCALS, SUSPENDED, HISTORY = range(17)
+# contents() of a list, dict, set or bytearray, else None)}] as that line started, None once it ends;
+# END_LINE is then the line it ended at.
+FID, CODE, PYFRAME, NODE, CALLER, ORIGIN, THREAD, LINE, START_NS, ARGS, END_NS, KIND, EXCEPTION, RESULT, LOCALS, SUSPENDED, HISTORY, END_LINE = range(18)
 
 # Other buffered events are tuples starting with one of these.
 NEW_THREAD, RAISED, SEEN, WRITE = range(4)
@@ -197,7 +198,7 @@ class Tracer:
             if scoped:
                 history = [None, {}]
         generator = code.co_flags & GENERATORS
-        entry = [fid, code, id(frame), node_id, caller, origin, state.row, line, time.perf_counter_ns() - self.started, args, None, None, None, None, None, 0 if generator else None, history]
+        entry = [fid, code, id(frame), node_id, caller, origin, state.row, line, time.perf_counter_ns() - self.started, args, None, None, None, None, None, 0 if generator else None, history, None]
         stack.append(entry)
         if generator:
             suspended = self.suspended
@@ -259,6 +260,7 @@ class Tracer:
                 frame = sys._getframe(3)  # end() <- returned() <- Recorder.on_return <- the function
             if frame.f_code is code:
                 self.diff(state, entry, frame, None)
+            entry[END_LINE] = entry[HISTORY][0]
             entry[HISTORY] = None
         stack.pop()
         if code.co_flags & GENERATORS:
@@ -606,7 +608,7 @@ class Writer:
                 still_open.append(entry)
             else:
                 result = self.snapshot(entry[RESULT]) if level and kind == "return" else None
-                updates.append((entry[END_NS], kind, entry[EXCEPTION], result, self.locals_json(entry), entry[SUSPENDED], entry[FID]))
+                updates.append((entry[END_NS], kind, entry[EXCEPTION], result, self.locals_json(entry), entry[SUSPENDED], entry[END_LINE], entry[FID]))
         self.open = still_open
         handled = []
         for row_id, fid in seen:
@@ -617,8 +619,8 @@ class Writer:
         db = self.db
         db.execute("BEGIN")
         db.executemany("INSERT INTO threads VALUES (?, ?, ?, ?)", threads)
-        db.executemany("INSERT INTO frames VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", frames)
-        db.executemany("UPDATE frames SET end_ns = ?, end_kind = ?, exception = ?, result = ?, locals = ?, suspended_ns = ? WHERE id = ?", updates)
+        db.executemany("INSERT INTO frames VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", frames)
+        db.executemany("UPDATE frames SET end_ns = ?, end_kind = ?, exception = ?, result = ?, locals = ?, suspended_ns = ?, end_line = ? WHERE id = ?", updates)
         db.executemany("INSERT INTO exceptions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", raised.values())
         db.executemany("UPDATE exceptions SET handled_in = ? WHERE id = ?", handled)
         if self.new_snapshots:
@@ -636,9 +638,9 @@ class Writer:
             args = "{" + ", ".join(f'"{name}": {snapshot(value)}' for name, value in args) + "}" if args is not None else None
             entry[ARGS] = None  # stored: the values are not kept alive while the call runs on
         if kind is None:
-            return (entry[FID], entry[NODE], entry[CALLER], entry[ORIGIN], entry[THREAD], entry[LINE], entry[START_NS], None, None, None, args, None, None, entry[SUSPENDED])
+            return (entry[FID], entry[NODE], entry[CALLER], entry[ORIGIN], entry[THREAD], entry[LINE], entry[START_NS], None, None, None, args, None, None, entry[SUSPENDED], None)
         result = self.snapshot(entry[RESULT]) if level and kind == "return" else None
-        return (entry[FID], entry[NODE], entry[CALLER], entry[ORIGIN], entry[THREAD], entry[LINE], entry[START_NS], entry[END_NS], kind, entry[EXCEPTION], args, result, self.locals_json(entry), entry[SUSPENDED])
+        return (entry[FID], entry[NODE], entry[CALLER], entry[ORIGIN], entry[THREAD], entry[LINE], entry[START_NS], entry[END_NS], kind, entry[EXCEPTION], args, result, self.locals_json(entry), entry[SUSPENDED], entry[END_LINE])
 
     def locals_json(self, entry: list) -> str | None:
         """The locals kept as an exception left the frame, `{"name": snapshot id}`; then let go."""

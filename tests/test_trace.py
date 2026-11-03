@@ -441,6 +441,36 @@ def test_an_exception_keeps_the_locals_of_every_frame_it_leaves(tmp_path):
     assert text.endswith("  not handled")
 
 
+def test_traceback_can_start_from_the_original_error(tmp_path):
+    result, path = traced(tmp_path, """
+        def low():
+            raise KeyError("k")
+
+        def mid():
+            try:
+                low()
+            except KeyError as error:
+                raise ValueError("v") from error
+
+        def top():
+            try:
+                mid()
+            except ValueError:
+                raise RuntimeError("r")
+
+        top()
+    """)
+    assert result.returncode == 1
+    with Trace(path) as found:
+        original, outer, middle = found.traceback(original=True), found.traceback(), found.traceback(2)
+    assert original["exception"]["type"] == "KeyError" and [e["type"] for e in original["chain"]] == ["RuntimeError", "ValueError", "KeyError"]
+    assert outer["exception"]["type"] == "RuntimeError" and outer["chain"] == original["chain"] == middle["chain"]
+    text = trace.render_traceback(original).splitlines()
+    assert text[:2] == ["!1 KeyError: 'k'", "  the original error of a chain of 3, outermost first (`traceback` with exception=N shows another):"]
+    assert text[-1] == "  handled in prog:mid (#3), line 7, which raised !2 from it"
+    assert trace.render_traceback(middle).splitlines()[-1] == "  handled in prog:top (#2), line 13, which raised !3 while handling it"
+
+
 def test_level_0_keeps_no_locals(tmp_path):
     result, path = traced(tmp_path, FAILING, level=0)
     assert rows(path, "SELECT COUNT(*) FROM frames WHERE locals IS NOT NULL") == [(0,)]
@@ -699,6 +729,18 @@ def test_variable_history_of_scoped_functions(tmp_path):
     assert re.search(r"\n    line 19   total = 6   \+[\d.]+ .s\n", text)
     assert cli(path, "history", "--frame", second, "--limit", "2").endswith("... 7 more writes (--limit, --offset)\n")
     assert json.loads(cli(path, "--json", "history", "fails"))["total"] == 2
+    # Each scoped call ends at a line: its return, or the line that raised.
+    assert rows(path, "SELECT node, end_line FROM frames WHERE node IN ('prog:checkout', 'prog:fails', 'prog:double') ORDER BY id") == [
+        ("prog:checkout", 24), ("prog:double", None), ("prog:double", None), ("prog:checkout", 24), ("prog:double", None), ("prog:fails", 29)]
+    text = cli(path, "history", "checkout")
+    assert "\n  same in all 2 calls shown: line 22 token = <redacted>\n" in text and "token = " not in text.split("shown:", 1)[1].split("\n", 1)[1]
+    assert "\n    line 23   label = 'total 6'   +" in text and "\n    line 24   return 'total 6'\n" in text and text.endswith("    line 24   return 'total 10'\n")
+    assert cli(path, "history", "fails").endswith("    line 28   left = -7   " + text_after(cli(path, "history", "fails"), "left = -7   ") + "\n    line 29   raised ValueError: -7\n")
+
+
+def text_after(text, marker):
+    """The rest of the line after `marker`."""
+    return text.split(marker, 1)[1].split("\n", 1)[0]
 
 
 def test_variable_history_follows_a_generator_across_resumes(tmp_path):
@@ -1072,17 +1114,24 @@ def test_cli_output(tmp_path):
     assert json.loads(cli(path, "summary", "--json"))["by_calls"][0]["node"] == "prog:fib"
 
     calls = cli(path, "calls", "fails")
-    assert calls.startswith("1 call of prog:fails\n")
-    assert "fails(x=1) !! ValueError: bad 1" in calls and "from prog:wraps:7" in calls
-    assert "middle !! RuntimeError: wrapped (from #" in cli(path, "calls", "middle").replace("middle()", "middle")
-    limited = cli(path, "calls", "prog:fib", "--limit", "2")
+    assert calls.startswith("1 call of prog:fails\n  from prog:wraps:7\n    #")
+    assert "!! ValueError: bad 1  (x=1)   " in calls
+    assert "fails(x=1) !! ValueError: bad 1" in cli(path, "calls", "fails", "--detail") and "from prog:wraps:7" in calls
+    assert "middle !! RuntimeError: wrapped (from #" in cli(path, "calls", "middle", "--detail").replace("middle()", "middle")
+    limited = cli(path, "calls", "prog:fib", "--limit", "2", "--detail")
     assert limited.count(" fib(n=") == 2 and "... 7 more" in limited
     assert json.loads(cli(path, "--json", "calls", "fib"))["total"] == 9
+    fibs = cli(path, "calls", "fib", "--caller", "fib").splitlines()  # fib(2) calls fib(1) and fib(0), three times
+    assert fibs[0] == "6 calls of prog:fib from prog:fib (9 in all)" and fibs[1] == "  from prog:fib:" + fibs[1].rsplit(":", 1)[1]
+    assert re.match(r"    #\d+ -> 1  \(n=1\)   ", fibs[2]) and re.match(r"    #\d+ -> 0  \(n=0\)   ", fibs[3])
 
-    tree = cli(path, "tree", "--depth", "3").splitlines()
+    tree = cli(path, "tree", "--depth", "3", "--all").splitlines()
     assert tree[0].startswith("prog  #1")
     assert any(re.match(r"\s{4}prog:fib ×3  #\d+", line) for line in tree)  # three identical fib(2) subtrees
     assert any(line.strip().startswith("prog:wraps") and "[raise]" in line for line in tree)
+    focus = cli(path, "tree", "--focus", "fails").splitlines()
+    assert focus[0].startswith("1 call of prog:fails: the paths to all, from the top") and focus[-1].strip().startswith("prog:fails  #")
+    assert focus[-1].endswith("[raise]  <==") and focus[-2].strip().startswith("prog:wraps  #")
     shallow = cli(path, "tree", "--depth", "1")
     assert "calls below" in shallow and "prog:fails" not in shallow
     [root] = json.loads(cli(path, "tree", "--json", "--depth", "0"))
