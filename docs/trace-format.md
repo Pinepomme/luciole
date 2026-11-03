@@ -410,7 +410,8 @@ value as recorded, as `frame` does.
 
 In `tree`, consecutive calls of one function with the same subtree are one entry with a `count`;
 `more` counts the calls below an entry that are not shown. The text (unless `--all`) folds the
-calls that took under 1% of the tree's time into one line per caller (`… 12 small calls: lookup
+calls that took under 1% of the tree's time, and under a tenth of their caller's, into one line
+per caller (`… 12 small calls: lookup
 ×8, normalize ×4`), when there are three or more of them and nothing raised under them
 (`fold_small()`, which adds `{"folded": true, "count", "nodes", "duration_ns", "below"}` entries).
 `focus` keeps the frames on the paths from the roots (or from frame `start`) to the calls of the

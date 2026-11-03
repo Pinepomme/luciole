@@ -1142,6 +1142,23 @@ def test_cli_output(tmp_path):
     assert "RuntimeError: wrapped" in exceptions and "caused by !1" in exceptions and "handled in prog:catches" in exceptions
 
 
+def test_small_calls_are_folded_next_to_the_whole_and_to_their_caller():
+    def entry(node, ns, children=(), end="return"):
+        return {"frame": 1, "node": node, "count": 1, "duration_ns": ns, "end": end, "children": list(children), "more": 0}
+
+    tree = [entry("root", 10_000, [
+        entry("work", 8_000),
+        entry("a", 50), entry("b", 50, [entry("b2", 10)]), entry("c", 50), entry("d", 50, end="raise"),
+        entry("mid", 300, [entry("x", 90), entry("y", 80), entry("z", 70)]),  # small, but most of their caller's time: kept
+    ])]
+    folded = trace.fold_small(tree)
+    children = folded[0]["children"]
+    assert [child.get("node") for child in children] == ["work", "d", "mid", None]
+    assert children[-1] == {"folded": True, "count": 3, "nodes": {"a": 1, "b": 1, "c": 1}, "duration_ns": 150, "below": 1}
+    assert [child["node"] for child in children[2]["children"]] == ["x", "y", "z"]
+    assert trace.render_tree(folded).splitlines()[-1] == "  … 3 small calls: a, b, c  (150 ns in all, +1 call below)"
+
+
 def test_a_trace_directory_that_does_not_exist_yet_is_made(tmp_path):
     write(tmp_path, {"prog.py": "def f():\n    pass\n\nf()\n"})
     command = [sys.executable, "-m", "luciole", "run", "--root", str(tmp_path)]

@@ -117,7 +117,7 @@ TOOLS = [
     },
     {
         "name": "call_tree",
-        "description": "The call tree of a run (or below one frame), repeated calls collapsed into `×N`, calls that took under 1% of the time folded into one line per caller (unless something raised under them). With `focus`, only the paths from the top to the calls of the matching functions, the other calls counted, not shown.",
+        "description": "The call tree of a run (or below one frame), repeated calls collapsed into `×N`, calls that took under 1% of the time (and under a tenth of their caller's) folded into one line per caller, unless something raised under them. With `focus`, only the paths from the top to the calls of the matching functions, the other calls counted, not shown.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -271,7 +271,10 @@ class Server:
                 text = render_traceback(found)
                 if found and found["frames"]:
                     frame = found["frames"][0]
-                    text += f"\nnext: `calls` function={frame['node']} shows who called it with which values; `origin` frame={frame['frame']} variable=NAME, where a wrong value came from"
+                    if ":" in frame["node"]:  # a function, not a module's body
+                        text += f"\nnext: `calls` function={frame['node']} shows who called it, with which values; `origin` frame={frame['frame']} variable=NAME, where a wrong value came from"
+                    else:
+                        text += f"\nnext: `origin` frame={frame['frame']} variable=NAME shows where a wrong value came from"
                 return text
             if name == "exceptions":
                 return render_exceptions(trace.exceptions(*page)).replace("(--limit, --offset)", "(limit, offset)")

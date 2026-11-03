@@ -198,7 +198,7 @@ def render_tree(entries: list[dict], indent: int = 0) -> str:
         if entry.get("folded"):
             names = sorted(entry["nodes"].items(), key=lambda item: -item[1])
             listed = ", ".join(f"{node.rsplit(':', 1)[-1]}" + (f" ×{count}" if count > 1 else "") for node, count in names[:4])
-            listed += f", {len(names) - 4} more functions" if len(names) > 4 else ""
+            listed += f", {plural(len(names) - 4, 'more function')}" if len(names) > 4 else ""
             below = f", +{plural(entry['below'], 'call')} below" if entry["below"] else ""
             lines.append(f"{pad}… {plural(entry['count'], 'small call')}: {listed}  ({duration(entry['duration_ns'])} in all{below})")
             continue

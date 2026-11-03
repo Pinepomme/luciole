@@ -676,14 +676,18 @@ def _collapse(entries: list[dict]) -> list[dict]:
     return result
 
 
-def fold_small(entries: list[dict], share: float = 0.01, total: int | None = None) -> list[dict]:
+def fold_small(entries: list[dict], share: float = 0.01, total: int | None = None, parent: int | None = None) -> list[dict]:
     """Fold the calls that took under `share` of the tree's time (of `total`, default: its
-    entries' sum) into one entry per caller: `{"folded": True, "count", "nodes": {node: count},
-    "duration_ns", "below"}` (`below`: the calls under them). Calls that raised, or under which
-    something raised, are kept; so are two small calls or one (folding them saves a line at most)."""
+    entries' sum) and under a tenth of their caller's into one entry per caller: `{"folded":
+    True, "count", "nodes": {node: count}, "duration_ns", "below"}` (`below`: the calls under
+    them). Calls that raised, or under which something raised, are kept; so are two small calls
+    or one (folding them saves a line at most)."""
     if total is None:
         total = sum(entry["duration_ns"] for entry in entries)
-    small = [entry for entry in entries if entry["duration_ns"] < share * total and not _raised(entry)]
+    if parent is None:
+        parent = total
+    limit = min(share * total, parent / 10)
+    small = [entry for entry in entries if entry["duration_ns"] < limit and not _raised(entry)]
     if len(small) < 3:
         small = []  # folding them would save a line at most
     kept = []
@@ -691,7 +695,7 @@ def fold_small(entries: list[dict], share: float = 0.01, total: int | None = Non
         if entry in small:
             continue
         if entry["children"]:
-            entry["children"] = fold_small(entry["children"], share, total)
+            entry["children"] = fold_small(entry["children"], share, total, entry["duration_ns"])
         kept.append(entry)
     if small:
         nodes: dict[str, int] = {}

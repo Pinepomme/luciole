@@ -52,8 +52,8 @@ work with any Python 3.10+.
      same are one line (`#7..#26 ×20`). `caller` keeps the calls made by one function; `detail`
      gives one line per call with every value as recorded;
    - `call_tree` (from the top, or below a frame), repeated calls collapsed into `×N`, and calls
-     that took under 1% of the time folded into one line per caller (unless something raised
-     under them). `focus: "Cart.price"` keeps only the paths from the top to that function's
+     that took under 1% of the time (and under a tenth of their caller's) folded into one line
+     per caller, unless something raised under them. `focus: "Cart.price"` keeps only the paths from the top to that function's
      calls (`*` as a wildcard), the other calls counted, not shown;
    - `frame N`: one call in detail, and the calls it made;
    - `summary`: duration, exit status, top functions by calls and by time (self time leaves out
