@@ -186,6 +186,27 @@ def test_generators_leave_the_stack_when_they_yield(tmp_path):
     assert not [stack for _, stack in seen if "gen:numbers" in stack]
 
 
+def test_deep_yield_from_chains_keep_their_stack(tmp_path):
+    # Each value passes through every level, resuming each one: the stack is changed in place, not
+    # copied per event (a json encoder 1000 generators deep took 31 s instead of 11).
+    _, frames = record(tmp_path, {"deep.py": """
+        import time
+
+        def nest(n):
+            if n == 0:
+                yield 0
+                time.sleep(0.3)
+                yield 1
+            else:
+                yield from nest(n - 1)
+
+        for _ in nest(50):
+            pass
+    """}, "deep.py")
+    assert ("MainThread", ["deep"] + ["deep:nest"] * 51) in stacks(frames)
+    assert totals(frames, "calls")["deep:nest"] == 51
+
+
 def test_nested_functions_modules_and_callers_through_libraries(tmp_path):
     _, frames = record(tmp_path, {
         "pkg/__init__.py": "",

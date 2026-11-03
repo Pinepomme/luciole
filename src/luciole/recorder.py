@@ -113,7 +113,7 @@ class Recorder:
         self.spawns: dict[str, int] = {}
         self.waiting: dict[str, int] = {}
         self.started = time.perf_counter()
-        self.thread_stacks: dict[int, list[str]] = {}  # thread ident -> project stack, replaced (never mutated)
+        self.thread_stacks: dict[int, list[str]] = {}  # thread ident -> project stack, changed in place by its thread (others copy it)
         self.last_state: tuple = ([], {})  # nothing runs yet: no frame until something does
         # Pausing: set from the control thread; each paused thread waits on its own queue.
         self.line_events: Callable[[bool], None] = lambda on: None
@@ -388,7 +388,9 @@ class Recorder:
             frame = frame.f_back
         caller_frame = self.project_frame(frame)
         ident = threading.get_ident()
-        stack = self.thread_stacks.get(ident, [])
+        stack = self.thread_stacks.get(ident)
+        if stack is None:
+            stack = self.thread_stacks[ident] = []
         if caller_frame is None and stack:
             # Called back from deeper than CALLER_SEARCH library frames (torch tracing a model, a test
             # run by pytest): look through the whole stack. Guessing the top of `stack` instead is wrong
@@ -413,11 +415,17 @@ class Recorder:
                 if origin and origin != caller:  # first project code of a thread: who started it
                     self.count(self.spawns, f"{origin}>{node_id}")
                 origin = None
-        if caller in stack:  # cut what left without an event (an exception in library code, say)
-            stack = stack[: len(stack) - stack[::-1].index(caller)]
-        else:
-            stack = [caller] if caller else []
-        self.thread_stacks[ident] = [*stack, node_id]
+        if not caller:
+            stack.clear()
+        elif not stack or stack[-1] != caller:  # cut what left without an event (an exception in library code, say)
+            index = len(stack) - 1
+            while index >= 0 and stack[index] != caller:
+                index -= 1
+            if index >= 0:
+                del stack[index + 1 :]
+            else:
+                stack[:] = [caller]
+        stack.append(node_id)  # in place: a generator resumed 1000 levels deep must not copy the stack
         tracer = self.tracer
         if tracer is not None:
             if new_call:
@@ -436,7 +444,7 @@ class Recorder:
         ident = threading.get_ident()
         stack = self.thread_stacks.get(ident)
         if stack and stack[-1] == node_id:
-            self.thread_stacks[ident] = stack[:-1]
+            stack.pop()
 
     @staticmethod
     def count(counts: dict[str, int], key: str) -> None:
@@ -452,7 +460,7 @@ class Recorder:
             if ident not in threads:
                 self.thread_stacks.pop(ident, None)
             elif stack:
-                result.append({"thread": threads[ident].name, "stack": stack})
+                result.append({"thread": threads[ident].name, "stack": list(stack)})  # one C call: atomic
         return result
 
     def flush(self) -> None:
