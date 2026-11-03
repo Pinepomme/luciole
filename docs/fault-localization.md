@@ -87,7 +87,9 @@ Without frames, `compare` takes the first failing test (with a recorded frame) a
 1. with `--run-b`/`run_b`, the same test in the other run (a run before a change, the last green
    CI run); if only the other run has failing tests, A and B are swapped;
 2. else the same test function with other parameters (`test_x[1]` for `test_x[2]`);
-3. else the passing test whose set of functions run is closest (Jaccard).
+3. else the passing test whose set of functions run is closest (Jaccard); among tests as close,
+   the one whose first 200 project calls share the most (function, arguments) with A's, so the
+   divergence is where behaviour differs rather than where the inputs do.
 
 Test functions' frames are compared (the call phase), not fixtures.
 

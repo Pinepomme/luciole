@@ -137,6 +137,16 @@ def executed(recording: Recording, test: dict) -> set[str]:
     return test["executed"]
 
 
+def inputs(recording: Recording, test: dict, cap: int = 200) -> set[tuple]:
+    """(function, arguments) of the first project calls a test made, addresses left out: tells
+    apart tests that ran the same functions on other inputs."""
+    if "inputs" not in test:
+        trace = recording.trace(test["path"])
+        rows = trace.db.execute("SELECT id, node FROM frames WHERE start_ns BETWEEN ? AND ? ORDER BY id LIMIT ?", (test["start_ns"], test["end_ns"], cap))
+        test["inputs"] = {(node, arguments(trace.frame(fid))) for fid, node in rows.fetchall() if ":" in node and not is_test_node(node) and node != test["node"]}
+    return test["inputs"]
+
+
 # Suspects
 
 
@@ -528,11 +538,17 @@ def pick_partner(run_a: Recording, run_b: Recording, test: dict, passing: list[d
     if same:
         return same[0], "the same test function with other parameters"
     mine = executed(run_a, test)
-    best, score = None, -1.0
+    scored = []
     for other in passing:
         theirs = executed(run_b, other)
         union = mine | theirs
-        similarity = len(mine & theirs) / len(union) if union else 0.0
-        if similarity > score:
-            best, score = other, similarity
-    return best, f"the passing test whose functions are closest (Jaccard {score:.2f})"
+        scored.append((len(mine & theirs) / len(union) if union else 0.0, other))
+    score = max(similarity for similarity, _ in scored)
+    tied = [other for similarity, other in scored if similarity == score][:50]
+    if len(tied) == 1:
+        return tied[0], f"the passing test whose functions are closest (Jaccard {score:.2f})"
+    # The same functions on the same inputs: the divergence is then where behaviour differs, not
+    # where the inputs do (a test of another item stops at the first call it passes another value).
+    given = inputs(run_a, test)
+    best = max(tied, key=lambda other: len(given & inputs(run_b, other)))
+    return best, f"the passing test whose functions are closest (Jaccard {score:.2f}), with the most calls on the same inputs"

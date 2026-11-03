@@ -223,6 +223,49 @@ def test_a_parametrized_test_diverges_at_the_first_different_return(tmp_path):
 
 
 @needs_monitoring
+def test_tied_partners_are_told_apart_by_their_inputs(tmp_path):
+    # test_one and test_two run the same functions: test_two, on the failing test's items, makes
+    # the divergence the missing discount, not price_of on another item.
+    root = tmp_path / "till"
+    write(root, {
+        "till.py": """
+            def price_of(item):
+                return item["price"] * item.get("qty", 1)
+
+
+            def apply_discount(subtotal, discount):
+                return subtotal - discount - 1
+
+
+            def total(items, discount=0):
+                subtotal = sum(price_of(item) for item in items)
+                if discount:
+                    subtotal = apply_discount(subtotal, discount)
+                return subtotal
+        """,
+        "tests/test_till.py": """
+            from till import total
+
+
+            def test_one():
+                assert total([{"price": 30}]) == 30
+
+
+            def test_two():
+                assert total([{"price": 60, "qty": 2}]) == 120
+
+
+            def test_discount():
+                assert total([{"price": 60, "qty": 2}], 5) == 115
+        """,
+    })
+    found = compare_tests(record(root, "rec"))
+    assert found["test_b"]["nodeid"] == "tests/test_till.py::test_two"
+    assert found["picked"].endswith("with the most calls on the same inputs")
+    assert (found["divergence"]["kind"], found["divergence"]["node"]) == ("call_path", "till:apply_discount")
+
+
+@needs_monitoring
 def test_the_same_test_in_a_passing_run(shop, tmp_path):
     failing = record(shop, "before")
     (shop / "shop.py").write_text(textwrap.dedent(SHOP).replace("amount // 3", "amount // 2  # fixed"))
