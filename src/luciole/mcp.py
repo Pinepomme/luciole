@@ -25,38 +25,61 @@ from pathlib import Path
 
 from luciole import __version__
 from luciole.runs import finish_run, new_run, processes_of, runs_folder
-from luciole.trace import Trace, plural, render_calls, render_exceptions, render_history, render_summary, render_traceback, render_tree
+from luciole.trace import Trace, fold_small
+from luciole.trace_text import cut_short, first_line, plural, render_calls, render_exceptions, render_focus, render_history, render_summary, render_traceback, render_tree
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first
-OUTPUT_HEAD = 20  # lines of a program's output shown from its start...
-OUTPUT_TAIL = 80  # ...and from its end
+RUN_TEXT = 3_500  # characters of `run`'s answer: the program's output is cut to fit
+OUTPUT_HEAD = 0.3  # the share of the output's room given to its start; its end gets the rest
+LINE_CHARS = 300  # characters of a line of output, or of a process's command line
 MAX_TEXT = 20_000  # characters per answer
+# Commands that run a program in an environment they may first build or sync: minutes of
+# installing, and output that buries the program's. Their options that take a value.
+WRAPPERS = {"uv", "poetry", "pipenv", "hatch", "pdm", "conda", "rye", "uvx", "pixi"}
+WRAPPER_OPTIONS = {"--with", "--python", "-p", "--env-file", "-n", "--name", "-e", "--env", "--environment", "--prefix", "--package", "--extra", "--group", "--directory", "--project", "--from", "--index"}
 
 INSTRUCTIONS = """\
-Luciole records Python programs so you can debug from what actually happened instead of adding
-prints and re-running. Use `run` to execute a command (a script, `pytest -x tests/test_x.py`, a
-module) under the recorder: every call of project code is recorded with its arguments and return
-value, and every exception with where it was raised and handled. Then ask: `exceptions` for what
-went wrong, `traceback` for the stack it went through with every frame's local variables at that
-moment (a post-mortem debugger's view, no re-run needed), `calls` for every call of a function
-with its values, `call_tree` for who called what, `frame` for one call in detail. When a wrong
-value was made inside a function, before anything failed, `run` again with `scope` naming the
-suspect functions (level 2): `variable_history` then shows every assignment in them, line by line,
-with the values. When a value is wrong, ask `origin` where it came from: it walks back through
-the assignments, arguments, return values, globals and attributes that made it, across functions,
-each with its line and value (exact lines for a local assigned in several places need its
-function in a `scope`: it says when, and how). `find` and `neighbors` answer from the static graph: where a
-function is, who calls it, what it calls, which variables it reads and writes, even for code that
-did not run. Runs are kept: `runs` lists them, and every query takes a run id (default: the last).
+Luciole records Python programs (3.12+) so you can debug from what actually happened. `run`
+executes a command under the recorder: every call of project code with its arguments and return
+value, every exception with where it was raised and handled, and the local variables of every
+frame an exception left. Use it when you need values or call paths that a print would not give
+easily; verify fixes with plain pytest in your shell, not under the recorder. Run the interpreter
+itself (`python -m pytest -x tests/test_x.py`), not `uv run` or `poetry run`.
+Then ask: `traceback` (the original error, each frame's locals), `calls` (a function's calls
+grouped by caller, return values first), `call_tree` (`focus` keeps the paths to one function),
+`frame` (one call in full), `origin` (where a wrong value came from, across functions),
+`variable_history` (every assignment in a function, after a `run` with `scope` naming it). `find`
+and `neighbors` answer from the static graph, even for code that did not run.
+Stop recording once `calls` or `traceback` pinpoints the cause. Before choosing where to fix,
+check who calls the function you blame (`calls` lists its callers): the fix may belong there.
+Runs are kept: `runs` lists them, and every query takes a run id (default: the last).
 """
 
 POST_MORTEM = """\
-This server answers questions about existing recordings only: it cannot run programs (`run` is
-off, `luciole mcp --no-run`), so where the text below says to run again, tell the user what to
-run instead. Start with `runs`; for a test run (`pytest --luciole`, kept because tests failed),
-`tests` lists the failures with each test's frame (#N), exception (!N) and process.
-
+Luciole recorded Python programs (3.12+), usually a test run kept because tests failed
+(`pytest --luciole`, often in CI): every call of project code with its arguments and return value,
+every exception with where it was raised and handled, and the local variables of every frame an
+exception left. This server reads those recordings only: it cannot run programs. Debug from what
+happened. Start with `tests` (the failures, each with its frame #N, exception !N and process).
+Then ask: `traceback` (the original error, each frame's locals), `calls` (a function's calls
+grouped by caller, return values first), `call_tree` (`focus` keeps the paths to one function),
+`frame` (one call in full), `origin` (where a wrong value came from, across functions),
+`variable_history` (only for functions the run was recorded with in its scope). `find` and
+`neighbors` answer from the static graph of the checkout, which should be the commit that ran.
+When the recording lacks something (which line set a local, a variable's history), say what the
+user should record again (`pytest --luciole --luciole-level 2 --luciole-scope FUNCTION`) rather
+than guessing. Before choosing where to fix, check who calls the function you blame (`calls` lists
+its callers): the fix may belong there.
+Runs are kept: `runs` lists them, and every query takes a run id (default: the last).
 """
+
+# Post-mortem mode: tool descriptions say what to record again rather than to `run`.
+NO_RUN_TEXT = {
+    "A run id from `run` or `runs`": "A run id from `runs`",
+    "when it was not, says so: then `run` the command again with `scope: [\"<function>\"]`.": "when it was not, says so, and what to record again.",
+    "the answer says so, and how to re-run.": "the answer says so, and what to record again.",
+    "(`pytest --luciole`, or pytest with --luciole under `run`)": "(`pytest --luciole`)",
+}
 
 FRAME_ARG = {"type": "integer", "description": "A frame id (#N in other answers)."}
 RUN_ARG = {"type": "string", "description": "A run id from `run` or `runs` (default: the last run)."}
@@ -69,7 +92,7 @@ PAGE_ARGS = {
 TOOLS = [
     {
         "name": "run",
-        "description": "Run a command under Luciole's recorder (Python 3.12+) and record what happens: every call of project code with its arguments and return value, every exception. Returns the exit status, the output, and the exceptions that escaped. Child processes are recorded too. With `scope`, also every assignment to the local variables of those functions (for `variable_history`).",
+        "description": "Run a command under Luciole's recorder (Python 3.12+) and record what happens: every call of project code with its arguments and return value, every exception. Returns the exit status, the output, and the exceptions that escaped. Child processes are recorded too. With `scope`, also every assignment to the local variables of those functions (for `variable_history`). Give the interpreter's command: `uv run`, `poetry run` and the like are not run (they may build an environment first).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -99,20 +122,37 @@ TOOLS = [
     },
     {
         "name": "traceback",
-        "description": "The frames an exception went through, innermost first: for each, the line it was at and its local variables at that moment, then where it was handled. Default: the last exception nothing handled.",
+        "description": "The frames an exception went through, innermost first: for each, the line it was at and its local variables at that moment, then where it was handled. Default: the original error behind the last exception nothing handled (the first of its chain of `raise ... from` and exceptions raised while handling another), with the chain listed one line each.",
         "inputSchema": {"type": "object", "properties": {"exception": {"type": "integer", "description": "An exception id (!N in other answers)."}, "run": RUN_ARG, "process": PROCESS_ARG}},
     },
     {
         "name": "calls",
-        "description": "Every call of a function in a run, in order: its arguments, return value or exception, duration and caller. `function` is a node id (`pkg.mod:Class.method`) or its end (`Class.method`, `method`).",
-        "inputSchema": {"type": "object", "properties": {"function": {"type": "string"}, "run": RUN_ARG, "process": PROCESS_ARG, **PAGE_ARGS}, "required": ["function"]},
+        "description": "The calls of a function in a run, grouped by call site (who called it, from which line, how many times): each call's return value or exception first, then its arguments. Arguments with the same value in every call shown are said once, values are cut short (`frame` shows one call's in full), and consecutive calls that read the same are one line. `function` is a node id (`pkg.mod:Class.method`) or its end (`Class.method`, `method`).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "function": {"type": "string"},
+                "caller": {"type": "string", "description": "Only the calls made by this function (a node id or its end)."},
+                "detail": {"type": "boolean", "description": "One line per call with every value as recorded (default false)."},
+                "run": RUN_ARG,
+                "process": PROCESS_ARG,
+                **PAGE_ARGS,
+            },
+            "required": ["function"],
+        },
     },
     {
         "name": "call_tree",
-        "description": "The call tree of a run (or below one frame), repeated calls collapsed into `×N`.",
+        "description": "The call tree of a run (or below one frame), repeated calls collapsed into `×N`, calls that took under 1% of the time (and under a tenth of their caller's) folded into one line per caller, unless something raised under them. With `focus`, only the paths from the top to the calls of the matching functions, the other calls counted, not shown.",
         "inputSchema": {
             "type": "object",
-            "properties": {"frame": FRAME_ARG, "depth": {"type": "integer", "description": "Levels shown (default 4)."}, "run": RUN_ARG, "process": PROCESS_ARG},
+            "properties": {
+                "frame": FRAME_ARG,
+                "focus": {"type": "string", "description": "A function name or node id (`checkout`, `Cart.add`), `*` as a wildcard (`Cart.*`): show only the paths that lead to its calls."},
+                "depth": {"type": "integer", "description": "Levels shown (default 4); with `focus`, levels shown below each matching call (default 1)."},
+                "run": RUN_ARG,
+                "process": PROCESS_ARG,
+            },
         },
     },
     {
@@ -122,7 +162,7 @@ TOOLS = [
     },
     {
         "name": "variable_history",
-        "description": "Every assignment to a function's local variables during a run, call by call and line by line, with the value assigned (rebinding, and changes to lists, dicts and sets): how a value was built. Needs a run made with `scope` covering the function (level 2); when it was not, says so: then `run` the command again with `scope: [\"<function>\"]`.",
+        "description": "Every assignment to a function's local variables during a run, call by call and line by line, with the value assigned (rebinding, and changes to lists, dicts and sets), each call ending with what it returned or raised, at which line: how a value was built. A variable assigned once per call to the same value in every call is said once. Needs a run made with `scope` covering the function (level 2); when it was not, says so: then `run` the command again with `scope: [\"<function>\"]`.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -223,12 +263,12 @@ class Server:
                 "protocolVersion": asked if asked in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0],
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "luciole", "version": __version__},
-                "instructions": INSTRUCTIONS if self.allow_run else POST_MORTEM + INSTRUCTIONS,
+                "instructions": INSTRUCTIONS if self.allow_run else POST_MORTEM,
             }
         if method == "ping":
             return {}
         if method == "tools/list":
-            return {"tools": [tool for tool in TOOLS if self.allow_run or tool["name"] != "run"]}
+            return {"tools": TOOLS if self.allow_run else no_run_tools()}
         if method == "tools/call":
             name, arguments = params.get("name"), params.get("arguments") or {}
             try:
@@ -263,20 +303,23 @@ class Server:
                 return render_summary(trace.summary())
             if name == "traceback":
                 exception = args.get("exception")
-                found = trace.traceback(int(exception) if exception is not None else None)
+                found = trace.traceback(int(exception) if exception is not None else None, original=True)
                 if found is None and exception is not None:
                     raise ToolError(f"no exception !{exception} in this process")
-                return render_traceback(found)
+                text = render_traceback(found)
+                if found and found["frames"]:
+                    frame = found["frames"][0]
+                    if ":" in frame["node"]:  # a function, not a module's body
+                        text += f"\nnext: `calls` function={frame['node']} shows who called it, with which values; `origin` frame={frame['frame']} variable=NAME, where a wrong value came from"
+                    else:
+                        text += f"\nnext: `origin` frame={frame['frame']} variable=NAME shows where a wrong value came from"
+                return text
             if name == "exceptions":
                 return render_exceptions(trace.exceptions(*page)).replace("(--limit, --offset)", "(limit, offset)")
             if name == "calls":
-                found = trace.calls(required(args, "function"), *page)
-                if not found["nodes"]:
-                    raise ToolError(f"no calls of {args['function']} in this run: it did not run, or the name is wrong (`find` looks it up)")
-                return render_calls(found).replace("(--limit, --offset)", "(limit, offset)")
+                return self.calls(trace, args, page)
             if name == "call_tree":
-                entries = trace.tree(args.get("frame"), int(args.get("depth") or 4))
-                return render_tree(entries) or "no calls recorded"
+                return self.call_tree(trace, args)
             if name == "frame":
                 return self.frame(trace, int(required(args, "frame")))
             if name == "variable_history":
@@ -293,6 +336,9 @@ class Server:
             assigned[name] = value
         if not command:
             raise ToolError("empty command")
+        wrapper = Path(command[0]).name
+        if wrapper in WRAPPERS and (wrapper == "uvx" or command[1:2] == ["run"]):
+            raise ToolError(self.unwrap(command))
         cwd = Path(args.get("cwd") or self.root)
         if not cwd.is_absolute():
             cwd = self.root / cwd
@@ -322,7 +368,11 @@ class Server:
         timed_out = False
         try:
             process = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        except FileNotFoundError:
+            finish_run(folder, None)
+            raise ToolError(self.not_found(command, cwd)) from None
         except OSError as error:
+            finish_run(folder, None)
             raise ToolError(f"could not start {command[0]}: {error}") from None
         try:
             output, _ = process.communicate(timeout=timeout)
@@ -334,12 +384,53 @@ class Server:
         (folder / "output.txt").write_bytes(output)
         finish_run(folder, None if timed_out else process.returncode)
         status = f"stopped after {timeout:g} s (timeout)" if timed_out else f"exit status {process.returncode}"
-        lines = [f"run {run_id}: {shlex.join(command)}", f"  {status}, {elapsed:.2f} s"]
+        lines = [f"run {run_id}: {cut(shlex.join(command), LINE_CHARS)}", f"  {status}, {elapsed:.2f} s"]
         if scope:
             lines.append(f"  variable history (level 2) for {', '.join(scope)}: see `variable_history`")
-        lines += ["", "output:", indent(clip(output.decode(errors="replace")))]
-        lines += [""] + self.recorded(folder)
+        recorded = self.recorded(folder)
+        room = RUN_TEXT - sum(len(line) + 1 for line in lines + recorded) - 20
+        lines += ["", "output:", indent(clip(output.decode(errors="replace"), max(room, 800), folder / "output.txt"))]
+        lines += [""] + recorded
         return "\n".join(lines)
+
+    def unwrap(self, command: list[str]) -> str:
+        """Why `uv run pytest` is not run, and the command to run instead."""
+        rest = command[1:] if Path(command[0]).name == "uvx" else command[2:]
+        while rest and rest[0].startswith("-"):
+            option = rest.pop(0)
+            if "=" not in option and option in WRAPPER_OPTIONS and rest:
+                rest.pop(0)
+        wrapper = shlex.join(command[:1] if Path(command[0]).name == "uvx" else command[:2])
+        python = next((path for path in (self.root / ".venv" / "bin" / "python", self.root / ".venv" / "Scripts" / "python.exe") if path.exists()), None)
+        if rest and python is not None:
+            program = Path(rest[0]).name
+            if re.fullmatch(r"python[\d.]*(\.exe)?", program):
+                rest = [str(python.relative_to(self.root)), *rest[1:]]
+            elif program in ("pytest", "py.test"):
+                rest = [str(python.relative_to(self.root)), "-m", "pytest", *rest[1:]]
+        instead = f"`{shlex.join(rest)}`" if rest else "the program with the project's interpreter"
+        return (
+            f"not run: `{wrapper}` may build or sync an environment first (minutes of installing, and output that buries the program's). "
+            f"Run {instead} instead, with the interpreter of the environment that is already set up (Python 3.12+ to be recorded)."
+        )
+
+    def not_found(self, command: list[str], cwd: Path) -> str:
+        """`cfn-lint` is not on PATH: what to run instead."""
+        name = command[0]
+        if os.sep in name or "/" in name:
+            return f"could not start {name}: no such file in {cwd}"
+        problem = f"could not start {name}: it is not on PATH"
+        found = entry_point(self.root, name)
+        args = shlex.join(command[1:])
+        for folder in (self.root / ".venv" / "bin", self.root / ".venv" / "Scripts"):
+            if (folder / name).exists() or (folder / f"{name}.exe").exists():
+                return f"{problem}. The project's environment has it: `{shlex.join([str((folder / name).relative_to(self.root)), *command[1:]])}`"
+        if found and "." not in found[1]:
+            module, function = found
+            code = f"import sys; from {module} import {function}; sys.argv[0] = {name!r}; sys.exit({function}())"
+            return f"{problem}. It is the project's script for {module}:{function}; run it with the interpreter: `python -c {shlex.quote(code)} {args}`".rstrip()
+        module = name.replace("-", "_").removesuffix(".py")
+        return f"{problem}. If it is a Python package's command, run its module with the interpreter: `python -m {module} {args}`".rstrip()
 
     def recorded(self, folder: Path) -> list[str]:
         """What a run's traces hold: one line per process, and the exceptions nothing handled."""
@@ -356,23 +447,28 @@ class Server:
                 run = trace.run()
                 frames = trace.db.execute("SELECT COUNT(*) FROM frames").fetchone()[0]
                 calls += frames
-                lines.append(f"  pid {run['pid']}: {shlex.join(run['argv'])}  ({plural(frames, 'call')}, {exit_text(run)})")
+                if len(lines) <= 10:
+                    lines.append(f"  pid {run['pid']}: {cut(shlex.join(run['argv']), 200)}  ({plural(frames, 'call')}, {exit_text(run)})")
                 for e in trace.exceptions(1000)["exceptions"]:
                     if e["handled_in"] is None and e["frame"]:
                         uncaught.append((run["pid"], e))
+        if len(processes) > 10:
+            lines.append(f"  ... {plural(len(processes) - 10, 'more process')} (`runs` lists them)")
         if not calls:
             lines.append(f"no project code ran (the project root is {self.root})")
         if uncaught:
             lines += ["", "exceptions nothing in the project handled (`traceback` shows each frame's locals):"]
             for pid, e in uncaught[:10]:
                 where = f"{e['node']}:{e['line']} (#{e['frame']})"
-                lines.append(f"  pid {pid}: {e['type']}: {e['message']}  raised in {where}")
+                lines.append(f"  pid {pid}: {e['type']}: {first_line(e['message'])}  raised in {where}")
+            if any(e["type"] not in ("SystemExit", "KeyboardInterrupt") for _, e in uncaught):
+                lines.append("next: `traceback` shows the original error, the frames it went through and their locals")
         return lines
 
     def list_runs(self) -> str:
         runs = sorted(self.runs_dir.glob("*/command.json"), reverse=True) if self.runs_dir.is_dir() else []
         if not runs:
-            return "no runs yet: `run` records one"
+            return "no runs yet: `run` records one" if self.allow_run else f"no runs in {self.runs_dir}"
         lines = []
         for path in runs:
             meta = json.loads(path.read_text())
@@ -392,14 +488,44 @@ class Server:
         text = render_tests(found, int(args.get("limit") or 20), int(args.get("offset") or 0)).replace("(--limit, --offset)", "(limit, offset)")
         failing = next((test for test in found["tests"] if test["exception"] and test["outcome"] in ("failed", "error")), None)
         if failing:
-            text += f"\n`traceback` with exception {failing['exception']['id']} and process {failing['pid']} shows the frames of the first failure, with their locals"
+            text += f"\nnext: `traceback` exception={failing['exception']['id']} process={failing['pid']} shows the first failure's original error and each frame's locals"
         return f"run {folder.name}\n{text}"
+
+    def calls(self, trace: Trace, args: dict, page: tuple[int, int]) -> str:
+        caller = args.get("caller") or None
+        found = trace.calls(required(args, "function"), *page, caller=caller)
+        if not found["nodes"]:
+            raise ToolError(f"no calls of {args['function']} in this run: it did not run, or the name is wrong (`find` looks it up)")
+        if caller and not found["total"]:
+            sites = ", ".join(f"{site['node'] or 'a root'}:{site['line']} ×{site['count']}" for site in found["callers"][:10])
+            raise ToolError(f"no calls of {', '.join(found['nodes'])} from {caller}; it was called from {sites}")
+        text = render_calls(found, detail=bool(args.get("detail"))).replace("(--limit, --offset)", "(limit, offset)")
+        if not args.get("detail") and cut_short(found["calls"]):
+            text += f"\nvalues cut short: `frame` with frame={found['calls'][0]['frame']} (or another #N) shows a call's in full"
+        return text
+
+    def call_tree(self, trace: Trace, args: dict) -> str:
+        start, depth = args.get("frame"), args.get("depth")
+        start = int(start) if start is not None else None
+        if args.get("focus"):
+            found = trace.focus(args["focus"], start, int(depth) if depth is not None else 1)
+            if not found["nodes"]:
+                raise ToolError(f"no calls of {args['focus']} in this run: it did not run, or the name is wrong (`find` looks it up)")
+            return render_focus(found)
+        entries = trace.tree(start, int(depth) if depth is not None else 4)
+        if not entries:
+            return "no calls recorded" if start is None else f"no frame #{start} in this process"
+        folded = fold_small(entries)
+        text = render_tree(folded)
+        if "small call" in text or "calls below)" in text:
+            text += "\nnext: `call_tree` with focus=FUNCTION keeps only the paths to its calls; frame=#N opens one call"
+        return text
 
     def frame(self, trace: Trace, frame_id: int) -> str:
         frame = trace.frame(frame_id)
         if frame is None:
             raise ToolError(f"no frame #{frame_id} in this process")
-        text = render_calls({"nodes": [frame["node"]], "total": 1, "calls": [frame]}).split("\n", 1)[1].strip()
+        text = render_calls({"nodes": [frame["node"]], "total": 1, "calls": [frame]}, detail=True).split("\n", 1)[1].strip()
         entries = trace.tree(frame_id, depth=1)
         children = entries[0]["children"] if entries else []
         if children:
@@ -421,10 +547,12 @@ class Server:
         if not found["recorded"]:
             node = found["nodes"][0]
             had = f"its scope was {', '.join(found['scope'])}" if found["scope"] else f"it was recorded at level {trace.run()['level']}, without a scope"
-            raise ToolError(
-                f"no variable history for {', '.join(found['nodes'])} in this run ({had}; {plural(found['calls'], 'call')} recorded, see `calls`). "
+            again = (
                 f'To record it, `run` the same command again with scope: ["{node}"] (level 2), then ask `variable_history` again.'
+                if self.allow_run
+                else f"This server cannot run programs: the user can record it again with level 2 and scope {node} (`pytest --luciole --luciole-level 2 --luciole-scope {node}`)."
             )
+            raise ToolError(f"no variable history for {', '.join(found['nodes'])} in this run ({had}; {plural(found['calls'], 'call')} recorded, see `calls`). {again}")
         if args.get("variable") and not found["total"]:
             return f"{args['variable']} was never assigned in {', '.join(found['nodes'])} ({plural(found['calls'], 'call')}): check the name, or ask without `variable`"
         return render_history(found).replace("(--limit, --offset)", "(limit, offset)")
@@ -443,7 +571,7 @@ class Server:
             found = origin(trace, self.graph_index[1], function, required(args, "variable"), int(frame) if frame is not None else None, int(at) if at is not None else None, int(args.get("depth") or 8))
         except OriginError as problem:
             raise ToolError(f"{problem} (`calls` lists a function's calls, `find` looks names up)") from None
-        return render_origin(found, rerun="mcp")
+        return render_origin(found, rerun="mcp" if self.allow_run else "user")
 
     # Static graph
 
@@ -537,6 +665,19 @@ class Server:
         raise ToolError(f"no process {pid} in run {folder.name}")
 
 
+def no_run_tools() -> list[dict]:
+    """The tools without `run`, their descriptions saying what to record again instead."""
+    found = []
+    for tool in TOOLS:
+        if tool["name"] == "run":
+            continue
+        text = json.dumps(tool)
+        for old, new in NO_RUN_TEXT.items():
+            text = text.replace(json.dumps(old)[1:-1], json.dumps(new)[1:-1])
+        found.append(json.loads(text))
+    return found
+
+
 def exit_text(run: dict) -> str:
     """How a recorded process ended. Auto-started recorders do not see the exit status: `run`
     gives the command's own."""
@@ -557,13 +698,47 @@ def required(args: dict, key: str):
     return args[key]
 
 
-def clip(text: str) -> str:
-    lines = text.rstrip("\n").splitlines()
+def clip(text: str, room: int, path: Path) -> str:
+    """A program's output in at most about `room` characters: its start and its end, whole lines
+    (each cut to LINE_CHARS), and where the rest is."""
+    lines = [cut(line, LINE_CHARS) for line in text.rstrip("\n").splitlines()]
     if not lines:
         return "(none)"
-    if len(lines) > OUTPUT_HEAD + OUTPUT_TAIL:
-        lines = lines[:OUTPUT_HEAD] + [f"... {plural(len(lines) - OUTPUT_HEAD - OUTPUT_TAIL, 'line')} ..."] + lines[-OUTPUT_TAIL:]
-    return "\n".join(line[:500] for line in lines)
+    if sum(len(line) + 3 for line in lines) <= room:
+        return "\n".join(lines)
+    head, size = [], 0
+    for line in lines:
+        if size + len(line) + 3 > room * OUTPUT_HEAD:
+            break
+        head.append(line)
+        size += len(line) + 3
+    tail = []
+    for line in reversed(lines[len(head) :]):
+        if size + len(line) + 3 > room:
+            break
+        tail.append(line)
+        size += len(line) + 3
+    left = lines[len(head) : len(lines) - len(tail)]
+    marker = f"... {plural(len(left), 'line')} cut ({sum(map(len, left)) // 1000 or 1} KB): the whole output is in {path}"
+    return "\n".join(head + [marker] + tail[::-1])
+
+
+def cut(text: str, chars: int) -> str:
+    return text if len(text) <= chars else text[: chars - 1] + "…"
+
+
+def entry_point(root: Path, name: str) -> tuple[str, str] | None:
+    """`(module, function)` of the project's console script `name`, from pyproject.toml,
+    setup.cfg or setup.py (`cfn-lint = "cfnlint.runner:main"`)."""
+    pattern = re.compile(rf"""^\s*["']?{re.escape(name)}["']?\s*=\s*["']?([\w.]+)\s*:\s*([\w.]+)""", re.M)
+    for file in ("pyproject.toml", "setup.cfg", "setup.py"):
+        try:
+            found = pattern.search((root / file).read_text(errors="replace"))
+        except OSError:
+            continue
+        if found:
+            return found.group(1), found.group(2)
+    return None
 
 
 def indent(text: str) -> str:

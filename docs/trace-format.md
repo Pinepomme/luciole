@@ -108,7 +108,8 @@ CREATE TABLE frames (
     args TEXT,
     result INTEGER,
     locals TEXT,
-    suspended_ns INTEGER
+    suspended_ns INTEGER,
+    end_line INTEGER
 );
 CREATE TABLE exceptions (
     id INTEGER PRIMARY KEY,
@@ -222,9 +223,12 @@ comprehensions have no node, and are not recorded.
   the frame's local variables as the exception left it: what a post-mortem debugger shows. For a
   module body, its globals. Names starting with `__`, modules, classes and functions are left out
   (definitions, not state), and so are the temporaries of pytest's assertion rewriting
-  (`@py_assert1`) and of comprehensions (`.0`); secret names are redacted as arguments are; at most 50 per frame (then
+  (`@py_assert1`) and of comprehensions (`.0`); secrets are redacted as arguments are; at most 50 per frame (then
   `"…"`). Kept for 10,000 frames per run at most, so code that raises in a loop stays cheap.
   `NULL` otherwise, and in traces written before this column existed.
+- `end_line` (level 2): for a frame of scoped code, the line it was at when it returned, raised
+  or was closed (the `return` that ran, the line that raised). `NULL` otherwise, and in traces
+  written before this column existed.
 
 ### `writes`
 
@@ -234,7 +238,7 @@ the order they happened.
 - `frame`: `frames.id`. `line`: the line that assigned it (a line that runs many times, a loop's,
   has a row each time it writes).
 - `name`: the variable. `value`: snapshot id of its new value, under the same rules as arguments
-  (`self` as its identity, secret names redacted).
+  (`self` as its identity, secrets redacted).
 - `time_ns`: when it was seen, at the start of the next line (or as the frame returned, raised or
   yielded).
 
@@ -304,11 +308,24 @@ snapshots are stored once, so ids repeat.
   snapshotted later, by the writer thread; others when the event happens.
 
 **Redaction.** The value of an argument whose name looks like a secret is stored as
-`<redacted>`: names containing (case-insensitive, camelCase split into words) `password`,
-`passwd`, `secret`, `token`, `api_key`/`apikey`, `credential`, `cookie`, `session`, a word
-starting with `auth` (`auth_header`, `authorization`; not `author`), or the word `key` (`key`,
-`sort_key`, `key_file`; not `keyboard`). Dict items under such keys, and dataclass fields of such
-names, are redacted the same way. A secret inside another object's own repr is not.
+`<redacted>`. Names are split into words (camelCase too) and lowercased, then:
+
+- always redacted: names containing `password`, `passwd`, `passphrase`, `secret`, `credential`,
+  `cookie`, `csrf`, `bearer`, a word starting with `auth` (`auth`, `auth_header`, `authToken`,
+  `authorization`; not `author`), `session_id`, a key or token of a kind (`api_key`/`apikey`,
+  `private_key`, `access_key`, `secret_key`, `signing_key`, `client_key`, `ssh_key`,
+  `access_token`, `refresh_token`, `id_token`, `oauth_token`, `github_token`...);
+- redacted when the value looks like a secret: the words `key`, `token` and `session` alone or in
+  other names (`key`, `sort_key`, `key_file`, `token`, `next_token`, `session`), which name
+  ordinary values as often as not (a dict loop's key, a lexer's token, a database session). A
+  value looks like a secret when it is a string (or bytes) of 16 characters or more that starts
+  with a known credential prefix (`Bearer `, `Basic `, `sk-`, `ghp_`, `github_pat_`, `glpat-`,
+  `xoxb-`, `AKIA`, `AIza`, `ya29.`, `eyJ` for a JWT...), or is opaque: 32 hex digits or more
+  (dashes allowed, as in a UUID), or 20 characters or more of letters, digits and `_-+/=` with
+  digits and letters of both cases.
+
+Dict items under such keys, and dataclass fields of such names, are redacted the same way. A
+secret inside another object's own repr is not.
 
 ### Limits
 
@@ -352,8 +369,8 @@ recorder keeps nothing more in memory.
 
 ```sh
 luciole trace run.sqlite summary [--top 10]      # the run, counts, top functions by calls and by time
-luciole trace run.sqlite calls NODE [--limit 20] [--offset 0]   # each call: caller, args, result or exception, duration
-luciole trace run.sqlite tree [--from FRAME] [--depth 4]         # call tree, repeated calls collapsed
+luciole trace run.sqlite calls NODE [--caller F] [--detail] [--limit 20] [--offset 0]   # each call by call site: result or exception, args
+luciole trace run.sqlite tree [--from FRAME] [--depth 4] [--focus F] [--all]   # call tree, repeated and small calls folded
 luciole trace run.sqlite exceptions [--limit 50]                 # where raised, chained from, handled where
 luciole trace run.sqlite traceback [EXCEPTION]                   # the frames it left, with their locals then
 luciole trace run.sqlite history NODE [--var NAME] [--frame N] [--limit 50]   # level 2: assignments, line by line
@@ -405,10 +422,11 @@ from luciole.trace import Trace
 
 with Trace("run.sqlite") as trace:
     trace.summary(top=10)     # {"run", "frames", "exceptions", "threads", "by_calls", "by_time"}
-    trace.calls("Cart.add", limit=20, offset=0)   # {"nodes", "total", "calls": [...]}
+    trace.calls("Cart.add", limit=20, offset=0, caller=None)   # {"nodes", "offset", "callers", "total", "calls": [...]}
     trace.tree(start=None, depth=4)               # [{"frame", "node", "count", "duration_ns", "end", "children", "more"}]
+    trace.focus("Cart.*", start=None, depth=1)    # {"nodes", "start", "total", "shown", "limited", "tree"}
     trace.exceptions(limit=50, offset=0)          # {"total", "exceptions": [...]}
-    trace.traceback(exception_id=None)            # {"exception", "frames", "handled_in"}: innermost first
+    trace.traceback(exception_id=None, original=False)   # {"exception", "frames", "handled_in", "chain"}: innermost first
     trace.history("checkout", name=None, frame=None, limit=20, offset=0)
                               # {"nodes", "scope", "recorded", "calls", "total", "frames": [{..., "writes"}]}
     trace.children(frame=None, after=0, until=None, limit=100, collapse=True)   # {"calls", "next"}
@@ -417,14 +435,37 @@ with Trace("run.sqlite") as trace:
     trace.tests(failed=False) # rows of `tests` plus `exception`; None without the table
 ```
 
+In `calls`, `callers` counts every call of the function by call site (`{"node", "line",
+"count"}`, `node` null for calls with no project caller, most first); `caller` keeps the calls
+made by one function (then `total` counts those and `all` every call). As text, calls are
+grouped by call site, each with its result or exception first, then its arguments; arguments
+with the same value in every call shown are said once, `self` and other identities shortened
+(`<Cart object …7cb0>`), values cut to 80 characters (120 for results), and consecutive calls
+that read the same are one line (`#7..#26 ×20`). `--detail` prints one line per call with every
+value as recorded, as `frame` does.
+
 In `tree`, consecutive calls of one function with the same subtree are one entry with a `count`;
-`more` counts the calls below an entry that are not shown. In `traceback`, each frame (like an
-item of `calls()`, plus `locals`) has `at_line`, the line it was at when the exception left it;
-by default it is the last exception nothing handled, else the last one. In `history`, each item
-of `frames` is a call (like an item of `calls()`) with its `writes`, `{"line", "name", "value",
+`more` counts the calls below an entry that are not shown. The text (unless `--all`) folds the
+calls that took under 1% of the tree's time, and under a tenth of their caller's, into one line
+per caller (`… 12 small calls: lookup
+×8, normalize ×4`), when there are three or more of them and nothing raised under them
+(`fold_small()`, which adds `{"folded": true, "count", "nodes", "duration_ns", "below"}` entries).
+`focus` keeps the frames on the paths from the roots (or from frame `start`) to the calls of the
+functions a pattern matches (as a scope's patterns do: `checkout`, `Cart.*`), at most 50 of
+them: path frames have `path` (their `more` counts their other calls), matching ones `match`,
+with their own calls `depth` levels deep.
+
+In `traceback`, each frame (like an item of `calls()`, plus `locals`) has `at_line`, the line it
+was at when the exception left it; by default it is the last exception nothing handled, else the
+last one, and with `original` (what `luciole trace ... traceback` and the MCP tool ask) the first
+exception of its chain instead: what it was raised from (`raise ... from`, or while handling),
+and so on, the original error. `chain` is that chain, outermost first. In `history`, each item of
+`frames` is a call (like an item of `calls()`) with its `writes`, `{"line", "name", "value",
 "time_ns"}`; `limit` and `offset` count writes, `name` keeps one variable, and `recorded` is false
 when the run's scope did not cover the function (no level 2, or another scope): run it again
-with `--scope`. In `summary`, a function's `total_ns` leaves out calls made while another call of
+with `--scope`. As text, a variable assigned once per call, on the same line and to the same
+value in every call shown, is said once, and each call ends with what it returned or raised, at
+the line it ended at (`end_line`). In `summary`, a function's `total_ns` leaves out calls made while another call of
 it runs (recursion); `active_ns` is the same without the time its generators and coroutines spent
 suspended; `self_ns` is its active time minus its callees' active time, so a coroutine awaiting
 `asyncio.sleep` is not busy meanwhile. The frame running an event loop (`asyncio.run(main())` in
@@ -457,7 +498,11 @@ method calls share one `self` snapshot (id 2: the same `Cart`), `price` is `10` 
 
 ```
 $ luciole trace shop.sqlite calls with_tax
-1 calls of shop:with_tax
+1 call of shop:with_tax
+  from shop:Cart.total:19
+    #8 -> 18.0  (amount=15)   6.2 µs, caller #7
+$ luciole trace shop.sqlite calls with_tax --detail
+1 call of shop:with_tax
   #8 with_tax(amount=15) -> 18.0   6.2 µs, from shop:Cart.total:19 (#7), MainThread
 ```
 

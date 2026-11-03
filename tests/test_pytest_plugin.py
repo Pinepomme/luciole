@@ -270,7 +270,8 @@ def test_a_ci_recording_read_by_the_mcp_server(project, tmp_path):
     assert f"luciole mcp --runs {recordings} --no-run" in result.stdout
     assert not runs_of(project)  # not in ~/.luciole
     client = Client("--root", str(project), "--runs", str(recordings), "--no-run")
-    assert "existing recordings only" in client.request("initialize")["instructions"]
+    instructions = client.request("initialize")["instructions"]
+    assert "cannot run programs" in instructions and "`run`" not in instructions
     tools = [tool["name"] for tool in client.request("tools/list")["tools"]]
     assert "run" not in tools and "tests" in tools
     text, error = client.tool("run", command="pytest")
@@ -282,11 +283,13 @@ def test_a_ci_recording_read_by_the_mcp_server(project, tmp_path):
     assert lines[1] == "5 tests: 1 failed, 1 error, 1 passed, 1 skipped, 1 xfail"
     assert lines[2].startswith("  failed  tests/test_cart.py::test_three  (call)  #")
     assert lines[3] == "          AssertionError: assert 28 == 31"
-    assert lines[-1].startswith("`traceback` with exception 1 and process ")
+    assert lines[-1].startswith("next: `traceback` exception=1 process=")
     text, error = client.tool("tests", failed=True)
     assert "test_one" not in text and "test_db" in text
     text, error = client.tool("traceback", exception=1)
     assert not error and "expected = 31" in text and "@py_assert" not in text
+    text, error = client.tool("variable_history", function="total")
+    assert error and "--luciole-scope cart:total" in text and "`run`" not in text  # never suggests a tool it lacks
     client.close()
     # One run's folder works too.
     client = Client("--root", str(project), "--runs", str(folder))

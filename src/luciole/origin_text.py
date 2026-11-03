@@ -11,8 +11,8 @@ VALUES = 12  # variables in the summary of the values met on the way, and values
 
 def render_origin(found: dict, rerun: str = "cli") -> str:
     """The answer as a chain to follow: one line per step, its sources indented below it with
-    `<-`. `rerun` says how to ask for level 2 in hints: "cli" (`luciole run --scope`) or "mcp"
-    (the `run` tool's `scope`). Before the tree, the values each variable took on the way."""
+    `<-`. `rerun` says how to ask for level 2 in hints: "cli" (`luciole run --scope`), "mcp"
+    (the `run` tool's `scope`) or "user" (an MCP server that cannot run: what to record again). Before the tree, the values each variable took on the way."""
     head = f"where {found['variable']} in {found['node']} #{found['frame']} came from"
     lines = [head + f" (level {found['level']} trace{'' if found['level'] < 2 else ', scope ' + ', '.join(found['scope'] or [])}):", ""]
     if found.get("values"):
@@ -26,7 +26,11 @@ def render_origin(found: dict, rerun: str = "cli") -> str:
 
 
 def rerun_hint(scope: list[str], rerun: str) -> str:
-    return f"`run` the same command again with scope: {json.dumps(scope)}" if rerun == "mcp" else f"run again with --scope {','.join(scope)}"
+    if rerun == "mcp":
+        return f"`run` the same command again with scope: {json.dumps(scope)}"
+    if rerun == "user":  # an MCP server that cannot run programs (--no-run)
+        return f"ask the user to record it again at level 2 with scope {','.join(scope)} (`pytest --luciole --luciole-level 2 --luciole-scope {','.join(scope)}`)"
+    return f"run again with --scope {','.join(scope)}"
 
 
 def short(node: str | None) -> str:
@@ -94,7 +98,7 @@ def _render(step: dict, level: int, lines: list[str], rerun: str, hinted: set) -
         why = "depth limit" if step["cut"] == "depth" else "step limit"
         ask = "return" if kind == "returned_by" else step["var"] if kind.endswith("_written_by") else var
         at = step.get("time_ns") if kind == "write" else None
-        if rerun == "mcp":
+        if rerun in ("mcp", "user"):
             again = f'`origin` with variable: "{ask}", frame: {step["frame"]}' + (f", at: {at}" if at is not None else "")
         else:
             again = f"origin - {ask} --frame {step['frame']}" + (f" --at {at}" if at is not None else "")

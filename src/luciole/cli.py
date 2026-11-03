@@ -96,14 +96,18 @@ def main(argv: list[str] | None = None) -> int:
     calls_cmd.add_argument("node", help="function's node id (pkg.mod:Class.method), or its end (Class.method)")
     calls_cmd.add_argument("--limit", type=int, default=20)
     calls_cmd.add_argument("--offset", type=int, default=0)
+    calls_cmd.add_argument("--caller", help="only the calls made by this function (node id or its end)")
+    calls_cmd.add_argument("--detail", action="store_true", help="one line per call, every value as recorded")
     tree_cmd = queries.add_parser("tree", help="the call tree, repeated calls collapsed")
     tree_cmd.add_argument("--from", dest="start", type=int, help="frame id to start from (default: every root)")
-    tree_cmd.add_argument("--depth", type=int, default=4)
+    tree_cmd.add_argument("--depth", type=int, help="levels shown (default 4); with --focus, below each matching call (default 1)")
+    tree_cmd.add_argument("--focus", help="only the paths to the calls of this function (node id or its end, * as a wildcard)")
+    tree_cmd.add_argument("--all", action="store_true", help="do not fold the calls that took under 1%% of the time")
     exceptions_cmd = queries.add_parser("exceptions", help="exceptions: where raised, chained from, handled where")
     exceptions_cmd.add_argument("--limit", type=int, default=50)
     exceptions_cmd.add_argument("--offset", type=int, default=0)
     traceback_cmd = queries.add_parser("traceback", help="the frames an exception left, with their locals then (level 1)")
-    traceback_cmd.add_argument("exception", type=int, nargs="?", help="exception id (default: the last one nothing handled)")
+    traceback_cmd.add_argument("exception", type=int, nargs="?", help="exception id (default: the original error behind the last one nothing handled)")
     history_cmd = queries.add_parser("history", help="each call's variable assignments, line by line (level 2)")
     history_cmd.add_argument("node", nargs="?", help="function's node id, or its end (not needed with --frame)")
     history_cmd.add_argument("--var", help="one variable only")
@@ -263,7 +267,8 @@ def runs_command(args, parser) -> int:
 
 def trace_command(args) -> int:
     from luciole.browse import query, render_children, render_frames, serve
-    from luciole.trace import Trace, TraceError, render_calls, render_exceptions, render_history, render_summary, render_traceback, render_tree
+    from luciole.trace import Trace, TraceError, fold_small
+    from luciole.trace_text import render_calls, render_exceptions, render_focus, render_history, render_summary, render_traceback, render_tree
 
     if args.query == "serve":
         return serve(args.file)
@@ -280,18 +285,22 @@ def trace_command(args) -> int:
         if args.query == "summary":
             result, text = trace.summary(args.top), render_summary
         elif args.query == "calls":
-            result, text = trace.calls(args.node, args.limit, args.offset), render_calls
+            result, text = trace.calls(args.node, args.limit, args.offset, args.caller), lambda found: render_calls(found, args.detail)
         elif args.query == "tree":
-            result, text = trace.tree(args.start, args.depth), render_tree
+            if args.focus:
+                result, text = trace.focus(args.focus, args.start, 1 if args.depth is None else args.depth), render_focus
+            else:
+                result = trace.tree(args.start, 4 if args.depth is None else args.depth)
+                result, text = result if args.all else fold_small(result), render_tree
         elif args.query == "traceback":
-            result, text = trace.traceback(args.exception), render_traceback
+            result, text = trace.traceback(args.exception, original=True), render_traceback
         elif args.query == "history":
             result, text = trace.history(args.node, args.var, args.frame, args.limit, args.offset), render_history
         elif args.query == "children":
             result, text = trace.children(args.frame, args.after, args.until, args.limit, args.collapse), render_children
         elif args.query == "frame":
             result = trace.frame(args.frame)
-            text = lambda frame: render_calls({"nodes": [frame["node"]], "total": 1, "calls": [frame]}) if frame else f"no frame #{args.frame}"  # noqa: E731
+            text = lambda frame: render_calls({"nodes": [frame["node"]], "total": 1, "calls": [frame]}, detail=True) if frame else f"no frame #{args.frame}"  # noqa: E731
         elif args.query == "frames":
             end = trace.run()["duration_ns"] if args.end is None else int(args.end * 1e9)
             result = query(trace, "frames", {"from": int(args.start * 1e9), "to": end, "every": int(args.every * 1e6), "limit": args.limit})

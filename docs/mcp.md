@@ -20,7 +20,9 @@ folder it starts in as the project root; `luciole mcp --root PATH` sets another.
 `luciole mcp --runs DIR` reads the runs in `DIR` (a folder of run folders, or one run folder)
 rather than the root's own, such as a CI artifact made by `pytest --luciole --luciole-dir DIR`;
 `--no-run` leaves out the `run` tool, for a server that answers about existing recordings only
-(post-mortem, see [post-mortem.md](post-mortem.md)).
+(post-mortem, see [post-mortem.md](post-mortem.md)): its instructions and answers then say what
+the user should record again (`pytest --luciole --luciole-level 2 --luciole-scope F`) where they
+would otherwise suggest `run`.
 
 Recording needs the program to run on Python 3.12 or newer (`sys.monitoring`); the graph tools
 work with any Python 3.10+.
@@ -31,16 +33,35 @@ work with any Python 3.10+.
    runs as typed, with auto-start on: every Python process it starts (child processes, pool
    workers) records a trace at level 1, every call of project code with its arguments and return
    value, and every exception with where it was raised and handled. The answer has the exit
-   status, the output (its start and end), each process recorded, and the exceptions nothing in
-   the project handled, with the frame (`#N`) they were raised in.
+   status, the output, each process recorded, and the exceptions nothing in the project handled,
+   with the frame (`#N`) they were raised in. It stays under about 3.5 KB: the output keeps its
+   start and its end, and says which file has all of it (`output.txt` in the run's folder).
+   Commands run through a package manager (`uv run`, `uvx`, `poetry run`, `pipenv run`, `hatch
+   run`, `pdm run`, `conda run`, `rye run`, `pixi run`) are not run: they may build or sync an
+   environment first, for minutes. The answer gives the command to run instead, with the
+   project's `.venv` interpreter when there is one. A command that is not on PATH gets a way to
+   run it with the interpreter: the project's console script of that name (from
+   `pyproject.toml`, `setup.cfg` or `setup.py`) through `python -c`, else `python -m`.
 2. Ask about the run:
    - `exceptions`: type, message, the function and line that raised it, its chain, where it was
      handled;
-   - `traceback` (default: the last exception nothing handled): the frames it went through,
-     innermost first, each with its local variables as the exception left it, the view a
-     post-mortem debugger gives, with no re-run;
-   - `calls FUNCTION`: every call, with arguments, return value or exception, caller, duration;
-   - `call_tree` (from the top, or below a frame), repeated calls collapsed into `×N`;
+   - `traceback`: the frames an exception went through, innermost first, each with its local
+     variables as the exception left it, the view a post-mortem debugger gives, with no re-run.
+     By default, the original error behind the last exception nothing handled: the first of its
+     chain (`raise ... from`, or raised while handling another), where the problem started, not
+     the wrapper that reached the top. The chain is listed one line per exception, and
+     `exception: N` shows another;
+   - `calls FUNCTION [caller] [detail]`: its calls grouped by call site (`from pkg.mod:fn:85
+     ×38`, and the call sites not on the page), each with its return value or exception first,
+     then its arguments. Arguments with the same value in every call shown are said once,
+     `self` and other objects without a repr of their own are shortened (`<Cart object …7cb0>`),
+     long values are cut (`frame` shows a call's in full), and consecutive calls that read the
+     same are one line (`#7..#26 ×20`). `caller` keeps the calls made by one function; `detail`
+     gives one line per call with every value as recorded;
+   - `call_tree` (from the top, or below a frame), repeated calls collapsed into `×N`, and calls
+     that took under 1% of the time (and under a tenth of their caller's) folded into one line
+     per caller, unless something raised under them. `focus: "Cart.price"` keeps only the paths from the top to that function's
+     calls (`*` as a wildcard), the other calls counted, not shown;
    - `frame N`: one call in detail, and the calls it made;
    - `tests`: for a test run recorded with `pytest --luciole` (or pytest with `--luciole` under
      `run`), each test's outcome, failed ones first, with where it failed (setup, call,
@@ -49,8 +70,10 @@ work with any Python 3.10+.
    - `summary`: duration, exit status, top functions by calls and by time (self time leaves out
      the time coroutines spend awaiting);
    - `variable_history FUNCTION [variable] [frame]`: every assignment to its local variables,
-     call by call and line by line, with the values. It needs a run with a `scope` covering the
-     function (below); otherwise it says so, and how to get one;
+     call by call and line by line, with the values, each call ending with what it returned or
+     raised and at which line. A variable assigned once per call to the same value in every call
+     is said once. It needs a run with a `scope` covering the function (below); otherwise it
+     says so, and how to get one;
    - `origin FUNCTION VARIABLE [frame] [at] [depth]`: where a wrong value came from, walked back
      across functions: the assignment that set it, the caller that passed it, the call that
      returned it, the last call that set a global or an attribute of the same object, then what
@@ -71,7 +94,14 @@ work with any Python 3.10+.
 
 Each run is kept (the last 50 per project): `runs` lists them, and every query takes `run` (default:
 the last) and `process` (a pid; default: the first process). Long answers are cut and paginated
-(`limit`, `offset`, `depth`).
+(`limit`, `offset`, `depth`). An answer ends with at most one line naming the most useful next
+query, when there is an obvious one (`traceback` after a run that failed, `focus` after a folded
+call tree, `frame` when values were cut).
+
+The instructions the server sends at initialize tell the agent to use `run` when it needs
+values or call paths a print would not give easily, to verify fixes with plain pytest rather
+than under the recorder, to stop recording once `calls` or `traceback` pinpoints the cause, and
+to check who calls the function it blames before choosing where to fix.
 
 With the VS Code extension open, the engine it runs is found too: the brain lights up while the
 agent's programs run.

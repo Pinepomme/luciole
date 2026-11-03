@@ -441,6 +441,36 @@ def test_an_exception_keeps_the_locals_of_every_frame_it_leaves(tmp_path):
     assert text.endswith("  not handled")
 
 
+def test_traceback_can_start_from_the_original_error(tmp_path):
+    result, path = traced(tmp_path, """
+        def low():
+            raise KeyError("k")
+
+        def mid():
+            try:
+                low()
+            except KeyError as error:
+                raise ValueError("v") from error
+
+        def top():
+            try:
+                mid()
+            except ValueError:
+                raise RuntimeError("r")
+
+        top()
+    """)
+    assert result.returncode == 1
+    with Trace(path) as found:
+        original, outer, middle = found.traceback(original=True), found.traceback(), found.traceback(2)
+    assert original["exception"]["type"] == "KeyError" and [e["type"] for e in original["chain"]] == ["RuntimeError", "ValueError", "KeyError"]
+    assert outer["exception"]["type"] == "RuntimeError" and outer["chain"] == original["chain"] == middle["chain"]
+    text = trace.render_traceback(original).splitlines()
+    assert text[:2] == ["!1 KeyError: 'k'", "  the original error of a chain of 3, outermost first (`traceback` with exception=N shows another):"]
+    assert text[-1] == "  handled in prog:mid (#3), line 7, which raised !2 from it"
+    assert trace.render_traceback(middle).splitlines()[-1] == "  handled in prog:top (#2), line 13, which raised !3 while handling it"
+
+
 def test_level_0_keeps_no_locals(tmp_path):
     result, path = traced(tmp_path, FAILING, level=0)
     assert rows(path, "SELECT COUNT(*) FROM frames WHERE locals IS NOT NULL") == [(0,)]
@@ -513,27 +543,31 @@ def test_values_are_taken_when_the_call_happens(tmp_path):
 
 def test_secrets_are_redacted(tmp_path):
     result, path = traced(tmp_path, """
-        def login(user, password, apiKey, sort_key, keyboard, author, config):
+        def login(user, password, apiKey, sort_key, keyboard, author, config, key, token):
             return "ok"
 
-        login("ada", "hunter2", "apik-zz-123", "s", "qwerty", "me", {"token": "tok-zz-987", "region": "eu"})
+        login("ada", "hunter2", "apik-zz-123", len, "qwerty", "me", {"token": "ghp_Zz9a8b7c6d5e4f3g2h1", "key": "region", "region": "eu"}, "name", "sk-Zz9a8b7c6d5e4f3g2h1")
     """)
     assert result.returncode == 0, result.stderr
     with Trace(path) as found:
         [call] = found.calls("login")["calls"]
     reprs = {name: value["repr"] for name, value in call["args"].items()}
-    assert reprs["password"] == reprs["apiKey"] == reprs["sort_key"] == "<redacted>"
+    assert reprs["password"] == reprs["apiKey"] == reprs["token"] == "<redacted>"
     assert reprs["user"] == "'ada'" and reprs["keyboard"] == "'qwerty'" and reprs["author"] == "'me'"
-    assert reprs["config"] == "{'token': <redacted>, 'region': 'eu'}"
+    assert reprs["key"] == "'name'" and reprs["sort_key"] == "<built-in function len>"  # a `key` that is no secret
+    assert reprs["config"] == "{'token': <redacted>, 'key': 'region', 'region': 'eu'}"
     content = path.read_bytes()
-    assert b"hunter2" not in content and b"apik-zz-123" not in content and b"tok-zz-987" not in content
+    assert b"hunter2" not in content and b"apik-zz-123" not in content and b"Zz9a8b7c6d5e4f3g2h1" not in content
 
 
 def test_secret_names():
-    secrets = ["password", "db_password", "passwd", "client_secret", "authToken", "api_key", "apikey", "APIKey", "key", "sort_key", "key_file", "auth", "authorization", "credentials", "cookie", "session_id"]
-    plain = ["keyboard", "monkey", "author", "authors", "name", "keys_seen", "value"]
+    secrets = ["password", "db_password", "passwd", "client_secret", "authToken", "api_key", "apikey", "APIKey", "secret_key", "access_token", "auth", "authorization", "credentials", "cookie", "session_id"]
+    plain = ["keyboard", "monkey", "author", "authors", "name", "keys_seen", "value", "key", "sort_key", "key_file", "token", "next_token", "session"]
     assert [name for name in secrets if not values.is_secret(name)] == []
-    assert [name for name in plain if values.is_secret(name)] == []
+    assert [name for name in plain if values.is_secret(name, "x")] == []
+    # Generic names hold secrets when their values look like ones.
+    assert values.is_secret("token", "ghp_Zz9a8b7c6d5e4f3g2h1") and values.is_secret("key", "aB3dE5gH7jK9mN1pQ3sT5xY")
+    assert not values.is_secret("key", "file_2024_report_name") and not values.is_secret("token", "(") and not values.is_secret("name", "sk-Zz9a8b7c6d5e4f3g2h1")
 
 
 def test_value_limits():
@@ -620,7 +654,7 @@ HISTORY = """
             total = total + double(price)
             seen.append(price)
         cart = Cart().add(total)
-        token = "tok-zz-987"
+        token = "ghp_Zz9a8b7c6d5e4f3g2h1"
         label = f"total {total}"
         return label
 
@@ -629,7 +663,7 @@ HISTORY = """
         left = left - 10
         raise ValueError(left)
 
-    checkout([1, 2], "tok-zz-123")
+    checkout([1, 2], "xoxb-Zz1a2b3c4d5e6f7g8h9")
     checkout([5], None)
     try:
         fails(3)
@@ -665,13 +699,13 @@ def test_variable_history_of_scoped_functions(tmp_path):
         (19, "total", "6"),
         (20, "seen", "[1, 2]"),
         (21, "cart", "<Cart object>"),  # another one
-        (22, "token", "<redacted>"),  # a secret name, as for arguments
+        (22, "token", "<redacted>"),  # a secret value, as for arguments
         (23, "label", "'total 6'"),
     ]
     carts = rows(path, "SELECT DISTINCT w.value FROM writes w WHERE w.frame = ? AND w.name = 'cart'", first)
     assert len(carts) == 2
     assert rows(path, "SELECT COUNT(*) FROM writes WHERE frame = ?", second) == [(9,)]
-    assert b"tok-zz-987" not in path.read_bytes() and b"tok-zz-123" not in path.read_bytes()
+    assert b"Zz9a8b7c6d5e4f3g2h1" not in path.read_bytes() and b"Zz1a2b3c4d5e6f7g8h9" not in path.read_bytes()
     # Unscoped functions (and methods called from scoped ones) have no writes: no LINE events at all.
     assert writes(path, "prog:double") == [] and writes(path, "prog:Cart.add") == []
     # The last line of a frame that raises is seen as it unwinds.
@@ -695,6 +729,18 @@ def test_variable_history_of_scoped_functions(tmp_path):
     assert re.search(r"\n    line 19   total = 6   \+[\d.]+ .s\n", text)
     assert cli(path, "history", "--frame", second, "--limit", "2").endswith("... 7 more writes (--limit, --offset)\n")
     assert json.loads(cli(path, "--json", "history", "fails"))["total"] == 2
+    # Each scoped call ends at a line: its return, or the line that raised.
+    assert rows(path, "SELECT node, end_line FROM frames WHERE node IN ('prog:checkout', 'prog:fails', 'prog:double') ORDER BY id") == [
+        ("prog:checkout", 24), ("prog:double", None), ("prog:double", None), ("prog:checkout", 24), ("prog:double", None), ("prog:fails", 29)]
+    text = cli(path, "history", "checkout")
+    assert "\n  same in all 2 calls shown: line 22 token = <redacted>\n" in text and "token = " not in text.split("shown:", 1)[1].split("\n", 1)[1]
+    assert "\n    line 23   label = 'total 6'   +" in text and "\n    line 24   return 'total 6'\n" in text and text.endswith("    line 24   return 'total 10'\n")
+    assert cli(path, "history", "fails").endswith("    line 28   left = -7   " + text_after(cli(path, "history", "fails"), "left = -7   ") + "\n    line 29   raised ValueError: -7\n")
+
+
+def text_after(text, marker):
+    """The rest of the line after `marker`."""
+    return text.split(marker, 1)[1].split("\n", 1)[0]
 
 
 def test_variable_history_follows_a_generator_across_resumes(tmp_path):
@@ -1068,17 +1114,24 @@ def test_cli_output(tmp_path):
     assert json.loads(cli(path, "summary", "--json"))["by_calls"][0]["node"] == "prog:fib"
 
     calls = cli(path, "calls", "fails")
-    assert calls.startswith("1 call of prog:fails\n")
-    assert "fails(x=1) !! ValueError: bad 1" in calls and "from prog:wraps:7" in calls
-    assert "middle !! RuntimeError: wrapped (from #" in cli(path, "calls", "middle").replace("middle()", "middle")
-    limited = cli(path, "calls", "prog:fib", "--limit", "2")
+    assert calls.startswith("1 call of prog:fails\n  from prog:wraps:7\n    #")
+    assert "!! ValueError: bad 1  (x=1)   " in calls
+    assert "fails(x=1) !! ValueError: bad 1" in cli(path, "calls", "fails", "--detail") and "from prog:wraps:7" in calls
+    assert "middle !! RuntimeError: wrapped (from #" in cli(path, "calls", "middle", "--detail").replace("middle()", "middle")
+    limited = cli(path, "calls", "prog:fib", "--limit", "2", "--detail")
     assert limited.count(" fib(n=") == 2 and "... 7 more" in limited
     assert json.loads(cli(path, "--json", "calls", "fib"))["total"] == 9
+    fibs = cli(path, "calls", "fib", "--caller", "fib").splitlines()  # fib(2) calls fib(1) and fib(0), three times
+    assert fibs[0] == "6 calls of prog:fib from prog:fib (9 in all)" and fibs[1] == "  from prog:fib:" + fibs[1].rsplit(":", 1)[1]
+    assert re.match(r"    #\d+ -> 1  \(n=1\)   ", fibs[2]) and re.match(r"    #\d+ -> 0  \(n=0\)   ", fibs[3])
 
-    tree = cli(path, "tree", "--depth", "3").splitlines()
+    tree = cli(path, "tree", "--depth", "3", "--all").splitlines()
     assert tree[0].startswith("prog  #1")
     assert any(re.match(r"\s{4}prog:fib ×3  #\d+", line) for line in tree)  # three identical fib(2) subtrees
     assert any(line.strip().startswith("prog:wraps") and "[raise]" in line for line in tree)
+    focus = cli(path, "tree", "--focus", "fails").splitlines()
+    assert focus[0].startswith("1 call of prog:fails: the paths to all, from the top") and focus[-1].strip().startswith("prog:fails  #")
+    assert focus[-1].endswith("[raise]  <==") and focus[-2].strip().startswith("prog:wraps  #")
     shallow = cli(path, "tree", "--depth", "1")
     assert "calls below" in shallow and "prog:fails" not in shallow
     [root] = json.loads(cli(path, "tree", "--json", "--depth", "0"))
@@ -1087,6 +1140,23 @@ def test_cli_output(tmp_path):
     exceptions = cli(path, "exceptions")
     assert exceptions.startswith("4 exceptions\n")
     assert "RuntimeError: wrapped" in exceptions and "caused by !1" in exceptions and "handled in prog:catches" in exceptions
+
+
+def test_small_calls_are_folded_next_to_the_whole_and_to_their_caller():
+    def entry(node, ns, children=(), end="return"):
+        return {"frame": 1, "node": node, "count": 1, "duration_ns": ns, "end": end, "children": list(children), "more": 0}
+
+    tree = [entry("root", 10_000, [
+        entry("work", 8_000),
+        entry("a", 50), entry("b", 50, [entry("b2", 10)]), entry("c", 50), entry("d", 50, end="raise"),
+        entry("mid", 300, [entry("x", 90), entry("y", 80), entry("z", 70)]),  # small, but most of their caller's time: kept
+    ])]
+    folded = trace.fold_small(tree)
+    children = folded[0]["children"]
+    assert [child.get("node") for child in children] == ["work", "d", "mid", None]
+    assert children[-1] == {"folded": True, "count": 3, "nodes": {"a": 1, "b": 1, "c": 1}, "duration_ns": 150, "below": 1}
+    assert [child["node"] for child in children[2]["children"]] == ["x", "y", "z"]
+    assert trace.render_tree(folded).splitlines()[-1] == "  … 3 small calls: a, b, c  (150 ns in all, +1 call below)"
 
 
 def test_a_trace_directory_that_does_not_exist_yet_is_made(tmp_path):
