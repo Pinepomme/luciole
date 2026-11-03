@@ -23,7 +23,15 @@ When every test passes, the recording is deleted (`--luciole-keep=always` keeps 
 luciole trace RUN_FOLDER tests --failed       # the failures, each with its frame (#N) and exception (!N)
 luciole trace RUN_FOLDER/trace-….sqlite traceback 3   # exception !3: each frame it left, with its locals
 luciole trace RUN_FOLDER/trace-….sqlite calls total   # every call of a function, with its values
+luciole trace RUN_FOLDER suspects             # functions failing tests ran and passing ones did not
+luciole trace RUN_FOLDER compare              # the first failing test beside the closest passing one
 ```
+
+`suspects` and `compare` ([fault-localization.md](fault-localization.md)) need no re-run: the
+first ranks the functions by how much the failing tests ran them and the passing tests did not,
+the second walks a failing test's calls beside a passing test's and stops at the first call that
+returned something else, raised, or was made on one side only. `compare --run-b OTHER_RUN`
+compares with the same test in another recording (the last green CI run, say).
 
 The plugin is installed with luciole and does nothing unless `--luciole` is given (or
 `LUCIOLE_PYTEST=1` is set): installing luciole never changes a test run. Options:
@@ -106,8 +114,9 @@ claude mcp add luciole-ci -- luciole mcp --runs luciole-recordings --no-run
 ```
 
 Then ask: "the tests failed in CI, the recording is in luciole-recordings: why?". The agent
-starts with `tests` (the failures, their frames, exceptions and processes), then `traceback`,
-`calls`, `frame` and `origin` on them. `find`, `neighbors` and `origin` read the static graph of
+starts with `tests` (the failures, their frames, exceptions and processes), `suspects` and
+`compare`, then `traceback`, `calls`, `frame` and `origin` on what they point at. `find`, `neighbors` and `origin` read the static graph of
 the checkout (`--root`, default the current folder), which should be the commit that ran.
 `luciole trace ... origin` reads the source at the root recorded in the trace, the CI machine's
-path: use the MCP server's `origin` for a downloaded recording.
+path: use the MCP server's `origin` for a downloaded recording (`luciole trace ... suspects` then
+ranks without files and lines, which the MCP server's `suspects` gives from the checkout).

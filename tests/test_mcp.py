@@ -88,7 +88,7 @@ def test_initialize_and_list_tools(project):
     assert reply["result"]["capabilities"] == {"tools": {}}
     assert "run" in reply["result"]["instructions"]
     tools = {tool["name"]: tool for tool in client.request("tools/list")["result"]["tools"]}
-    assert set(tools) == {"run", "runs", "summary", "exceptions", "traceback", "calls", "call_tree", "frame", "variable_history", "origin", "tests", "find", "neighbors"}
+    assert set(tools) == {"run", "runs", "summary", "exceptions", "traceback", "calls", "call_tree", "frame", "variable_history", "origin", "tests", "suspects", "compare", "find", "neighbors"}
     assert tools["run"]["inputSchema"]["required"] == ["command"]
     assert client.request("no/such/method")["error"]["code"] == -32601
     client.close()
@@ -393,3 +393,35 @@ def test_a_missing_command_names_the_project_script(client, project):
     text, error = client.tool("run", command="cart-tool 1")
     assert error and "could not start cart-tool: it is not on PATH. It is the project's script for cart:checkout" in text
     assert "from cart import checkout; sys.argv[0] = " in text
+
+
+@needs_monitoring
+def test_suspects_and_compare(client, project):
+    from test_localize import SHOP, TESTS
+
+    for name, source in {"shop.py": SHOP, **TESTS}.items():
+        path = project / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(textwrap.dedent(source))
+    # Two pytest processes in one run: the tests are spread over their traces.
+    (project / "both.py").write_text(textwrap.dedent("""
+        import subprocess, sys
+
+        for name in ("tests/test_basic.py", "tests/test_coupon.py"):
+            subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", name])
+    """))
+    text = client.ok("run", command=f"{PYTHON} both.py")
+    assert "recorded 3 processes:" in text
+    text = client.ok("suspects", top=3)
+    lines = text.splitlines()
+    assert lines[1] == "suspects from 6 tests in 3 processes (2 failed, 4 passed; outcomes recorded by pytest --luciole)"
+    assert lines[4].split()[:5] == ["1", "0.82", "2/2", "1/4", "shop:apply_coupon"]
+    assert lines[-1].startswith("next: `compare` sets the first failing test beside the closest passing one; `calls` function=shop:apply_coupon")
+    text = client.ok("compare")
+    assert "apply_coupon returned something else, its arguments differ too" in text
+    frame = re.search(r"A #(\d+) apply_coupon", text).group(1)
+    pid = re.search(r"process=(\d+)", text).group(1)
+    assert f"next: `origin` frame={frame} process={pid} variable=return" in text
+    assert "-> 3" in client.ok("frame", frame=int(frame), process=int(pid))
+    text, error = client.tool("compare", frame_a=1)
+    assert error and "give both frame_a and frame_b" in text

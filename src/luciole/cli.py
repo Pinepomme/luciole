@@ -14,6 +14,8 @@
     luciole runs new --root DIR --command JSON [--cwd DIR] [--level N] [--scope F,G] [--by vscode]   a new run folder; runs finish FOLDER
     luciole trace FILE origin NODE VARIABLE [--frame N] [--depth D] [--json]   where a value came from
     luciole trace FILE|RUN_FOLDER tests [--failed] [--json]   test outcomes (pytest --luciole), failed first
+    luciole trace FILE|RUN_FOLDER suspects [--top N] [--json]   functions ranked by failing vs passing tests (Ochiai)
+    luciole trace FILE|RUN_FOLDER compare [FRAME_A FRAME_B] [--run-b RUN] [--json]   first divergence of two executions
     luciole mcp [--root DIR] [--runs DIR] [--no-run]   MCP server; --no-run: existing recordings only
 """
 
@@ -139,7 +141,14 @@ def main(argv: list[str] | None = None) -> int:
     tests_query.add_argument("--failed", action="store_true", help="failed and errored tests only")
     tests_query.add_argument("--limit", type=int, default=50)
     tests_query.add_argument("--offset", type=int, default=0)
-    for query in (tests_query, summary_cmd, calls_cmd, tree_cmd, exceptions_cmd, traceback_cmd, history_cmd, origin_cmd, children_cmd, frame_cmd, frames_cmd):  # also accepted after the query
+    suspects_query = queries.add_parser("suspects", help="functions ranked by how much failing tests ran them and passing tests did not (Ochiai)")
+    suspects_query.add_argument("--top", type=int, default=10)
+    compare_query = queries.add_parser("compare", help="the first divergence between two executions (default: the first failing test and the closest passing one)")
+    compare_query.add_argument("frames", type=int, nargs="*", help="FRAME_A FRAME_B: two frame ids (B's in --run-b when given)")
+    compare_query.add_argument("--run-b", type=Path, help="B's trace or run folder (default: the same)")
+    compare_query.add_argument("--process", type=int, help="A's process (pid) in a run folder (default: its first)")
+    compare_query.add_argument("--process-b", type=int, help="B's process (pid) (default: A's in the same run, else the first)")
+    for query in (suspects_query, compare_query, tests_query, summary_cmd, calls_cmd, tree_cmd, exceptions_cmd, traceback_cmd, history_cmd, origin_cmd, children_cmd, frame_cmd, frames_cmd):  # also accepted after the query
         query.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
     args = parser.parse_args(argv)
 
@@ -274,6 +283,8 @@ def trace_command(args) -> int:
         return serve(args.file)
     if args.query == "tests":
         return tests_command(args)
+    if args.query in ("suspects", "compare"):
+        return localize_command(args)
     try:
         trace = Trace(args.file)
     except TraceError as error:
@@ -329,6 +340,73 @@ def tests_command(args) -> int:
         return 1
     found = run_tests(paths, args.failed)
     print(json.dumps(found, indent=2, ensure_ascii=False) if args.json else render_tests(found, args.limit, args.offset))
+    return 0
+
+
+def trace_paths(path: Path) -> list[Path]:
+    """A trace file, or a run folder's traces (one per process)."""
+    from luciole.runs import processes_of
+
+    if path.is_dir():
+        return processes_of(path)
+    return [path] if path.is_file() else []
+
+
+def process_path(paths: list[Path], pid: int | None) -> Path | None:
+    from luciole.trace import Trace
+
+    if pid is None:
+        return paths[0]
+    for path in paths:
+        with Trace(path) as trace:
+            if trace.run()["pid"] == pid:
+                return path
+    return None
+
+
+def localize_command(args) -> int:
+    """`luciole trace FILE|RUN suspects|compare` (localize.py)."""
+    from luciole.localize import compare, compare_tests, suspects
+    from luciole.localize_text import render_compare, render_suspects
+    from luciole.trace import Trace, TraceError
+
+    paths = trace_paths(args.file)
+    if not paths:
+        print(f"luciole: no traces in {args.file}", file=sys.stderr)
+        return 1
+    try:
+        if args.query == "suspects":
+            with Trace(paths[0]) as trace:
+                root = Path(trace.run()["root"])
+            graph = build_graph(root) if root.is_dir() else None  # files and lines, when the source is here
+            found = suspects(paths, graph, args.top)
+            text = render_suspects(found, run=str(args.file))
+        else:
+            paths_b = trace_paths(args.run_b) if args.run_b else None
+            if args.run_b and not paths_b:
+                print(f"luciole: no traces in {args.run_b}", file=sys.stderr)
+                return 1
+            if args.frames:
+                if len(args.frames) != 2:
+                    print("luciole: compare takes two frames, FRAME_A FRAME_B (or none)", file=sys.stderr)
+                    return 1
+                path_a = process_path(paths, args.process)
+                pid_b = args.process_b if args.process_b is not None else None if paths_b else args.process
+                path_b = process_path(paths_b or paths, pid_b)
+                if path_a is None or path_b is None:
+                    print(f"luciole: no process {args.process if path_a is None else pid_b}", file=sys.stderr)
+                    return 1
+                with Trace(path_a) as trace_a, Trace(path_b) as trace_b:
+                    found = compare(trace_a, args.frames[0], trace_b, args.frames[1])
+                files = (str(path_a), str(path_b))
+            else:
+                found = compare_tests(paths, paths_b)
+                files = (found["test_a"]["path"], found["test_b"]["path"])
+            text = render_compare(found, files=files)
+    except (LookupError, TraceError) as error:
+        print(f"luciole: {str(error).strip(chr(39))}", file=sys.stderr)
+        return 1
+    print(json.dumps(found, indent=2, ensure_ascii=False, default=str) if args.json else text)
     return 0
 
 
