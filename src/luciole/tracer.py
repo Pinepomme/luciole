@@ -59,10 +59,13 @@ COMPARED = frozenset({list, dict, set, bytearray})  # mutable containers whose c
 FID, CODE, PYFRAME, NODE, CALLER, ORIGIN, THREAD, LINE, START_NS, ARGS, END_NS, KIND, EXCEPTION, RESULT, LOCALS, SUSPENDED, HISTORY = range(17)
 
 # Other buffered events are tuples starting with one of these.
-NEW_THREAD, RAISED, SEEN, WRITE = range(4)
+NEW_THREAD, RAISED, SEEN, WRITE, TEST = range(5)
 
 REDACTED = ("str", values.REDACTED, None, False)
 SKIPPED_LOCALS = (types.ModuleType, type, types.FunctionType, types.BuiltinFunctionType)
+# Local names left out: dunders, comprehension temporaries (.0), and pytest's assertion
+# rewriting's (@py_assert1): none is a variable of the program.
+HIDDEN_NAMES = ("__", ".", "@")
 IDENTITY = object()  # (IDENTITY, class, id): `<module.Class object at 0x…>`, formatted by the writer
 
 # Connections of the parent, in a forked child: never used, never closed (closing would touch
@@ -329,6 +332,16 @@ class Tracer:
             event = (RAISED, row, fid, frame.f_lineno, name, message, cause_row, chain if cause_row else None, self.now())
             state.buffer.append(event)
 
+    def test(self, nodeid: str, node: str | None, outcome: str, phase: str, attempt: int, start_ns: int, end_ns: int, message: str | None) -> None:
+        """A test's outcome, from the pytest plugin (pytest_plugin.py), once the test is done:
+        `node` is its function's node id, whose frame between `start_ns` and `end_ns` (now())
+        the writer finds once the run ends."""
+        if self.off:
+            return
+        if message and len(message) > MESSAGE_CHARS:
+            message = message[: MESSAGE_CHARS - 1] + "…"
+        self.state().buffer.append((TEST, nodeid, node, outcome, phase, attempt, start_ns, end_ns, message))
+
     def current_frame(self) -> int | None:
         """This thread's innermost recorded frame (for threads it starts)."""
         state = self.threads.get(threading.get_ident())
@@ -395,7 +408,7 @@ class Tracer:
         try:
             items = []
             for name, value in frame.f_locals.items():
-                if name.startswith("__") or isinstance(value, SKIPPED_LOCALS):
+                if name.startswith(HIDDEN_NAMES) or isinstance(value, SKIPPED_LOCALS):
                     continue
                 if len(items) == MAX_LOCALS:
                     items.append(("…", "more locals not kept"))
@@ -474,7 +487,7 @@ class Tracer:
         at = time.perf_counter_ns() - self.started
         fid, buffer = entry[FID], state.buffer
         for name, value in changes:
-            if name.startswith(("__", ".")) or isinstance(value, SKIPPED_LOCALS):
+            if name.startswith(HIDDEN_NAMES) or isinstance(value, SKIPPED_LOCALS):
                 continue  # definitions, not state (as in local_values)
             self.writes_seen += 1
             if self.writes_seen > self.max_writes:
@@ -581,7 +594,7 @@ class Writer:
 
     def insert(self, events: list) -> None:
         level = self.tracer.level
-        frames, still_open, threads, raised, seen, writes = [], [], [], {}, [], []
+        frames, still_open, threads, raised, seen, writes, tests = [], [], [], {}, [], [], []
         for event in events:
             if type(event) is list:  # an entry
                 kind = event[KIND]  # first: the rest of its end is written before it
@@ -597,6 +610,8 @@ class Writer:
             elif event[0] == WRITE:
                 _, fid, line, name, value, at = event
                 writes.append((fid, line, name, self.snapshot(value), at))
+            elif event[0] == TEST:
+                tests.append(event[1:])
             else:
                 threads.append(event[1:])
         updates = []
@@ -625,6 +640,7 @@ class Writer:
             db.executemany("INSERT INTO snapshots VALUES (?, ?, ?, ?, ?)", self.new_snapshots)
             self.new_snapshots = []
         db.executemany("INSERT INTO writes (frame, line, name, value, time_ns) VALUES (?, ?, ?, ?, ?)", writes)
+        db.executemany("INSERT INTO tests (nodeid, node, outcome, phase, attempt, start_ns, end_ns, message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", tests)
         db.execute("COMMIT")
         self.frames_stored += len(frames)
         self.writes_stored += len(writes)
@@ -704,6 +720,11 @@ class Writer:
         )
         db.execute("COMMIT")
         db.executescript(trace.INDEXES)
+        # Each test's frame: the first call of its function while it ran (frames_by_node finds it).
+        db.execute(
+            "UPDATE tests SET frame = (SELECT MIN(id) FROM frames WHERE frames.node = tests.node AND frames.start_ns BETWEEN tests.start_ns AND tests.end_ns)"
+            " WHERE frame IS NULL AND node IS NOT NULL"
+        )
         db.execute("PRAGMA journal_mode = DELETE")  # one file again, for readers and copies
         db.close()
         self.finished = True

@@ -17,6 +17,11 @@ claude mcp add luciole -- uvx luciole mcp        # or without installing it
 Add `--scope project` to share it with the project (it goes in `.mcp.json`). The server takes the
 folder it starts in as the project root; `luciole mcp --root PATH` sets another.
 
+`luciole mcp --runs DIR` reads the runs in `DIR` (a folder of run folders, or one run folder)
+rather than the root's own, such as a CI artifact made by `pytest --luciole --luciole-dir DIR`;
+`--no-run` leaves out the `run` tool, for a server that answers about existing recordings only
+(post-mortem, see [post-mortem.md](post-mortem.md)).
+
 Recording needs the program to run on Python 3.12 or newer (`sys.monitoring`); the graph tools
 work with any Python 3.10+.
 
@@ -37,6 +42,10 @@ work with any Python 3.10+.
    - `calls FUNCTION`: every call, with arguments, return value or exception, caller, duration;
    - `call_tree` (from the top, or below a frame), repeated calls collapsed into `×N`;
    - `frame N`: one call in detail, and the calls it made;
+   - `tests`: for a test run recorded with `pytest --luciole` (or pytest with `--luciole` under
+     `run`), each test's outcome, failed ones first, with where it failed (setup, call,
+     teardown), the message, its frame (`#N`), the exception it ended with (`!N`) and its process,
+     to pass to `traceback`, `frame` and `origin`;
    - `summary`: duration, exit status, top functions by calls and by time (self time leaves out
      the time coroutines spend awaiting);
    - `variable_history FUNCTION [variable] [frame]`: every assignment to its local variables,
@@ -78,8 +87,8 @@ sort as runs started. The VS Code extension's Run Live records into the same fol
 next to yours, and `runs` lists yours to the agent. Both write them with
 [`src/luciole/runs.py`](../src/luciole/runs.py).
 
-`command.json`: `command` (a list), `cwd`, `level`, `scope`, `by` (`agent`, or `vscode` for Run
-Live; missing in runs made before it existed, which were the MCP server's), `started_at` (Unix
+`command.json`: `command` (a list), `cwd`, `level`, `scope`, `by` (`agent`, `vscode` for Run
+Live, `pytest` for `pytest --luciole`; missing in runs made before it existed, which were the MCP server's), `started_at` (Unix
 time), and once the run ended, `exit_status` (null when unknown or stopped by a timeout) and
 `ended_at`.
 

@@ -50,6 +50,14 @@ function is, who calls it, what it calls, which variables it reads and writes, e
 did not run. Runs are kept: `runs` lists them, and every query takes a run id (default: the last).
 """
 
+POST_MORTEM = """\
+This server answers questions about existing recordings only: it cannot run programs (`run` is
+off, `luciole mcp --no-run`), so where the text below says to run again, tell the user what to
+run instead. Start with `runs`; for a test run (`pytest --luciole`, kept because tests failed),
+`tests` lists the failures with each test's frame (#N), exception (!N) and process.
+
+"""
+
 FRAME_ARG = {"type": "integer", "description": "A frame id (#N in other answers)."}
 RUN_ARG = {"type": "string", "description": "A run id from `run` or `runs` (default: the last run)."}
 PROCESS_ARG = {"type": "integer", "description": "A process id within the run (default: its first process)."}
@@ -146,6 +154,11 @@ TOOLS = [
         },
     },
     {
+        "name": "tests",
+        "description": "The tests of a recorded test run (`pytest --luciole`, or pytest with --luciole under `run`), failed ones first: outcome, where it failed (setup, call or teardown), the message, and for each its frame (#N), the exception it ended with (!N) and its process (pid), to pass to `traceback`, `frame` and `origin`.",
+        "inputSchema": {"type": "object", "properties": {"run": RUN_ARG, "failed": {"type": "boolean", "description": "Failed and errored tests only."}, **PAGE_ARGS}},
+    },
+    {
         "name": "find",
         "description": "Find functions and classes in the project's static graph by name: their node id, file and line.",
         "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "A name, or the end of a node id (`Cart.total`)."}}, "required": ["name"]},
@@ -163,9 +176,12 @@ class ToolError(Exception):
 
 
 class Server:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, runs_dir: Path | None = None, allow_run: bool = True):
         self.root = root.resolve()
-        self.runs_dir = runs_folder(self.root)
+        if runs_dir is not None and (runs_dir / "command.json").is_file():
+            runs_dir = runs_dir.parent  # one run's folder: the folder holding it
+        self.runs_dir = runs_dir.resolve() if runs_dir is not None else runs_folder(self.root)
+        self.allow_run = allow_run  # False: post-mortem, existing recordings only
         self.graph: dict | None = None
         self.graph_stamp: tuple | None = None
         self.graph_index: tuple | None = None  # (graph, origins.Graph of it), for `origin`
@@ -207,12 +223,12 @@ class Server:
                 "protocolVersion": asked if asked in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0],
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "luciole", "version": __version__},
-                "instructions": INSTRUCTIONS,
+                "instructions": INSTRUCTIONS if self.allow_run else POST_MORTEM + INSTRUCTIONS,
             }
         if method == "ping":
             return {}
         if method == "tools/list":
-            return {"tools": TOOLS}
+            return {"tools": [tool for tool in TOOLS if self.allow_run or tool["name"] != "run"]}
         if method == "tools/call":
             name, arguments = params.get("name"), params.get("arguments") or {}
             try:
@@ -230,7 +246,11 @@ class Server:
 
     def call(self, name: str, args: dict) -> str:
         if name == "run":
+            if not self.allow_run:
+                raise ToolError("this server reads existing recordings only (luciole mcp --no-run): it cannot run programs")
             return self.run(args)
+        if name == "tests":
+            return self.tests(args)
         if name == "runs":
             return self.list_runs()
         if name == "find":
@@ -286,7 +306,7 @@ class Server:
         level = 1 if level is None else level
         timeout = float(args.get("timeout") or 600)
         try:
-            run_id, folder = new_run(self.root, command, cwd, level, scope, by="agent")
+            run_id, folder = new_run(self.root, command, cwd, level, scope, by="agent", runs_dir=self.runs_dir)
         except OSError as error:
             raise ToolError(f"could not make a run folder: {error}") from None
         env = dict(os.environ)
@@ -361,6 +381,19 @@ class Server:
             outcome = "timed out or still running" if status is None else f"exit status {status}"
             lines.append(f"{path.parent.name}  {shlex.join(meta['command'])}  ({outcome}, {plural(len(processes), 'process')} recorded)")
         return "\n".join(lines)
+
+    def tests(self, args: dict) -> str:
+        from luciole.outcomes import render_tests, run_tests
+
+        folder = self.run_folder(args.get("run"))
+        found = run_tests(processes_of(folder), bool(args.get("failed")))
+        if not found["recorded"]:
+            raise ToolError(f"run {folder.name} recorded no test outcomes: not a test run, or pytest ran without --luciole")
+        text = render_tests(found, int(args.get("limit") or 20), int(args.get("offset") or 0)).replace("(--limit, --offset)", "(limit, offset)")
+        failing = next((test for test in found["tests"] if test["exception"] and test["outcome"] in ("failed", "error")), None)
+        if failing:
+            text += f"\n`traceback` with exception {failing['exception']['id']} and process {failing['pid']} shows the frames of the first failure, with their locals"
+        return f"run {folder.name}\n{text}"
 
     def frame(self, trace: Trace, frame_id: int) -> str:
         frame = trace.frame(frame_id)
@@ -478,16 +511,19 @@ class Server:
 
     # Runs
 
-    def trace(self, run_id: str | None, pid: int | None) -> Trace:
+    def run_folder(self, run_id: str | None) -> Path:
         folders = sorted(path.parent for path in self.runs_dir.glob("*/command.json")) if self.runs_dir.is_dir() else []
         if not folders:
-            raise ToolError("no runs yet: `run` records one")
+            raise ToolError("no runs yet: `run` records one" if self.allow_run else f"no runs in {self.runs_dir}")
         if run_id:
             folder = self.runs_dir / str(run_id)
             if folder not in folders:
                 raise ToolError(f"no run {run_id} (`runs` lists them)")
-        else:
-            folder = folders[-1]
+            return folder
+        return folders[-1]
+
+    def trace(self, run_id: str | None, pid: int | None) -> Trace:
+        folder = self.run_folder(run_id)
         processes = processes_of(folder)
         if not processes:
             raise ToolError(f"run {folder.name} recorded nothing")
@@ -545,6 +581,6 @@ def stop(process: subprocess.Popen) -> None:
         process.kill()
 
 
-def serve(root: Path) -> int:
-    Server(root).serve()
+def serve(root: Path, runs_dir: Path | None = None, allow_run: bool = True) -> int:
+    Server(root, runs_dir, allow_run).serve()
     return 0

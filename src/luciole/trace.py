@@ -99,6 +99,18 @@ CREATE TABLE writes (
     value INTEGER,
     time_ns INTEGER NOT NULL
 );
+CREATE TABLE tests (
+    id INTEGER PRIMARY KEY,
+    nodeid TEXT NOT NULL,
+    node TEXT,
+    outcome TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    start_ns INTEGER NOT NULL,
+    end_ns INTEGER NOT NULL,
+    frame INTEGER,
+    message TEXT
+);
 """
 
 # Made when the run ends: inserting is faster without them.
@@ -114,6 +126,8 @@ CREATE INDEX writes_by_frame ON writes (frame, time_ns);
 SCHEMA = TABLES + INDEXES
 
 END_KINDS = ("return", "raise", "unwind", "close", "suspended", "running", "lost")
+TEST_OUTCOMES = ("failed", "error", "passed", "skipped", "xfail", "xpass")
+FAILED = ("failed", "error")
 
 
 class TraceError(Exception):
@@ -427,6 +441,31 @@ class Trace:
                 call["writes"] = []
             call["writes"].append({"line": row["line"], "name": row["name"], "value": self.snapshot(row["value"]), "time_ns": row["time_ns"]})
         found["frames"] = list(frames.values())
+        return found
+
+    def tests(self, failed: bool = False) -> list[dict] | None:
+        """Test outcomes, written by the pytest plugin (pytest_plugin.py), in the order tests
+        ended; `failed`: failed and errored ones only. Each is a row of `tests` plus `exception`
+        (`{"id", "type", "message", "frame"}`): the one its test function exited with, else, for
+        a failed or errored test (a fixture's error), the last one nothing handled while it ran.
+        None when the trace has no `tests` table (not a test run, or written before it existed)."""
+        if not self._has_table("tests"):
+            return None
+        where = f"WHERE outcome IN {FAILED}" if failed else ""
+        found = [dict(row) for row in self.db.execute(f"SELECT * FROM tests {where} ORDER BY id")]
+        for test in found:
+            if test["frame"] is None and test["node"]:  # the run did not end: found as the writer would
+                row = self.db.execute("SELECT MIN(id) FROM frames WHERE node = ? AND start_ns BETWEEN ? AND ?", (test["node"], test["start_ns"], test["end_ns"])).fetchone()
+                test["frame"] = row[0]
+            row = self.db.execute(
+                "SELECT e.id, e.type, e.message, e.frame FROM frames f JOIN exceptions e ON e.id = f.exception WHERE f.id = ?", (test["frame"],)
+            ).fetchone() if test["frame"] else None
+            if row is None and test["outcome"] in FAILED:
+                row = self.db.execute(
+                    "SELECT id, type, message, frame FROM exceptions WHERE time_ns BETWEEN ? AND ? AND handled_in IS NULL AND frame IS NOT NULL ORDER BY id DESC LIMIT 1",
+                    (test["start_ns"], test["end_ns"]),
+                ).fetchone()
+            test["exception"] = dict(row) if row else None
         return found
 
     def exceptions_by_id(self, ids: list[int]) -> list[dict]:

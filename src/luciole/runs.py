@@ -34,9 +34,10 @@ def runs_folder(root: Path) -> Path:
     return protocol.home() / "runs" / f"{root.name or 'root'}-{digest}"
 
 
-def new_run(root: Path, command: list[str], cwd: Path, level: int, scope: list[str] | None = None, by: str = "agent") -> tuple[str, Path]:
-    """A new, empty run folder for `root` with its command.json; the oldest runs past KEEP_RUNS go."""
-    runs_dir = runs_folder(root)
+def new_run(root: Path, command: list[str], cwd: Path, level: int, scope: list[str] | None = None, by: str = "agent", runs_dir: Path | None = None) -> tuple[str, Path]:
+    """A new, empty run folder for `root` with its command.json, in `runs_dir` (default: the
+    root's, runs_folder()); the oldest runs there past KEEP_RUNS go. `by`: agent, vscode, pytest."""
+    runs_dir = runs_dir or runs_folder(root)
     runs_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     # After the last run of this second, never in a gap a pruned one left: ids sort as runs started.
