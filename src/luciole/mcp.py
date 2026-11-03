@@ -25,7 +25,8 @@ from pathlib import Path
 
 from luciole import __version__
 from luciole.runs import finish_run, new_run, processes_of, runs_folder
-from luciole.trace import Trace, plural, render_calls, render_exceptions, render_history, render_summary, render_traceback, render_tree
+from luciole.trace import Trace
+from luciole.trace_text import plural, render_calls, render_exceptions, render_history, render_summary, render_traceback, render_tree
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first
 OUTPUT_HEAD = 20  # lines of a program's output shown from its start...

@@ -255,7 +255,8 @@ def runs_command(args, parser) -> int:
 
 def trace_command(args) -> int:
     from luciole.browse import query, render_children, render_frames, serve
-    from luciole.trace import Trace, TraceError, render_calls, render_exceptions, render_history, render_summary, render_traceback, render_tree
+    from luciole.trace import Trace, TraceError
+    from luciole.trace_text import render_calls, render_exceptions, render_history, render_summary, render_traceback, render_tree
 
     if args.query == "serve":
         return serve(args.file)
