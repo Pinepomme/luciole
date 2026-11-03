@@ -284,6 +284,22 @@ active: Session | None = None
 ending: Session | None = None  # the session stop() is ending, which on_sigterm lets finish
 terminated = False  # SIGTERM came while stop() was sending the last frame
 hooks_installed = False
+# The active session is also this attribute of `sys`, for the other copies of luciole in the
+# process: auto-start's is hidden from the program (see _autostart/sitecustomize.py), and the
+# pytest plugin, imported by pytest, adds test outcomes to its trace (see current()).
+SHARED = "_luciole_session"
+
+
+def current() -> Session | None:
+    """The session recording this process, whichever copy of luciole started it."""
+    return active or getattr(sys, SHARED, None)
+
+
+def share(session: Session | None) -> None:
+    if session is not None:
+        setattr(sys, SHARED, session)
+    elif hasattr(sys, SHARED):
+        delattr(sys, SHARED)
 
 
 def connect(port: int | str | None, quiet: bool) -> socket.socket | None:
@@ -375,6 +391,7 @@ def start(
         session.close()
         return False
     active = session
+    share(session)
     install_hooks()
     install_sigterm()
     return True
@@ -397,6 +414,8 @@ def end(session: Session, close: bool) -> None:
     ending = session
     if active is session:
         active = None
+    if getattr(sys, SHARED, None) is session:
+        share(None)
     try:
         session.stop(close)
     finally:
@@ -473,6 +492,7 @@ def after_fork() -> None:
     session, active = active, None
     if session is None:
         return
+    share(None)
     try:
         session.uninstall()
         if session.connection:
@@ -521,6 +541,7 @@ def run(target: list[str], as_module: bool, root: Path, port: int | None, events
         return 1
     session.start()
     active = session
+    share(session)
     install_hooks()
     install_sigterm()
     sys.argv = list(target)

@@ -1,4 +1,8 @@
-"""Luciole: a Python project as an explorable graph, lit up as the code runs."""
+"""Luciole: a Python project as an explorable graph, lit up as the code runs.
+
+PYTEST_DONT_REWRITE: pytest loads luciole's plugin (pytest_plugin.py) and would rewrite this
+package's asserts; under `luciole run -m pytest` it is imported already, and pytest would warn.
+"""
 
 from __future__ import annotations
 

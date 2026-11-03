@@ -137,6 +137,18 @@ CREATE TABLE writes (
     value INTEGER,
     time_ns INTEGER NOT NULL
 );
+CREATE TABLE tests (
+    id INTEGER PRIMARY KEY,
+    nodeid TEXT NOT NULL,
+    node TEXT,
+    outcome TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    start_ns INTEGER NOT NULL,
+    end_ns INTEGER NOT NULL,
+    frame INTEGER,
+    message TEXT
+);
 CREATE INDEX frames_by_node ON frames (node, start_ns);
 CREATE INDEX frames_by_caller ON frames (caller);
 CREATE INDEX frames_by_time ON frames (start_ns);
@@ -210,7 +222,8 @@ comprehensions have no node, and are not recorded.
 - `locals` (level 1): for `raise` and `unwind` frames, a JSON object `{"name": snapshot id}` of
   the frame's local variables as the exception left it: what a post-mortem debugger shows. For a
   module body, its globals. Names starting with `__`, modules, classes and functions are left out
-  (definitions, not state); secrets are redacted as arguments are; at most 50 per frame (then
+  (definitions, not state), and so are the temporaries of pytest's assertion rewriting
+  (`@py_assert1`) and of comprehensions (`.0`); secrets are redacted as arguments are; at most 50 per frame (then
   `"…"`). Kept for 10,000 frames per run at most, so code that raises in a loop stays cheap.
   `NULL` otherwise, and in traces written before this column existed.
 - `end_line` (level 2): for a frame of scoped code, the line it was at when it returned, raised
@@ -239,6 +252,27 @@ attribute of `self`, a list inside a dict) are not variable writes. The loop var
 is written by the `for` line, a value sent into a generator by its `yield` line. Deleting a
 variable is not recorded. Names starting with `__`, and modules, classes and functions (definitions,
 not state), are left out, as for `locals`. A function's arguments are in `frames.args`, not here.
+
+### `tests`
+
+A test run recorded with `pytest --luciole` (see [post-mortem.md](post-mortem.md)): one row per
+test the process ran, per attempt, in the order they ended. Each test is in the trace of the
+process that ran it (with pytest-xdist, a worker's). Traces of other programs, and traces written
+before this table existed, have no `tests` table: readers check that it exists.
+
+- `nodeid`: pytest's (`tests/test_cart.py::test_total[3]`). `node`: the graph's node id of the
+  test function (`test_cart:test_total`), `NULL` when it is not project code.
+- `outcome`: `passed`, `failed` (in the test), `error` (in a fixture, at setup or teardown),
+  `skipped`, `xfail` (failed as expected), `xpass` (passed although expected to fail, not strict).
+  `phase`: where it was decided, `setup`, `call` or `teardown`.
+- `attempt`: 1, then 2, 3... when a plugin such as pytest-rerunfailures runs a flaky test again;
+  each attempt has a row, the earlier ones `failed` or `error`.
+- `start_ns`, `end_ns`: from its setup to its teardown.
+- `frame`: the test function's call (`frames.id`): its first frame of `node` between `start_ns`
+  and `end_ns`, filled in when the run ends (readers find it the same way when it is `NULL`).
+  `NULL` when the function did not run (a skip, a fixture's error).
+- `message`: the exception's message for a failure or error (pytest's, with its assertion
+  explanation), the reason for a skip or xfail; at most 500 characters.
 
 ### `exceptions`
 
@@ -341,6 +375,7 @@ luciole trace run.sqlite exceptions [--limit 50]                 # where raised,
 luciole trace run.sqlite traceback [EXCEPTION]                   # the frames it left, with their locals then
 luciole trace run.sqlite history NODE [--var NAME] [--frame N] [--limit 50]   # level 2: assignments, line by line
 luciole trace run.sqlite origin NODE VARIABLE [--frame N] [--at NS] [--depth 8]  # where a value came from
+luciole trace run.sqlite tests [--failed]                         # test outcomes, failed first (also a run folder)
 ```
 
 For tools that browse a trace (VS Code's Calls view and replay, [`src/luciole/browse.py`](../src/luciole/browse.py)):
@@ -397,6 +432,7 @@ with Trace("run.sqlite") as trace:
     trace.children(frame=None, after=0, until=None, limit=100, collapse=True)   # {"calls", "next"}
     trace.frame(7)            # one call, like an item of calls()
     trace.snapshot(3)         # {"type", "repr", "items"?, "truncated"?}
+    trace.tests(failed=False) # rows of `tests` plus `exception`; None without the table
 ```
 
 In `calls`, `callers` counts every call of the function by call site (`{"node", "line",

@@ -13,6 +13,8 @@
     luciole runs [--root DIR] [--json]            recorded runs of a project (MCP and Run Live), newest first
     luciole runs new --root DIR --command JSON [--cwd DIR] [--level N] [--scope F,G] [--by vscode]   a new run folder; runs finish FOLDER
     luciole trace FILE origin NODE VARIABLE [--frame N] [--depth D] [--json]   where a value came from
+    luciole trace FILE|RUN_FOLDER tests [--failed] [--json]   test outcomes (pytest --luciole), failed first
+    luciole mcp [--root DIR] [--runs DIR] [--no-run]   MCP server; --no-run: existing recordings only
 """
 
 from __future__ import annotations
@@ -71,6 +73,8 @@ def main(argv: list[str] | None = None) -> int:
     tests_cmd.add_argument("--json", action="store_true", help="print a JSON list of absolute paths")
     mcp_cmd = commands.add_parser("mcp", help="an MCP server (stdio) for agents: run programs under the recorder and query the runs")
     mcp_cmd.add_argument("--root", type=Path, default=Path.cwd(), help="project directory (default: the current directory)")
+    mcp_cmd.add_argument("--runs", type=Path, help="folder of recorded runs to read (a CI artifact, pytest --luciole-dir) rather than the root's own")
+    mcp_cmd.add_argument("--no-run", dest="allow_run", action="store_false", help="no `run` tool: answer about existing recordings only (post-mortem)")
     runs_cmd = commands.add_parser("runs", help="the recorded runs of a project (luciole mcp, VS Code's Run Live), newest first")
     runs_cmd.add_argument("action", nargs="?", choices=["list", "new", "finish"], default="list", help="list (default); new: make a run folder and print it; finish: mark FOLDER's run ended")
     runs_cmd.add_argument("folder", nargs="?", type=Path, help="finish: the run's folder")
@@ -83,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     runs_cmd.add_argument("--command", dest="run_command", help='new: the command, as a JSON list (["python", "app.py"])')
     runs_cmd.add_argument("--json", action="store_true", help="print JSON")
     trace_cmd = commands.add_parser("trace", help="read a trace written by luciole run --trace")
-    trace_cmd.add_argument("file", type=Path, help="trace file (.sqlite)")
+    trace_cmd.add_argument("file", type=Path, help="trace file (.sqlite); for tests, also a run folder")
     trace_cmd.add_argument("--json", action="store_true", help="print JSON")
     queries = trace_cmd.add_subparsers(dest="query", required=True)
     summary_cmd = queries.add_parser("summary", help="the run, counts, top functions by calls and by time")
@@ -131,7 +135,11 @@ def main(argv: list[str] | None = None) -> int:
     origin_cmd.add_argument("--at", dest="time_ns", type=int, help="the value at this moment, in ns since the run started (default: the call's end)")
     origin_cmd.add_argument("--depth", type=int, default=8, help="steps followed back (default 8)")
     origin_cmd.add_argument("--branches", type=int, default=4, help="sources followed per step (default 4)")
-    for query in (summary_cmd, calls_cmd, tree_cmd, exceptions_cmd, traceback_cmd, history_cmd, origin_cmd, children_cmd, frame_cmd, frames_cmd):  # also accepted after the query
+    tests_query = queries.add_parser("tests", help="test outcomes (pytest --luciole), failed first, with each test's frame and exception")
+    tests_query.add_argument("--failed", action="store_true", help="failed and errored tests only")
+    tests_query.add_argument("--limit", type=int, default=50)
+    tests_query.add_argument("--offset", type=int, default=0)
+    for query in (tests_query, summary_cmd, calls_cmd, tree_cmd, exceptions_cmd, traceback_cmd, history_cmd, origin_cmd, children_cmd, frame_cmd, frames_cmd):  # also accepted after the query
         query.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print JSON")
     args = parser.parse_args(argv)
 
@@ -155,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "mcp":
         from luciole.mcp import serve
 
-        return serve(args.root)
+        return serve(args.root, args.runs, args.allow_run)
     if args.command == "engine":
         from luciole.engine import serve
 
@@ -264,6 +272,8 @@ def trace_command(args) -> int:
 
     if args.query == "serve":
         return serve(args.file)
+    if args.query == "tests":
+        return tests_command(args)
     try:
         trace = Trace(args.file)
     except TraceError as error:
@@ -298,6 +308,27 @@ def trace_command(args) -> int:
         else:
             result, text = trace.exceptions(args.limit, args.offset), render_exceptions
     print(json.dumps(result, indent=2, ensure_ascii=False) if args.json else text(result))
+    return 0
+
+
+def tests_command(args) -> int:
+    """`luciole trace FILE|FOLDER tests`: a run folder holds a trace per process (pytest-xdist
+    workers), and the tests are spread over them."""
+    from luciole.outcomes import render_tests, run_tests
+    from luciole.runs import processes_of
+
+    if args.file.is_dir():
+        paths = processes_of(args.file)
+        if not paths:
+            print(f"luciole: no traces in {args.file}", file=sys.stderr)
+            return 1
+    elif args.file.is_file():
+        paths = [args.file]
+    else:
+        print(f"luciole: no such trace: {args.file}", file=sys.stderr)
+        return 1
+    found = run_tests(paths, args.failed)
+    print(json.dumps(found, indent=2, ensure_ascii=False) if args.json else render_tests(found, args.limit, args.offset))
     return 0
 
 

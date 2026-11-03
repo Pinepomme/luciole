@@ -55,6 +55,32 @@ check who calls the function you blame (`calls` lists its callers): the fix may 
 Runs are kept: `runs` lists them, and every query takes a run id (default: the last).
 """
 
+POST_MORTEM = """\
+Luciole recorded Python programs (3.12+), usually a test run kept because tests failed
+(`pytest --luciole`, often in CI): every call of project code with its arguments and return value,
+every exception with where it was raised and handled, and the local variables of every frame an
+exception left. This server reads those recordings only: it cannot run programs. Debug from what
+happened. Start with `tests` (the failures, each with its frame #N, exception !N and process).
+Then ask: `traceback` (the original error, each frame's locals), `calls` (a function's calls
+grouped by caller, return values first), `call_tree` (`focus` keeps the paths to one function),
+`frame` (one call in full), `origin` (where a wrong value came from, across functions),
+`variable_history` (only for functions the run was recorded with in its scope). `find` and
+`neighbors` answer from the static graph of the checkout, which should be the commit that ran.
+When the recording lacks something (which line set a local, a variable's history), say what the
+user should record again (`pytest --luciole --luciole-level 2 --luciole-scope FUNCTION`) rather
+than guessing. Before choosing where to fix, check who calls the function you blame (`calls` lists
+its callers): the fix may belong there.
+Runs are kept: `runs` lists them, and every query takes a run id (default: the last).
+"""
+
+# Post-mortem mode: tool descriptions say what to record again rather than to `run`.
+NO_RUN_TEXT = {
+    "A run id from `run` or `runs`": "A run id from `runs`",
+    "when it was not, says so: then `run` the command again with `scope: [\"<function>\"]`.": "when it was not, says so, and what to record again.",
+    "the answer says so, and how to re-run.": "the answer says so, and what to record again.",
+    "(`pytest --luciole`, or pytest under `run`)": "(`pytest --luciole`)",
+}
+
 FRAME_ARG = {"type": "integer", "description": "A frame id (#N in other answers)."}
 RUN_ARG = {"type": "string", "description": "A run id from `run` or `runs` (default: the last run)."}
 PROCESS_ARG = {"type": "integer", "description": "A process id within the run (default: its first process)."}
@@ -168,6 +194,11 @@ TOOLS = [
         },
     },
     {
+        "name": "tests",
+        "description": "The tests of a recorded test run (`pytest --luciole`, or pytest under `run`), failed ones first: outcome, where it failed (setup, call or teardown), the message, and for each its frame (#N), the exception it ended with (!N) and its process (pid), to pass to `traceback`, `frame` and `origin`.",
+        "inputSchema": {"type": "object", "properties": {"run": RUN_ARG, "failed": {"type": "boolean", "description": "Failed and errored tests only."}, **PAGE_ARGS}},
+    },
+    {
         "name": "find",
         "description": "Find functions and classes in the project's static graph by name: their node id, file and line.",
         "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "A name, or the end of a node id (`Cart.total`)."}}, "required": ["name"]},
@@ -185,9 +216,12 @@ class ToolError(Exception):
 
 
 class Server:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, runs_dir: Path | None = None, allow_run: bool = True):
         self.root = root.resolve()
-        self.runs_dir = runs_folder(self.root)
+        if runs_dir is not None and (runs_dir / "command.json").is_file():
+            runs_dir = runs_dir.parent  # one run's folder: the folder holding it
+        self.runs_dir = runs_dir.resolve() if runs_dir is not None else runs_folder(self.root)
+        self.allow_run = allow_run  # False: post-mortem, existing recordings only
         self.graph: dict | None = None
         self.graph_stamp: tuple | None = None
         self.graph_index: tuple | None = None  # (graph, origins.Graph of it), for `origin`
@@ -229,12 +263,12 @@ class Server:
                 "protocolVersion": asked if asked in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0],
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "luciole", "version": __version__},
-                "instructions": INSTRUCTIONS,
+                "instructions": INSTRUCTIONS if self.allow_run else POST_MORTEM,
             }
         if method == "ping":
             return {}
         if method == "tools/list":
-            return {"tools": TOOLS}
+            return {"tools": TOOLS if self.allow_run else no_run_tools()}
         if method == "tools/call":
             name, arguments = params.get("name"), params.get("arguments") or {}
             try:
@@ -252,7 +286,11 @@ class Server:
 
     def call(self, name: str, args: dict) -> str:
         if name == "run":
+            if not self.allow_run:
+                raise ToolError("this server reads existing recordings only (luciole mcp --no-run): it cannot run programs")
             return self.run(args)
+        if name == "tests":
+            return self.tests(args)
         if name == "runs":
             return self.list_runs()
         if name == "find":
@@ -314,10 +352,13 @@ class Server:
         level = 1 if level is None else level
         timeout = float(args.get("timeout") or 600)
         try:
-            run_id, folder = new_run(self.root, command, cwd, level, scope, by="agent")
+            run_id, folder = new_run(self.root, command, cwd, level, scope, by="agent", runs_dir=self.runs_dir)
         except OSError as error:
             raise ToolError(f"could not make a run folder: {error}") from None
         env = dict(os.environ)
+        # pytest records each test's outcome in the trace auto-start writes (the plugin, when
+        # luciole is installed where pytest runs; inert for anything else).
+        env["LUCIOLE_PYTEST"] = "1"
         for key, value in auto_start_env(None, self.root, False, folder, level, scope).items():
             if value is None:
                 env.pop(key, None)  # no port: the recorders find the engine's, if VS Code runs one
@@ -430,7 +471,7 @@ class Server:
     def list_runs(self) -> str:
         runs = sorted(self.runs_dir.glob("*/command.json"), reverse=True) if self.runs_dir.is_dir() else []
         if not runs:
-            return "no runs yet: `run` records one"
+            return "no runs yet: `run` records one" if self.allow_run else f"no runs in {self.runs_dir}"
         lines = []
         for path in runs:
             meta = json.loads(path.read_text())
@@ -439,6 +480,19 @@ class Server:
             outcome = "timed out or still running" if status is None else f"exit status {status}"
             lines.append(f"{path.parent.name}  {shlex.join(meta['command'])}  ({outcome}, {plural(len(processes), 'process')} recorded)")
         return "\n".join(lines)
+
+    def tests(self, args: dict) -> str:
+        from luciole.outcomes import render_tests, run_tests
+
+        folder = self.run_folder(args.get("run"))
+        found = run_tests(processes_of(folder), bool(args.get("failed")))
+        if not found["recorded"]:
+            raise ToolError(f"run {folder.name} recorded no test outcomes: not a test run, or pytest ran without --luciole")
+        text = render_tests(found, int(args.get("limit") or 20), int(args.get("offset") or 0)).replace("(--limit, --offset)", "(limit, offset)")
+        failing = next((test for test in found["tests"] if test["exception"] and test["outcome"] in ("failed", "error")), None)
+        if failing:
+            text += f"\nnext: `traceback` exception={failing['exception']['id']} process={failing['pid']} shows the first failure's original error and each frame's locals"
+        return f"run {folder.name}\n{text}"
 
     def calls(self, trace: Trace, args: dict, page: tuple[int, int]) -> str:
         caller = args.get("caller") or None
@@ -496,10 +550,12 @@ class Server:
         if not found["recorded"]:
             node = found["nodes"][0]
             had = f"its scope was {', '.join(found['scope'])}" if found["scope"] else f"it was recorded at level {trace.run()['level']}, without a scope"
-            raise ToolError(
-                f"no variable history for {', '.join(found['nodes'])} in this run ({had}; {plural(found['calls'], 'call')} recorded, see `calls`). "
+            again = (
                 f'To record it, `run` the same command again with scope: ["{node}"] (level 2), then ask `variable_history` again.'
+                if self.allow_run
+                else f"This server cannot run programs: the user can record it again with level 2 and scope {node} (`pytest --luciole --luciole-level 2 --luciole-scope {node}`)."
             )
+            raise ToolError(f"no variable history for {', '.join(found['nodes'])} in this run ({had}; {plural(found['calls'], 'call')} recorded, see `calls`). {again}")
         if args.get("variable") and not found["total"]:
             return f"{args['variable']} was never assigned in {', '.join(found['nodes'])} ({plural(found['calls'], 'call')}): check the name, or ask without `variable`"
         return render_history(found).replace("(--limit, --offset)", "(limit, offset)")
@@ -518,7 +574,7 @@ class Server:
             found = origin(trace, self.graph_index[1], function, required(args, "variable"), int(frame) if frame is not None else None, int(at) if at is not None else None, int(args.get("depth") or 8))
         except OriginError as problem:
             raise ToolError(f"{problem} (`calls` lists a function's calls, `find` looks names up)") from None
-        return render_origin(found, rerun="mcp")
+        return render_origin(found, rerun="mcp" if self.allow_run else "user")
 
     # Static graph
 
@@ -586,16 +642,19 @@ class Server:
 
     # Runs
 
-    def trace(self, run_id: str | None, pid: int | None) -> Trace:
+    def run_folder(self, run_id: str | None) -> Path:
         folders = sorted(path.parent for path in self.runs_dir.glob("*/command.json")) if self.runs_dir.is_dir() else []
         if not folders:
-            raise ToolError("no runs yet: `run` records one")
+            raise ToolError("no runs yet: `run` records one" if self.allow_run else f"no runs in {self.runs_dir}")
         if run_id:
             folder = self.runs_dir / str(run_id)
             if folder not in folders:
                 raise ToolError(f"no run {run_id} (`runs` lists them)")
-        else:
-            folder = folders[-1]
+            return folder
+        return folders[-1]
+
+    def trace(self, run_id: str | None, pid: int | None) -> Trace:
+        folder = self.run_folder(run_id)
         processes = processes_of(folder)
         if not processes:
             raise ToolError(f"run {folder.name} recorded nothing")
@@ -607,6 +666,19 @@ class Server:
                 return trace
             trace.close()
         raise ToolError(f"no process {pid} in run {folder.name}")
+
+
+def no_run_tools() -> list[dict]:
+    """The tools without `run`, their descriptions saying what to record again instead."""
+    found = []
+    for tool in TOOLS:
+        if tool["name"] == "run":
+            continue
+        text = json.dumps(tool)
+        for old, new in NO_RUN_TEXT.items():
+            text = text.replace(json.dumps(old)[1:-1], json.dumps(new)[1:-1])
+        found.append(json.loads(text))
+    return found
 
 
 def exit_text(run: dict) -> str:
@@ -687,6 +759,6 @@ def stop(process: subprocess.Popen) -> None:
         process.kill()
 
 
-def serve(root: Path) -> int:
-    Server(root).serve()
+def serve(root: Path, runs_dir: Path | None = None, allow_run: bool = True) -> int:
+    Server(root, runs_dir, allow_run).serve()
     return 0

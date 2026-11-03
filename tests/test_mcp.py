@@ -88,7 +88,7 @@ def test_initialize_and_list_tools(project):
     assert reply["result"]["capabilities"] == {"tools": {}}
     assert "run" in reply["result"]["instructions"]
     tools = {tool["name"]: tool for tool in client.request("tools/list")["result"]["tools"]}
-    assert set(tools) == {"run", "runs", "summary", "exceptions", "traceback", "calls", "call_tree", "frame", "variable_history", "origin", "find", "neighbors"}
+    assert set(tools) == {"run", "runs", "summary", "exceptions", "traceback", "calls", "call_tree", "frame", "variable_history", "origin", "tests", "find", "neighbors"}
     assert tools["run"]["inputSchema"]["required"] == ["command"]
     assert client.request("no/such/method")["error"]["code"] == -32601
     client.close()
@@ -164,6 +164,11 @@ def test_a_failing_test_under_pytest(client, project):
     assert "exit status 1" in text and "1 failed" in text
     assert "AssertionError" in text and "test_cart:test_total" in text
     assert "-> 6  (items=[{'price': 2, 'qty': 3}])" in client.ok("calls", function="total")
+    # Without --luciole, the plugin (LUCIOLE_PYTEST=1 from `run`) adds the outcomes to the same run.
+    assert len(client.ok("runs").splitlines()) == 1
+    text = client.ok("tests")
+    assert "1 test: 1 failed" in text and "failed  test_cart.py::test_total  (call)  #" in text
+    assert "next: `traceback` exception=" in text
 
 
 @needs_monitoring

@@ -29,6 +29,9 @@ dependencies = []
 [project.scripts]
 luciole = "luciole.cli:main"
 
+[project.entry-points.pytest11]
+luciole = "luciole.pytest_plugin"
+
 [project.urls]
 Homepage = "https://github.com/Pinepomme/luciole"
 Repository = "https://github.com/Pinepomme/luciole"
