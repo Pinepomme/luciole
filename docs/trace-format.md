@@ -209,7 +209,7 @@ comprehensions have no node, and are not recorded.
 - `locals` (level 1): for `raise` and `unwind` frames, a JSON object `{"name": snapshot id}` of
   the frame's local variables as the exception left it: what a post-mortem debugger shows. For a
   module body, its globals. Names starting with `__`, modules, classes and functions are left out
-  (definitions, not state); secret names are redacted as arguments are; at most 50 per frame (then
+  (definitions, not state); secrets are redacted as arguments are; at most 50 per frame (then
   `"…"`). Kept for 10,000 frames per run at most, so code that raises in a loop stays cheap.
   `NULL` otherwise, and in traces written before this column existed.
 
@@ -221,7 +221,7 @@ the order they happened.
 - `frame`: `frames.id`. `line`: the line that assigned it (a line that runs many times, a loop's,
   has a row each time it writes).
 - `name`: the variable. `value`: snapshot id of its new value, under the same rules as arguments
-  (`self` as its identity, secret names redacted).
+  (`self` as its identity, secrets redacted).
 - `time_ns`: when it was seen, at the start of the next line (or as the frame returned, raised or
   yielded).
 
@@ -270,11 +270,24 @@ snapshots are stored once, so ids repeat.
   snapshotted later, by the writer thread; others when the event happens.
 
 **Redaction.** The value of an argument whose name looks like a secret is stored as
-`<redacted>`: names containing (case-insensitive, camelCase split into words) `password`,
-`passwd`, `secret`, `token`, `api_key`/`apikey`, `credential`, `cookie`, `session`, a word
-starting with `auth` (`auth_header`, `authorization`; not `author`), or the word `key` (`key`,
-`sort_key`, `key_file`; not `keyboard`). Dict items under such keys, and dataclass fields of such
-names, are redacted the same way. A secret inside another object's own repr is not.
+`<redacted>`. Names are split into words (camelCase too) and lowercased, then:
+
+- always redacted: names containing `password`, `passwd`, `passphrase`, `secret`, `credential`,
+  `cookie`, `csrf`, `bearer`, a word starting with `auth` (`auth`, `auth_header`, `authToken`,
+  `authorization`; not `author`), `session_id`, a key or token of a kind (`api_key`/`apikey`,
+  `private_key`, `access_key`, `secret_key`, `signing_key`, `client_key`, `ssh_key`,
+  `access_token`, `refresh_token`, `id_token`, `oauth_token`, `github_token`...);
+- redacted when the value looks like a secret: the words `key`, `token` and `session` alone or in
+  other names (`key`, `sort_key`, `key_file`, `token`, `next_token`, `session`), which name
+  ordinary values as often as not (a dict loop's key, a lexer's token, a database session). A
+  value looks like a secret when it is a string (or bytes) of 16 characters or more that starts
+  with a known credential prefix (`Bearer `, `Basic `, `sk-`, `ghp_`, `github_pat_`, `glpat-`,
+  `xoxb-`, `AKIA`, `AIza`, `ya29.`, `eyJ` for a JWT...), or is opaque: 32 hex digits or more
+  (dashes allowed, as in a UUID), or 20 characters or more of letters, digits and `_-+/=` with
+  digits and letters of both cases.
+
+Dict items under such keys, and dataclass fields of such names, are redacted the same way. A
+secret inside another object's own repr is not.
 
 ### Limits
 

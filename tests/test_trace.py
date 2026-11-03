@@ -513,27 +513,31 @@ def test_values_are_taken_when_the_call_happens(tmp_path):
 
 def test_secrets_are_redacted(tmp_path):
     result, path = traced(tmp_path, """
-        def login(user, password, apiKey, sort_key, keyboard, author, config):
+        def login(user, password, apiKey, sort_key, keyboard, author, config, key, token):
             return "ok"
 
-        login("ada", "hunter2", "apik-zz-123", "s", "qwerty", "me", {"token": "tok-zz-987", "region": "eu"})
+        login("ada", "hunter2", "apik-zz-123", len, "qwerty", "me", {"token": "ghp_Zz9a8b7c6d5e4f3g2h1", "key": "region", "region": "eu"}, "name", "sk-Zz9a8b7c6d5e4f3g2h1")
     """)
     assert result.returncode == 0, result.stderr
     with Trace(path) as found:
         [call] = found.calls("login")["calls"]
     reprs = {name: value["repr"] for name, value in call["args"].items()}
-    assert reprs["password"] == reprs["apiKey"] == reprs["sort_key"] == "<redacted>"
+    assert reprs["password"] == reprs["apiKey"] == reprs["token"] == "<redacted>"
     assert reprs["user"] == "'ada'" and reprs["keyboard"] == "'qwerty'" and reprs["author"] == "'me'"
-    assert reprs["config"] == "{'token': <redacted>, 'region': 'eu'}"
+    assert reprs["key"] == "'name'" and reprs["sort_key"] == "<built-in function len>"  # a `key` that is no secret
+    assert reprs["config"] == "{'token': <redacted>, 'key': 'region', 'region': 'eu'}"
     content = path.read_bytes()
-    assert b"hunter2" not in content and b"apik-zz-123" not in content and b"tok-zz-987" not in content
+    assert b"hunter2" not in content and b"apik-zz-123" not in content and b"Zz9a8b7c6d5e4f3g2h1" not in content
 
 
 def test_secret_names():
-    secrets = ["password", "db_password", "passwd", "client_secret", "authToken", "api_key", "apikey", "APIKey", "key", "sort_key", "key_file", "auth", "authorization", "credentials", "cookie", "session_id"]
-    plain = ["keyboard", "monkey", "author", "authors", "name", "keys_seen", "value"]
+    secrets = ["password", "db_password", "passwd", "client_secret", "authToken", "api_key", "apikey", "APIKey", "secret_key", "access_token", "auth", "authorization", "credentials", "cookie", "session_id"]
+    plain = ["keyboard", "monkey", "author", "authors", "name", "keys_seen", "value", "key", "sort_key", "key_file", "token", "next_token", "session"]
     assert [name for name in secrets if not values.is_secret(name)] == []
-    assert [name for name in plain if values.is_secret(name)] == []
+    assert [name for name in plain if values.is_secret(name, "x")] == []
+    # Generic names hold secrets when their values look like ones.
+    assert values.is_secret("token", "ghp_Zz9a8b7c6d5e4f3g2h1") and values.is_secret("key", "aB3dE5gH7jK9mN1pQ3sT5xY")
+    assert not values.is_secret("key", "file_2024_report_name") and not values.is_secret("token", "(") and not values.is_secret("name", "sk-Zz9a8b7c6d5e4f3g2h1")
 
 
 def test_value_limits():
@@ -620,7 +624,7 @@ HISTORY = """
             total = total + double(price)
             seen.append(price)
         cart = Cart().add(total)
-        token = "tok-zz-987"
+        token = "ghp_Zz9a8b7c6d5e4f3g2h1"
         label = f"total {total}"
         return label
 
@@ -629,7 +633,7 @@ HISTORY = """
         left = left - 10
         raise ValueError(left)
 
-    checkout([1, 2], "tok-zz-123")
+    checkout([1, 2], "xoxb-Zz1a2b3c4d5e6f7g8h9")
     checkout([5], None)
     try:
         fails(3)
@@ -665,13 +669,13 @@ def test_variable_history_of_scoped_functions(tmp_path):
         (19, "total", "6"),
         (20, "seen", "[1, 2]"),
         (21, "cart", "<Cart object>"),  # another one
-        (22, "token", "<redacted>"),  # a secret name, as for arguments
+        (22, "token", "<redacted>"),  # a secret value, as for arguments
         (23, "label", "'total 6'"),
     ]
     carts = rows(path, "SELECT DISTINCT w.value FROM writes w WHERE w.frame = ? AND w.name = 'cart'", first)
     assert len(carts) == 2
     assert rows(path, "SELECT COUNT(*) FROM writes WHERE frame = ?", second) == [(9,)]
-    assert b"tok-zz-987" not in path.read_bytes() and b"tok-zz-123" not in path.read_bytes()
+    assert b"Zz9a8b7c6d5e4f3g2h1" not in path.read_bytes() and b"Zz1a2b3c4d5e6f7g8h9" not in path.read_bytes()
     # Unscoped functions (and methods called from scoped ones) have no writes: no LINE events at all.
     assert writes(path, "prog:double") == [] and writes(path, "prog:Cart.add") == []
     # The last line of a frame that raises is seen as it unwinds.

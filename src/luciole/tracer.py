@@ -131,7 +131,7 @@ class Tracer:
         self.all_threads: list[ThreadTrace] = []  # for the writer
         self.suspended: dict[int, list] = {}  # id(Python frame) -> entry, for generators and coroutines
         self.suspended_fids: dict[str, dict[int, None]] = {}  # node -> ids of its frames in `suspended`, oldest first
-        self.arg_names: dict[object, tuple] = {}  # code -> ((name, secret), ...)
+        self.arg_names: dict[object, tuple] = {}  # code -> ((name, values.secrecy(name)), ...)
         self.exit_status: int | None = None
         self.failure_frames = 0  # frames whose locals were kept as an exception left them
         self.off = False  # set when the trace cannot be written: the hooks then record nothing
@@ -368,7 +368,7 @@ class Tracer:
         except KeyError:
             count = code.co_argcount + code.co_kwonlyargcount
             count += bool(code.co_flags & inspect.CO_VARARGS) + bool(code.co_flags & inspect.CO_VARKEYWORDS)
-            names = self.arg_names[code] = tuple((name, values.is_secret(name)) for name in code.co_varnames[:count])
+            names = self.arg_names[code] = tuple((name, values.secrecy(name)) for name in code.co_varnames[:count])
         if not names:
             return ()
         try:
@@ -379,7 +379,7 @@ class Tracer:
                     value = local[name]
                 except KeyError:
                     continue
-                if secret:
+                if secret and (secret == values.SECRET or values.looks_secret(value)):
                     args.append((name, REDACTED))
                 elif name == "self":  # its identity, without running its __repr__ (maybe not built yet)
                     args.append((name, (IDENTITY, type(value), id(value))))
@@ -400,7 +400,7 @@ class Tracer:
                 if len(items) == MAX_LOCALS:
                     items.append(("…", "more locals not kept"))
                     break
-                if values.is_secret(name):
+                if values.is_secret(name, value):
                     items.append((name, REDACTED))
                 elif name == "self":
                     items.append((name, (IDENTITY, type(value), id(value))))
@@ -479,7 +479,7 @@ class Tracer:
             self.writes_seen += 1
             if self.writes_seen > self.max_writes:
                 continue  # counted, not stored
-            if values.is_secret(name):
+            if values.is_secret(name, value):
                 value = REDACTED
             elif name == "self":
                 value = (IDENTITY, type(value), id(value))
