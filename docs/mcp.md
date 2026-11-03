@@ -67,6 +67,16 @@ work with any Python 3.10+.
      (it sets `LUCIOLE_PYTEST=1`, which turns the plugin on), each test's outcome, failed ones first, with where it failed (setup, call,
      teardown), the message, its frame (`#N`), the exception it ended with (`!N`) and its process,
      to pass to `traceback`, `frame` and `origin`;
+   - `suspects [top]`: for a run with failing tests, the functions ranked by how much failing
+     tests ran them and passing ones did not (Ochiai), with the tests that ran each, its file and
+     line, and for the first ones a call made in a failing test that no passing test made, beside
+     the closest passing call. The place to start when `tests` shows failures;
+   - `compare [frame_a frame_b] [run_b]`: the first point where two executions differ (a call
+     that returned something else, raised on one side only, or was made on one side only), with
+     both sides' values and the path from the top. Without frames, the first failing test against
+     the same test in `run_b`, else the same test function with other parameters, else the passing
+     test that ran the most similar functions. Both are explained in
+     [fault-localization.md](fault-localization.md);
    - `summary`: duration, exit status, top functions by calls and by time (self time leaves out
      the time coroutines spend awaiting);
    - `variable_history FUNCTION [variable] [frame]`: every assignment to its local variables,
@@ -101,7 +111,8 @@ call tree, `frame` when values were cut).
 The instructions the server sends at initialize tell the agent to use `run` when it needs
 values or call paths a print would not give easily, to verify fixes with plain pytest rather
 than under the recorder, to stop recording once `calls` or `traceback` pinpoints the cause, and
-to check who calls the function it blames before choosing where to fix.
+to check who calls the function it blames before choosing where to fix, and, when tests fail, to
+start with `suspects` and `compare`.
 
 With the VS Code extension open, the engine it runs is found too: the brain lights up while the
 agent's programs run.
