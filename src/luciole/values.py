@@ -101,21 +101,59 @@ IMMUTABLE = frozenset({int, float, complex, bool, str, bytes, type(None)})  # sa
 CONTAINERS = frozenset({list, tuple, set, frozenset, dict})  # not subclasses: they have reprs of their own
 REDACTED = "<redacted>"
 
-# Names whose values are secrets: password, token, api_key, auth_header, session_id, a `key` word...
-_SECRET = re.compile(r"passw(or)?d|secret|token|api_?key|credential|cookie|session|(^|_)auth(?!ors?(_|$))|(^|_)key(_|$)")
-_secret_names: dict[str, bool] = {}
+# Names whose values are secrets: password, client_secret, api_key, access_token, session_id,
+# auth_header... (camelCase is split into words first: apiKey, authToken).
+_SECRET = re.compile(
+    r"passw(or)?d|passphrase|secret|credential|cookie|csrf|bearer|(^|_)auth(?!ors?(_|$))|session_?id"
+    r"|(api|private|access|signing|encryption|master|client|ssh|license|session|oauth)_?(key|token)"
+    r"|(refresh|id|bearer|github|gitlab|slack|jwt)_?token"
+)
+# Words that name secrets as often as not (a dict loop's `key`, a lexer's `token`, a database
+# `session`): their values are redacted when they look like secrets themselves.
+_MAYBE = re.compile(r"(^|_)(key|token|session)s?(_|$)")
+PLAIN, MAYBE, SECRET = 0, 1, 2
+_secrecy: dict[str, int] = {}
+
+# Values that look like secrets: known prefixes (GitHub, Slack, AWS, Google, OpenAI-like keys,
+# JWTs, HTTP credentials), or long opaque strings mixing digits and letters of both cases (or hex).
+SECRET_PREFIXES = (
+    "Bearer ", "Basic ", "Token ", "sk-", "sk_", "pk_", "rk_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_",
+    "glpat-", "xoxb-", "xoxp-", "xoxa-", "xoxs-", "AKIA", "ASIA", "AIza", "ya29.", "eyJ",
+)
+_OPAQUE = re.compile(r"[A-Za-z0-9_\-+/=]{20,}")
+_HEX = re.compile(r"[0-9a-fA-F-]{32,}")
 
 
-def is_secret(name: str) -> bool:
+def secrecy(name: str) -> int:
+    """PLAIN, MAYBE (a secret if its value looks like one, see looks_secret) or SECRET."""
     try:
-        return _secret_names[name]
+        return _secrecy[name]
     except KeyError:
         pass
-    # camelCase words become snake_case ones: apiKey, authToken.
-    found = bool(_SECRET.search(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()))
-    if len(_secret_names) < 10_000:
-        _secret_names[name] = found
+    words = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()
+    found = SECRET if _SECRET.search(words) else MAYBE if _MAYBE.search(words) else PLAIN
+    if len(_secrecy) < 10_000:
+        _secrecy[name] = found
     return found
+
+
+def looks_secret(value: object) -> bool:
+    """Whether a string looks like a credential: a known prefix, or a long opaque token."""
+    if type(value) is bytes:
+        value = value.decode("latin-1")
+    if type(value) is not str or not 16 <= len(value) <= 4096:
+        return False
+    if value.startswith(SECRET_PREFIXES):
+        return True
+    if _HEX.fullmatch(value):
+        return any(c.isdigit() for c in value) and any(c.isalpha() for c in value)
+    return bool(_OPAQUE.fullmatch(value)) and any(c.isdigit() for c in value) and any(c.islower() for c in value) and any(c.isupper() for c in value)
+
+
+def is_secret(name: str, value: object = None) -> bool:
+    """Whether the value of a variable, argument or dict key `name` is to be redacted."""
+    found = secrecy(name)
+    return found == SECRET or found == MAYBE and looks_secret(value)
 
 
 def snapshot(value: object, chars: int = REPR_CHARS, items: int = ITEMS) -> tuple[str, str, str | None, bool]:
@@ -180,7 +218,8 @@ def dataclass_repr(value: object, chars: int) -> str:
         if size > chars:
             parts.append("…")
             break
-        part = f"{name}={REDACTED if is_secret(name) else short(getattr(value, name, None))}"
+        item = getattr(value, name, None)
+        part = f"{name}={REDACTED if is_secret(name, item) else short(item)}"
         parts.append(part)
         size += len(part) + 2
     return f"{type(value).__qualname__}({', '.join(parts)})"
@@ -189,7 +228,7 @@ def dataclass_repr(value: object, chars: int) -> str:
 def container(value, chars: int, items: int) -> tuple[str, str, bool]:
     length = len(value)
     if type(value) is dict:
-        shown = [[short(key), REDACTED if type(key) is str and is_secret(key) else short(item)] for key, item in itertools.islice(value.items(), items)]
+        shown = [[short(key), REDACTED if type(key) is str and is_secret(key, item) else short(item)] for key, item in itertools.islice(value.items(), items)]
         inner = ", ".join(f"{key}: {item}" for key, item in shown)
         truncated = length > items or "…" in inner  # an item was cut (or holds a "…" of its own)
         text = "{" + inner + (", …" if length > items else "") + "}"

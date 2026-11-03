@@ -283,7 +283,7 @@ def test_the_mcp_tool(tmp_path):
         client.ok("run", command=f"{PYTHON} prog.py")
         text = client.ok("origin", function="main", variable="final")
         assert text.startswith("where final in prog:main #") and "Account.balance set by Account.deposit #" in text
-        negative = re.search(r"#(\d+) parse\(text='-3'\)", client.ok("calls", function="parse")).group(1)
+        negative = re.search(r"#(\d+) .*\(text='-3'\)", client.ok("calls", function="parse")).group(1)
         text = client.ok("origin", variable="value", frame=int(negative))
         assert 'to know which: `run` the same command again with scope: ["prog:parse"]' in text
         client.ok("run", command=f"{PYTHON} prog.py", scope="parse")

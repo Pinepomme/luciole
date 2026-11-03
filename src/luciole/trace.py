@@ -9,17 +9,18 @@ The recorder writes traces (see tracer.py); this module defines their schema and
         trace.exceptions()               # raised, where, chained from, handled where
         trace.history("Cart.add")        # level 2: each call's variable assignments, in order
 
-Every method returns plain dicts and lists (JSON-ready); render() turns them into text for
-`luciole trace`. Frames, exceptions and snapshots are referred to by their ids in the file.
+Every method returns plain dicts and lists (JSON-ready); trace_text.py turns them into text for
+`luciole trace` and `luciole mcp`. Frames, exceptions and snapshots are referred to by their ids in the file.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
-import time
 from fnmatch import fnmatchcase
 from pathlib import Path
+
+from luciole.trace_text import duration, plural, render_calls, render_exceptions, render_history, render_summary, render_traceback, render_tree, value_text  # noqa: F401  (part of this module's API)
 
 FORMAT = "luciole-trace"
 SCHEMA_VERSION = 1
@@ -71,7 +72,8 @@ CREATE TABLE frames (
     args TEXT,
     result INTEGER,
     locals TEXT,
-    suspended_ns INTEGER
+    suspended_ns INTEGER,
+    end_line INTEGER
 );
 CREATE TABLE exceptions (
     id INTEGER PRIMARY KEY,
@@ -253,13 +255,28 @@ class Trace:
         rows = self.db.execute("SELECT DISTINCT node FROM frames WHERE node LIKE ? ESCAPE '\\' OR node LIKE ? ESCAPE '\\'", (f"%:{_like(name)}", f"%.{_like(name)}"))
         return sorted(row[0] for row in rows)
 
-    def calls(self, node: str, limit: int = 20, offset: int = 0) -> dict:
-        """Calls of a function (see nodes() for `node`), in order: `{"nodes", "total", "calls"}`."""
+    def calls(self, node: str, limit: int = 20, offset: int = 0, caller: str | None = None) -> dict:
+        """Calls of a function (see nodes() for `node`), in order: `{"nodes", "total", "calls",
+        "callers"}`. `callers` counts all its calls by call site, `{"node", "line", "count"}`
+        (node None for calls with no project caller), most first. `caller` keeps the calls made
+        by that function (a name as for `node`): then `total` counts those, and `all` every call."""
         nodes = self.nodes(node)
         marks = ",".join("?" * len(nodes))
-        total = self.db.execute(f"SELECT COUNT(*) FROM frames WHERE node IN ({marks})", nodes).fetchone()[0]
-        rows = self.db.execute(f"SELECT * FROM frames WHERE node IN ({marks}) ORDER BY start_ns, id LIMIT ? OFFSET ?", [*nodes, limit, offset]).fetchall()
-        return {"nodes": nodes, "total": total, "calls": [self._frame(row) for row in rows]}
+        where, params = f"f.node IN ({marks})", list(nodes)
+        rows = self.db.execute(
+            f"SELECT c.node, f.line, COUNT(*) AS count FROM frames f LEFT JOIN frames c ON c.id = f.caller WHERE {where} GROUP BY c.node, f.line ORDER BY count DESC, MIN(f.id) LIMIT 50",
+            params,
+        ).fetchall()
+        found = {"nodes": nodes, "offset": offset, "callers": [{"node": row[0], "line": row[1], "count": row[2]} for row in rows]}
+        if caller is not None:
+            found["all"] = self.db.execute(f"SELECT COUNT(*) FROM frames f WHERE {where}", params).fetchone()[0]
+            found["caller_nodes"] = callers = self.nodes(caller)
+            where += f" AND f.caller IN (SELECT id FROM frames WHERE node IN ({','.join('?' * len(callers))}))"
+            params += callers
+        found["total"] = self.db.execute(f"SELECT COUNT(*) FROM frames f WHERE {where}", params).fetchone()[0]
+        rows = self.db.execute(f"SELECT f.* FROM frames f WHERE {where} ORDER BY f.start_ns, f.id LIMIT ? OFFSET ?", [*params, limit, offset]).fetchall()
+        found["calls"] = [self._frame(row) for row in rows]
+        return found
 
     def frame(self, frame_id: int) -> dict | None:
         row = self.db.execute("SELECT * FROM frames WHERE id = ?", (frame_id,)).fetchone()
@@ -279,22 +296,93 @@ class Trace:
             level = self.db.execute("SELECT * FROM frames WHERE id = ?", (start,)).fetchall()
         entries = {row["id"]: self._entry(row, end) for row in level}
         roots = [entries[row["id"]] for row in level]
-        parents = list(entries.values())
+        self._grow(entries, list(entries.values()), depth, max_frames, end)
+        # What was not read is counted, not shown.
+        counts = self._child_counts(list(entries))
+        for entry in entries.values():
+            entry["more"] = counts.get(entry["frame"], 0) - len(entry["children"])
+        return _collapse(roots)
+
+    def focus(self, pattern: str, start: int | None = None, depth: int = 1, limit: int = 50) -> dict:
+        """The calls of the functions matching `pattern` (as a scope pattern: `checkout`,
+        `Cart.*`, `cart:*`) and the paths that led to them, from the roots (or from frame
+        `start`): `{"nodes", "start", "total", "shown", "limited", "tree"}`. `tree` is as tree() makes it, with only
+        the frames on those paths, each with `path` (its `more` counts its other calls), and the
+        first `limit` matching calls themselves with `match` and their calls `depth` levels deep."""
+        nodes = [row[0] for row in self.db.execute("SELECT DISTINCT node FROM frames") if in_scope(row[0], [pattern])]
+        found = {"nodes": sorted(nodes), "start": start, "total": 0, "shown": 0, "limited": False, "tree": []}
+        if not nodes:
+            return found
+        marks = ",".join("?" * len(nodes))
+        found["total"] = self.db.execute(f"SELECT COUNT(*) FROM frames WHERE node IN ({marks})", nodes).fetchone()[0]
+        # Walk up from the matches, a level at a time, to the roots (or to `start`).
+        matches, callers, scanned = [], {}, 0
+        for (frame,) in self.db.execute(f"SELECT id FROM frames WHERE node IN ({marks}) ORDER BY id", nodes):
+            matches.append(frame)
+            if len(matches) >= limit * 4:
+                break
+        frontier = set(matches)
+        while frontier and scanned < 100_000:
+            rows = []
+            for chunk in _chunks(sorted(frontier)):
+                rows += self.db.execute(f"SELECT id, caller FROM frames WHERE id IN ({','.join('?' * len(chunk))})", chunk).fetchall()
+            scanned += len(rows)
+            frontier = set()
+            for frame, caller in rows:
+                callers[frame] = None if frame == start else caller
+                if caller is not None and frame != start and caller not in callers:
+                    frontier.add(caller)
+        kept, path = [], set()
+        for frame in matches:
+            chain, at = [], frame
+            while at not in path:
+                chain.append(at)
+                caller = callers.get(at, -1)
+                if caller is None or caller == -1:
+                    break
+                at = caller
+            if at not in path and (caller == -1 or start is not None and at != start):
+                continue  # not below `start` (or too far to walk)
+            path.update(chain)
+            kept.append(frame)
+            if len(kept) == limit:
+                found["limited"] = True
+                break
+        if not kept:
+            return found
+        end = self.run()["duration_ns"]
+        rows = []
+        for chunk in _chunks(sorted(path)):
+            rows += self.db.execute(f"SELECT * FROM frames WHERE id IN ({','.join('?' * len(chunk))})", chunk).fetchall()
+        entries = {row["id"]: self._entry(row, end) for row in sorted(rows, key=lambda row: row["id"])}
+        roots = []
+        for frame, entry in entries.items():
+            entry["path"] = True
+            caller = callers.get(frame)
+            (entries[caller]["children"] if caller in entries else roots).append(entry)
+        for frame in kept:
+            entries[frame]["match"] = True
+        self._grow(entries, [entries[frame] for frame in kept if not entries[frame]["children"]], depth, 2000, end)
+        counts = self._child_counts(list(entries))
+        for entry in entries.values():
+            entry["more"] = counts.get(entry["frame"], 0) - len(entry["children"])
+        found.update(shown=len(kept), tree=_collapse(roots))
+        return found
+
+    def _grow(self, entries: dict, parents: list[dict], depth: int, max_frames: int, end: int) -> None:
+        """Read the calls below `parents`, `depth` levels deep, into `entries` and their children."""
         for _ in range(depth):
             if not parents or len(entries) >= max_frames:
                 break
             rows = self._children([entry["frame"] for entry in parents], max_frames - len(entries))
             parents = []
             for row in rows:
+                if row["id"] in entries:
+                    continue
                 entry = self._entry(row, end)
                 entries[row["id"]] = entry
                 entries[row["caller"]]["children"].append(entry)
                 parents.append(entry)
-        # What was not read is counted, not shown.
-        counts = self._child_counts(list(entries))
-        for entry in entries.values():
-            entry["more"] = counts.get(entry["frame"], 0) - len(entry["children"])
-        return _collapse(roots)
 
     def children(self, frame: int | None = None, after: int = 0, until: int | None = None, limit: int = 100, collapse: bool = True, scan: int = 20_000) -> dict:
         """The calls `frame` made (default: the roots), one page at a time, for views that open
@@ -362,16 +450,46 @@ class Trace:
         ).fetchall()
         return {"total": total, "exceptions": [dict(row) for row in rows]}
 
-    def traceback(self, exception_id: int | None = None) -> dict | None:
+    def traceback(self, exception_id: int | None = None, original: bool = False) -> dict | None:
         """The frames an exception left, innermost first, each with the line it was at and (level
-        1) its locals then: `{"exception", "frames", "handled_in"}`. Default: the last exception
-        nothing handled, else the last one."""
+        1) its locals then: `{"exception", "frames", "handled_in", "chain"}`. Default: the last
+        exception nothing handled, else the last one; with `original`, the first exception of its
+        chain (what it was raised from, and so on: the original error). `chain` is the chain it
+        belongs to, outermost first (the exceptions themselves, as exceptions() gives them)."""
         if exception_id is None:
             row = self.db.execute("SELECT id FROM exceptions WHERE handled_in IS NULL AND frame IS NOT NULL ORDER BY time_ns DESC, id DESC LIMIT 1").fetchone()
             row = row or self.db.execute("SELECT id FROM exceptions ORDER BY time_ns DESC, id DESC LIMIT 1").fetchone()
             if row is None:
                 return None
             exception_id = row[0]
+            if original:
+                exception_id = self.chain(exception_id)[-1]["id"]
+        found = self.traceback_of(exception_id)
+        if found is not None:
+            found["chain"] = self.chain(exception_id)
+        return found
+
+    def chain(self, exception_id: int) -> list[dict]:
+        """The chain of exceptions `exception_id` belongs to, outermost first: those raised from
+        it (or while handling it), and what it was raised from."""
+        top, seen = exception_id, {exception_id}
+        while True:  # up: the last exception chained from this one
+            row = self.db.execute("SELECT id FROM exceptions WHERE cause = ? ORDER BY id DESC LIMIT 1", (top,)).fetchone()
+            if row is None or row[0] in seen or len(seen) > 100:
+                break
+            top = row[0]
+            seen.add(top)
+        chain = []
+        at = top
+        while at is not None and len(chain) <= 100:
+            found = self.exceptions_by_id([at])
+            if not found or any(e["id"] == at for e in chain):
+                break
+            chain.append(found[0])
+            at = found[0]["cause"]
+        return chain
+
+    def traceback_of(self, exception_id: int) -> dict | None:
         found = self.exceptions_by_id([exception_id])
         if not found:
             return None
@@ -402,7 +520,7 @@ class Trace:
         else:
             nodes = self.nodes(node) if node else []
         recorded = bool(scope) and self._has_table("writes") and any(in_scope(found, scope) for found in nodes)
-        found = {"nodes": nodes, "scope": scope, "recorded": recorded, "calls": 0, "total": 0, "frames": []}
+        found = {"nodes": nodes, "scope": scope, "recorded": recorded, "calls": 0, "total": 0, "offset": offset, "frames": []}
         if not nodes:
             return found
         if frame is not None:
@@ -476,7 +594,7 @@ class Trace:
         thread = self.db.execute("SELECT name FROM threads WHERE id = ?", (row["thread"],)).fetchone()
         exception = None
         if row["exception"]:
-            found = self.db.execute("SELECT id, type, message, frame FROM exceptions WHERE id = ?", (row["exception"],)).fetchone()
+            found = self.db.execute("SELECT id, type, message, frame, line FROM exceptions WHERE id = ?", (row["exception"],)).fetchone()
             exception = dict(found) if found else {"id": row["exception"]}
         frame = {
             "frame": row["id"],
@@ -495,6 +613,8 @@ class Trace:
             frame["result"] = self.snapshot(row["result"])
         if "locals" in row.keys() and row["locals"] is not None:  # traces before 0.3 have no column
             frame["locals"] = {name: self.snapshot(value) for name, value in json.loads(row["locals"]).items()}
+        if "end_line" in row.keys() and row["end_line"] is not None:  # level 2, scoped frames only
+            frame["end_line"] = row["end_line"]
         return frame
 
     def _entry(self, row: sqlite3.Row, end: int) -> dict:
@@ -556,6 +676,45 @@ def _collapse(entries: list[dict]) -> list[dict]:
     return result
 
 
+def fold_small(entries: list[dict], share: float = 0.01, total: int | None = None, parent: int | None = None) -> list[dict]:
+    """Fold the calls that took under `share` of the tree's time (of `total`, default: its
+    entries' sum) and under a tenth of their caller's into one entry per caller: `{"folded":
+    True, "count", "nodes": {node: count}, "duration_ns", "below"}` (`below`: the calls under
+    them). Calls that raised, or under which something raised, are kept; so are two small calls
+    or one (folding them saves a line at most)."""
+    if total is None:
+        total = sum(entry["duration_ns"] for entry in entries)
+    if parent is None:
+        parent = total
+    limit = min(share * total, parent / 10)
+    small = [entry for entry in entries if entry["duration_ns"] < limit and not _raised(entry)]
+    if len(small) < 3:
+        small = []  # folding them would save a line at most
+    kept = []
+    for entry in entries:
+        if entry in small:
+            continue
+        if entry["children"]:
+            entry["children"] = fold_small(entry["children"], share, total, entry["duration_ns"])
+        kept.append(entry)
+    if small:
+        nodes: dict[str, int] = {}
+        for entry in small:
+            nodes[entry["node"]] = nodes.get(entry["node"], 0) + entry["count"]
+        below = sum(_size(entry) - entry["count"] for entry in small)
+        kept.append({"folded": True, "count": sum(nodes.values()), "nodes": nodes, "duration_ns": sum(entry["duration_ns"] for entry in small), "below": below})
+    return kept
+
+
+def _raised(entry: dict) -> bool:
+    return entry["end"] not in ("return", "suspended") or any(_raised(child) for child in entry["children"])
+
+
+def _size(entry: dict) -> int:
+    """Calls an entry stands for, those below it included (repeated subtrees counted once each)."""
+    return entry["count"] + entry["more"] + entry["count"] * sum(_size(child) - child["more"] for child in entry["children"]) + sum(child["more"] for child in entry["children"])
+
+
 def _shape(entry: dict) -> tuple:
     return entry["node"], entry["end"], bool(entry["more"]), tuple((_shape(child), child["count"]) for child in entry["children"])
 
@@ -565,155 +724,3 @@ def _merge(into: list[dict], other: list[dict]) -> None:
         mine["duration_ns"] += theirs["duration_ns"]
         mine["more"] += theirs["more"]
         _merge(mine["children"], theirs["children"])
-
-
-# Text, for `luciole trace`
-
-
-def duration(ns: int | None) -> str:
-    if ns is None:
-        return "?"
-    if ns < 1_000:
-        return f"{ns} ns"
-    if ns < 1_000_000:
-        return f"{ns / 1_000:.1f} µs"
-    if ns < 1_000_000_000:
-        return f"{ns / 1_000_000:.2f} ms"
-    return f"{ns / 1_000_000_000:.2f} s"
-
-
-def render_summary(summary: dict) -> str:
-    run = summary["run"]
-    started = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(run["started_at"]))
-    status = "still running or killed" if run["ended_at"] is None else f"exit status {run['exit_status']}" if run["exit_status"] is not None else f"ended by {run['ended_by']}"
-    lines = [
-        f"run: {' '.join(run['argv'])}",
-        f"  pid {run['pid']}, Python {run['python']}, luciole {run['luciole']}, level {run['level']}, root {run['root']}",
-        f"  started {started}, {duration(run['duration_ns'])}, {status}",
-        f"  {plural(summary['frames'], 'frame')}, {plural(summary['exceptions'], 'exception')}, {plural(summary['threads'], 'thread')}",
-    ]
-    if run.get("scope"):
-        lines.append(f"  variable history (level 2) for {', '.join(run['scope'])}: {plural(run.get('writes_stored') or 0, 'write')}")
-    if run["truncated"]:
-        if (run["frames_total"] or 0) > (run["frames_stored"] or 0):
-            lines.append(f"  truncated: {run['frames_stored']} of {plural(run['frames_total'], 'frame')} kept")
-        if (run.get("writes_total") or 0) > (run.get("writes_stored") or 0):
-            lines.append(f"  truncated: {run['writes_stored']} of {plural(run['writes_total'], 'write')} kept")
-    for title, key in (("by calls", "by_calls"), ("by time (self)", "by_time")):
-        lines += ["", f"top functions {title}:", f"  {'calls':>8}  {'total':>10}  {'active':>10}  {'self':>10}  function"]
-        for f in summary[key]:
-            lines.append(f"  {f['calls']:>8}  {duration(f['total_ns']):>10}  {duration(f['active_ns']):>10}  {duration(f['self_ns']):>10}  {f['node']}")
-    if any(f["active_ns"] != f["total_ns"] for f in summary["by_calls"] + summary["by_time"]):
-        lines += ["", "active: total without the time generators and coroutines spent suspended (yield, await)"]
-    return "\n".join(lines)
-
-
-def value_text(value: dict | None) -> str:
-    return "?" if value is None else value["repr"]
-
-
-def render_calls(found: dict) -> str:
-    if not found["nodes"]:
-        return "no calls recorded for this function"
-    lines = [f"{plural(found['total'], 'call')} of {', '.join(found['nodes'])}"]
-    for call in found["calls"]:
-        caller = call["caller"]
-        where = f"from {caller['node']}:{caller['line']} (#{caller['frame']})" if caller else "root"
-        if call["origin"]:
-            where += f", started by #{call['origin']}"
-        args = ", ".join(f"{name}={value_text(value)}" for name, value in call.get("args", {}).items())
-        name = call["node"] if len(found["nodes"]) > 1 else call["node"].rsplit(":", 1)[-1]
-        head = f"#{call['frame']} {name}({args})" if "args" in call else f"#{call['frame']} {name}"
-        if call["end"] == "return":
-            outcome = f" -> {value_text(call['result'])}" if "result" in call else ""
-        elif call["exception"]:
-            exception = call["exception"]
-            outcome = f" !! {exception.get('type', '?')}: {exception.get('message', '')}"
-            outcome += "" if call["end"] == "raise" else f" (from #{exception.get('frame')})"
-        else:
-            outcome = f" [{call['end']}]"
-        lines.append(f"  {head}{outcome}   {duration(call['duration_ns'])}, {where}, {call['thread']}")
-    shown = len(found["calls"])
-    if shown < found["total"]:
-        lines.append(f"  ... {found['total'] - shown} more (--limit, --offset)")
-    return "\n".join(lines)
-
-
-def render_tree(entries: list[dict], indent: int = 0) -> str:
-    lines = []
-    for entry in entries:
-        count = f" ×{entry['count']}" if entry["count"] > 1 else ""
-        end = "" if entry["end"] == "return" else f" [{entry['end']}]"
-        more = f"  (+{plural(entry['more'], 'call')} below)" if entry["more"] else ""
-        lines.append(f"{'  ' * indent}{entry['node']}{count}  #{entry['frame']}  {duration(entry['duration_ns'])}{end}{more}")
-        if entry["children"]:
-            lines.append(render_tree(entry["children"], indent + 1))
-    return "\n".join(lines)
-
-
-def render_traceback(found: dict | None) -> str:
-    if found is None:
-        return "no exceptions"
-    e = found["exception"]
-    lines = [f"!{e['id']} {e['type']}: {e['message']}"]
-    if e["cause"]:
-        lines.append(f"  {'caused by' if e['chain'] == 'cause' else 'while handling'} !{e['cause']}")
-    for frame in found["frames"]:
-        here = "raised here" if frame["end"] == "raise" else "passed through"
-        lines.append(f"  in {frame['node']} (#{frame['frame']}), line {frame['at_line']}: {here}")
-        for name, value in frame.get("locals", {}).items():
-            lines.append(f"      {name} = {value_text(value)}")
-    handled = found["handled_in"]
-    if handled:
-        lines.append(f"  handled in {handled['node']} (#{handled['frame']}), line {handled['at_line']}")
-    elif found["frames"]:
-        lines.append("  not handled")
-    if found["frames"] and not any("locals" in frame for frame in found["frames"]):
-        lines.append("  (no locals: recorded at level 0)")
-    return "\n".join(lines)
-
-
-def render_history(found: dict) -> str:
-    if not found["nodes"]:
-        return "no calls recorded for this function"
-    names = ", ".join(found["nodes"])
-    if not found["recorded"]:
-        scope = f"its scope was {', '.join(found['scope'])}" if found["scope"] else "it was not recorded at level 2"
-        return f"no variable history for {names}: {scope}. Run again with --level 2 --scope {found['nodes'][0]}"
-    if not found["total"]:
-        return f"{plural(found['calls'], 'call')} of {names}, no variable written"
-    lines = [f"{plural(found['total'], 'write')} in {plural(found['calls'], 'call')} of {names}"]
-    shown = 0
-    for call in found["frames"]:
-        args = ", ".join(f"{name}={value_text(value)}" for name, value in call.get("args", {}).items())
-        name = call["node"] if len(found["nodes"]) > 1 else call["node"].rsplit(":", 1)[-1]
-        lines.append(f"  #{call['frame']} {name}({args})" if "args" in call else f"  #{call['frame']} {name}")
-        for write in call["writes"]:
-            after = f"+{duration(write['time_ns'] - call['start_ns'])}"
-            lines.append(f"    line {write['line']:<4} {write['name']} = {value_text(write['value'])}   {after}")
-        shown += len(call["writes"])
-    if shown < found["total"]:
-        lines.append(f"  ... {plural(found['total'] - shown, 'more write')} (--limit, --offset)")
-    return "\n".join(lines)
-
-
-def plural(count: int, word: str) -> str:
-    """`1 call`, `2 calls`, `3 processes`."""
-    return f"{count} {word}" if count == 1 else f"{count} {word}es" if word.endswith("s") else f"{count} {word}s"
-
-
-def render_exceptions(found: dict) -> str:
-    if not found["total"]:
-        return "no exceptions"
-    lines = [f"{plural(found['total'], 'exception')}"]
-    for e in found["exceptions"]:
-        where = f"{e['node']}:{e['line']} (#{e['frame']})" if e["frame"] else f"line {e['line']}"
-        lines.append(f"  !{e['id']} {e['type']}: {e['message']}")
-        lines.append(f"      raised in {where} at {duration(e['time_ns'])}")
-        if e["cause"]:
-            lines.append(f"      {'caused by' if e['chain'] == 'cause' else 'while handling'} !{e['cause']}")
-        lines.append(f"      handled in {e['handled_node']} (#{e['handled_in']})" if e["handled_in"] else "      not handled")
-    shown = len(found["exceptions"])
-    if shown < found["total"]:
-        lines.append(f"  ... {found['total'] - shown} more (--limit, --offset)")
-    return "\n".join(lines)
