@@ -26,8 +26,15 @@ work with any Python 3.10+.
    runs as typed, with auto-start on: every Python process it starts (child processes, pool
    workers) records a trace at level 1, every call of project code with its arguments and return
    value, and every exception with where it was raised and handled. The answer has the exit
-   status, the output (its start and end), each process recorded, and the exceptions nothing in
-   the project handled, with the frame (`#N`) they were raised in.
+   status, the output, each process recorded, and the exceptions nothing in the project handled,
+   with the frame (`#N`) they were raised in. It stays under about 3.5 KB: the output keeps its
+   start and its end, and says which file has all of it (`output.txt` in the run's folder).
+   Commands run through a package manager (`uv run`, `uvx`, `poetry run`, `pipenv run`, `hatch
+   run`, `pdm run`, `conda run`, `rye run`, `pixi run`) are not run: they may build or sync an
+   environment first, for minutes. The answer gives the command to run instead, with the
+   project's `.venv` interpreter when there is one. A command that is not on PATH gets a way to
+   run it with the interpreter: the project's console script of that name (from
+   `pyproject.toml`, `setup.cfg` or `setup.py`) through `python -c`, else `python -m`.
 2. Ask about the run:
    - `exceptions`: type, message, the function and line that raised it, its chain, where it was
      handled;
@@ -79,6 +86,11 @@ the last) and `process` (a pid; default: the first process). Long answers are cu
 (`limit`, `offset`, `depth`). An answer ends with at most one line naming the most useful next
 query, when there is an obvious one (`traceback` after a run that failed, `focus` after a folded
 call tree, `frame` when values were cut).
+
+The instructions the server sends at initialize tell the agent to use `run` when it needs
+values or call paths a print would not give easily, to verify fixes with plain pytest rather
+than under the recorder, to stop recording once `calls` or `traceback` pinpoints the cause, and
+to check who calls the function it blames before choosing where to fix.
 
 With the VS Code extension open, the engine it runs is found too: the brain lights up while the
 agent's programs run.

@@ -26,29 +26,33 @@ from pathlib import Path
 from luciole import __version__
 from luciole.runs import finish_run, new_run, processes_of, runs_folder
 from luciole.trace import Trace, fold_small
-from luciole.trace_text import cut_short, plural, render_calls, render_exceptions, render_focus, render_history, render_summary, render_traceback, render_tree
+from luciole.trace_text import cut_short, first_line, plural, render_calls, render_exceptions, render_focus, render_history, render_summary, render_traceback, render_tree
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first
-OUTPUT_HEAD = 20  # lines of a program's output shown from its start...
-OUTPUT_TAIL = 80  # ...and from its end
+RUN_TEXT = 3_500  # characters of `run`'s answer: the program's output is cut to fit
+OUTPUT_HEAD = 0.3  # the share of the output's room given to its start; its end gets the rest
+LINE_CHARS = 300  # characters of a line of output, or of a process's command line
 MAX_TEXT = 20_000  # characters per answer
+# Commands that run a program in an environment they may first build or sync: minutes of
+# installing, and output that buries the program's. Their options that take a value.
+WRAPPERS = {"uv", "poetry", "pipenv", "hatch", "pdm", "conda", "rye", "uvx", "pixi"}
+WRAPPER_OPTIONS = {"--with", "--python", "-p", "--env-file", "-n", "--name", "-e", "--env", "--environment", "--prefix", "--package", "--extra", "--group", "--directory", "--project", "--from", "--index"}
 
 INSTRUCTIONS = """\
-Luciole records Python programs so you can debug from what actually happened instead of adding
-prints and re-running. Use `run` to execute a command (a script, `pytest -x tests/test_x.py`, a
-module) under the recorder: every call of project code is recorded with its arguments and return
-value, and every exception with where it was raised and handled. Then ask: `exceptions` for what
-went wrong, `traceback` for the stack it went through with every frame's local variables at that
-moment (a post-mortem debugger's view, no re-run needed), `calls` for every call of a function
-with its values, `call_tree` for who called what, `frame` for one call in detail. When a wrong
-value was made inside a function, before anything failed, `run` again with `scope` naming the
-suspect functions (level 2): `variable_history` then shows every assignment in them, line by line,
-with the values. When a value is wrong, ask `origin` where it came from: it walks back through
-the assignments, arguments, return values, globals and attributes that made it, across functions,
-each with its line and value (exact lines for a local assigned in several places need its
-function in a `scope`: it says when, and how). `find` and `neighbors` answer from the static graph: where a
-function is, who calls it, what it calls, which variables it reads and writes, even for code that
-did not run. Runs are kept: `runs` lists them, and every query takes a run id (default: the last).
+Luciole records Python programs (3.12+) so you can debug from what actually happened. `run`
+executes a command under the recorder: every call of project code with its arguments and return
+value, every exception with where it was raised and handled, and the local variables of every
+frame an exception left. Use it when you need values or call paths that a print would not give
+easily; verify fixes with plain pytest in your shell, not under the recorder. Run the interpreter
+itself (`python -m pytest -x tests/test_x.py`), not `uv run` or `poetry run`.
+Then ask: `traceback` (the original error, each frame's locals), `calls` (a function's calls
+grouped by caller, return values first), `call_tree` (`focus` keeps the paths to one function),
+`frame` (one call in full), `origin` (where a wrong value came from, across functions),
+`variable_history` (every assignment in a function, after a `run` with `scope` naming it). `find`
+and `neighbors` answer from the static graph, even for code that did not run.
+Stop recording once `calls` or `traceback` pinpoints the cause. Before choosing where to fix,
+check who calls the function you blame (`calls` lists its callers): the fix may belong there.
+Runs are kept: `runs` lists them, and every query takes a run id (default: the last).
 """
 
 FRAME_ARG = {"type": "integer", "description": "A frame id (#N in other answers)."}
@@ -62,7 +66,7 @@ PAGE_ARGS = {
 TOOLS = [
     {
         "name": "run",
-        "description": "Run a command under Luciole's recorder (Python 3.12+) and record what happens: every call of project code with its arguments and return value, every exception. Returns the exit status, the output, and the exceptions that escaped. Child processes are recorded too. With `scope`, also every assignment to the local variables of those functions (for `variable_history`).",
+        "description": "Run a command under Luciole's recorder (Python 3.12+) and record what happens: every call of project code with its arguments and return value, every exception. Returns the exit status, the output, and the exceptions that escaped. Child processes are recorded too. With `scope`, also every assignment to the local variables of those functions (for `variable_history`). Give the interpreter's command: `uv run`, `poetry run` and the like are not run (they may build an environment first).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -291,6 +295,9 @@ class Server:
             assigned[name] = value
         if not command:
             raise ToolError("empty command")
+        wrapper = Path(command[0]).name
+        if wrapper in WRAPPERS and (wrapper == "uvx" or command[1:2] == ["run"]):
+            raise ToolError(self.unwrap(command))
         cwd = Path(args.get("cwd") or self.root)
         if not cwd.is_absolute():
             cwd = self.root / cwd
@@ -320,7 +327,11 @@ class Server:
         timed_out = False
         try:
             process = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        except FileNotFoundError:
+            finish_run(folder, None)
+            raise ToolError(self.not_found(command, cwd)) from None
         except OSError as error:
+            finish_run(folder, None)
             raise ToolError(f"could not start {command[0]}: {error}") from None
         try:
             output, _ = process.communicate(timeout=timeout)
@@ -332,12 +343,53 @@ class Server:
         (folder / "output.txt").write_bytes(output)
         finish_run(folder, None if timed_out else process.returncode)
         status = f"stopped after {timeout:g} s (timeout)" if timed_out else f"exit status {process.returncode}"
-        lines = [f"run {run_id}: {shlex.join(command)}", f"  {status}, {elapsed:.2f} s"]
+        lines = [f"run {run_id}: {cut(shlex.join(command), LINE_CHARS)}", f"  {status}, {elapsed:.2f} s"]
         if scope:
             lines.append(f"  variable history (level 2) for {', '.join(scope)}: see `variable_history`")
-        lines += ["", "output:", indent(clip(output.decode(errors="replace")))]
-        lines += [""] + self.recorded(folder)
+        recorded = self.recorded(folder)
+        room = RUN_TEXT - sum(len(line) + 1 for line in lines + recorded) - 20
+        lines += ["", "output:", indent(clip(output.decode(errors="replace"), max(room, 800), folder / "output.txt"))]
+        lines += [""] + recorded
         return "\n".join(lines)
+
+    def unwrap(self, command: list[str]) -> str:
+        """Why `uv run pytest` is not run, and the command to run instead."""
+        rest = command[1:] if Path(command[0]).name == "uvx" else command[2:]
+        while rest and rest[0].startswith("-"):
+            option = rest.pop(0)
+            if "=" not in option and option in WRAPPER_OPTIONS and rest:
+                rest.pop(0)
+        wrapper = shlex.join(command[:1] if Path(command[0]).name == "uvx" else command[:2])
+        python = next((path for path in (self.root / ".venv" / "bin" / "python", self.root / ".venv" / "Scripts" / "python.exe") if path.exists()), None)
+        if rest and python is not None:
+            program = Path(rest[0]).name
+            if re.fullmatch(r"python[\d.]*(\.exe)?", program):
+                rest = [str(python.relative_to(self.root)), *rest[1:]]
+            elif program in ("pytest", "py.test"):
+                rest = [str(python.relative_to(self.root)), "-m", "pytest", *rest[1:]]
+        instead = f"`{shlex.join(rest)}`" if rest else "the program with the project's interpreter"
+        return (
+            f"not run: `{wrapper}` may build or sync an environment first (minutes of installing, and output that buries the program's). "
+            f"Run {instead} instead, with the interpreter of the environment that is already set up (Python 3.12+ to be recorded)."
+        )
+
+    def not_found(self, command: list[str], cwd: Path) -> str:
+        """`cfn-lint` is not on PATH: what to run instead."""
+        name = command[0]
+        if os.sep in name or "/" in name:
+            return f"could not start {name}: no such file in {cwd}"
+        problem = f"could not start {name}: it is not on PATH"
+        found = entry_point(self.root, name)
+        args = shlex.join(command[1:])
+        for folder in (self.root / ".venv" / "bin", self.root / ".venv" / "Scripts"):
+            if (folder / name).exists() or (folder / f"{name}.exe").exists():
+                return f"{problem}. The project's environment has it: `{shlex.join([str((folder / name).relative_to(self.root)), *command[1:]])}`"
+        if found and "." not in found[1]:
+            module, function = found
+            code = f"import sys; from {module} import {function}; sys.argv[0] = {name!r}; sys.exit({function}())"
+            return f"{problem}. It is the project's script for {module}:{function}; run it with the interpreter: `python -c {shlex.quote(code)} {args}`".rstrip()
+        module = name.replace("-", "_").removesuffix(".py")
+        return f"{problem}. If it is a Python package's command, run its module with the interpreter: `python -m {module} {args}`".rstrip()
 
     def recorded(self, folder: Path) -> list[str]:
         """What a run's traces hold: one line per process, and the exceptions nothing handled."""
@@ -354,17 +406,22 @@ class Server:
                 run = trace.run()
                 frames = trace.db.execute("SELECT COUNT(*) FROM frames").fetchone()[0]
                 calls += frames
-                lines.append(f"  pid {run['pid']}: {shlex.join(run['argv'])}  ({plural(frames, 'call')}, {exit_text(run)})")
+                if len(lines) <= 10:
+                    lines.append(f"  pid {run['pid']}: {cut(shlex.join(run['argv']), 200)}  ({plural(frames, 'call')}, {exit_text(run)})")
                 for e in trace.exceptions(1000)["exceptions"]:
                     if e["handled_in"] is None and e["frame"]:
                         uncaught.append((run["pid"], e))
+        if len(processes) > 10:
+            lines.append(f"  ... {plural(len(processes) - 10, 'more process')} (`runs` lists them)")
         if not calls:
             lines.append(f"no project code ran (the project root is {self.root})")
         if uncaught:
             lines += ["", "exceptions nothing in the project handled (`traceback` shows each frame's locals):"]
             for pid, e in uncaught[:10]:
                 where = f"{e['node']}:{e['line']} (#{e['frame']})"
-                lines.append(f"  pid {pid}: {e['type']}: {e['message']}  raised in {where}")
+                lines.append(f"  pid {pid}: {e['type']}: {first_line(e['message'])}  raised in {where}")
+            if any(e["type"] not in ("SystemExit", "KeyboardInterrupt") for _, e in uncaught):
+                lines.append("next: `traceback` shows the original error, the frames it went through and their locals")
         return lines
 
     def list_runs(self) -> str:
@@ -569,13 +626,47 @@ def required(args: dict, key: str):
     return args[key]
 
 
-def clip(text: str) -> str:
-    lines = text.rstrip("\n").splitlines()
+def clip(text: str, room: int, path: Path) -> str:
+    """A program's output in at most about `room` characters: its start and its end, whole lines
+    (each cut to LINE_CHARS), and where the rest is."""
+    lines = [cut(line, LINE_CHARS) for line in text.rstrip("\n").splitlines()]
     if not lines:
         return "(none)"
-    if len(lines) > OUTPUT_HEAD + OUTPUT_TAIL:
-        lines = lines[:OUTPUT_HEAD] + [f"... {plural(len(lines) - OUTPUT_HEAD - OUTPUT_TAIL, 'line')} ..."] + lines[-OUTPUT_TAIL:]
-    return "\n".join(line[:500] for line in lines)
+    if sum(len(line) + 3 for line in lines) <= room:
+        return "\n".join(lines)
+    head, size = [], 0
+    for line in lines:
+        if size + len(line) + 3 > room * OUTPUT_HEAD:
+            break
+        head.append(line)
+        size += len(line) + 3
+    tail = []
+    for line in reversed(lines[len(head) :]):
+        if size + len(line) + 3 > room:
+            break
+        tail.append(line)
+        size += len(line) + 3
+    left = lines[len(head) : len(lines) - len(tail)]
+    marker = f"... {plural(len(left), 'line')} cut ({sum(map(len, left)) // 1000 or 1} KB): the whole output is in {path}"
+    return "\n".join(head + [marker] + tail[::-1])
+
+
+def cut(text: str, chars: int) -> str:
+    return text if len(text) <= chars else text[: chars - 1] + "…"
+
+
+def entry_point(root: Path, name: str) -> tuple[str, str] | None:
+    """`(module, function)` of the project's console script `name`, from pyproject.toml,
+    setup.cfg or setup.py (`cfn-lint = "cfnlint.runner:main"`)."""
+    pattern = re.compile(rf"""^\s*["']?{re.escape(name)}["']?\s*=\s*["']?([\w.]+)\s*:\s*([\w.]+)""", re.M)
+    for file in ("pyproject.toml", "setup.cfg", "setup.py"):
+        try:
+            found = pattern.search((root / file).read_text(errors="replace"))
+        except OSError:
+            continue
+        if found:
+            return found.group(1), found.group(2)
+    return None
 
 
 def indent(text: str) -> str:

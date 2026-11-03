@@ -207,8 +207,8 @@ def test_mistakes_are_explained(client):
     assert error and "no runs yet" in text
     text, error = client.tool("neighbors", function="nope")
     assert error and "no function named nope" in text
-    text, error = client.tool("run", command="no-such-program-here")
-    assert error and "could not start" in text
+    text, error = client.tool("run", command="no-such-program-here --flag")
+    assert error and "could not start no-such-program-here: it is not on PATH" in text and "`python -m no_such_program_here --flag`" in text
     text, error = client.tool("summary", run="19990101-000000")
     assert error and "no run 19990101-000000" in text
 
@@ -347,6 +347,7 @@ def test_call_tree_folds_small_calls_and_focuses_on_a_function(client, shop):
 def test_traceback_starts_from_the_original_error(client, shop):
     text = client.ok("run", command=f"{PYTHON} shop.py")
     assert "__main__.OrderError: order failed  raised in shop:main:59" in text
+    assert text.endswith("next: `traceback` shows the original error, the frames it went through and their locals")
     post_mortem = client.ok("traceback")
     lines = post_mortem.splitlines()
     assert lines[0] == "!1 KeyError: 'ZZ'"
@@ -360,3 +361,30 @@ def test_traceback_starts_from_the_original_error(client, shop):
     assert lines[-1].startswith("next: `calls` function=shop:Catalog.price")
     outer = client.ok("traceback", exception=3)
     assert outer.startswith("!3 __main__.OrderError: order failed\n  the outermost of a chain of 3") and "  not handled" in outer
+
+
+@needs_monitoring
+def test_run_answers_stay_short(client, project):
+    (project / "noisy.py").write_text("for i in range(5000):\n    print(f'line {i} ' + 'x' * (i % 200))\n")
+    text = client.ok("run", command=f"{PYTHON} noisy.py")
+    assert len(text) < 4000
+    assert "  line 0 \n" in text and text.count("line 4999 ") == 1
+    assert re.search(r"\.\.\. \d+ lines cut \(\d+ KB\): the whole output is in .*output\.txt", text)
+
+
+def test_package_manager_wrappers_are_not_run(client, project):
+    (project / ".venv" / "bin").mkdir(parents=True)
+    (project / ".venv" / "bin" / "python").write_text("")
+    text, error = client.tool("run", command="uv run --with rich pytest -x tests")
+    assert error and "not run: `uv run` may build or sync an environment first" in text
+    assert "Run `.venv/bin/python -m pytest -x tests` instead" in text
+    text, error = client.tool("run", command="poetry run python cart.py")
+    assert error and "Run `.venv/bin/python cart.py` instead" in text
+    assert "no runs yet" in client.tool("runs")[0]  # nothing was started
+
+
+def test_a_missing_command_names_the_project_script(client, project):
+    (project / "pyproject.toml").write_text('[project]\nname = "cart"\n\n[project.scripts]\ncart-tool = "cart:checkout"\n')
+    text, error = client.tool("run", command="cart-tool 1")
+    assert error and "could not start cart-tool: it is not on PATH. It is the project's script for cart:checkout" in text
+    assert "from cart import checkout; sys.argv[0] = " in text
